@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from flashback_sampler.app.state import AppState, make_loopback_capture
+from flashback_sampler.app.widgets.buffer_track import BufferTrack
 
 
 # Duration presets for the checkout stepper. Keep in sync with the M6
@@ -57,8 +58,9 @@ class MainWindow(QMainWindow):
         self._previewing_id: str | None = None
 
         self.setWindowTitle("flashback-sampler")
-        self.setMinimumSize(720, 460)
-        self.resize(960, 560)
+        self.setMinimumSize(760, 560)
+        self.resize(980, 640)
+        self._device_name: str = "(NOT CAPTURING)"
 
         self._build_ui()
 
@@ -84,18 +86,9 @@ class MainWindow(QMainWindow):
         title.setProperty("role", "readout")
         vbox.addWidget(title)
 
-        # --- Live status row -------------------------------------------
-        live_label = QLabel("LIVE BUFFER")
-        live_label.setProperty("role", "label")
-        vbox.addWidget(live_label)
-
-        self._rms_label = QLabel("L  —   R  —")
-        self._rms_label.setProperty("role", "readout")
-        vbox.addWidget(self._rms_label)
-
-        self._buffered_label = QLabel("00:00 / 15:00   fill 0%")
-        self._buffered_label.setProperty("role", "label")
-        vbox.addWidget(self._buffered_label)
+        # --- Track 1: live buffer view --------------------------------
+        self._buffer_track = BufferTrack(channels=self._state.channels)
+        vbox.addWidget(self._buffer_track, 1)
 
         # --- Transport row ---------------------------------------------
         transport_row = QHBoxLayout()
@@ -183,19 +176,19 @@ class MainWindow(QMainWindow):
     def _tick(self) -> None:
         buf = self._state.buffer
         rms = buf.get_rms_levels(window_seconds=0.1)
-        if rms.size >= 2:
-            self._rms_label.setText(
-                f"L  {_db(rms[0]):>6}    R  {_db(rms[1]):>6}"
-            )
-        elif rms.size == 1:
-            self._rms_label.setText(f"L  {_db(rms[0]):>6}")
+        bins = buf.get_peak_bins(seconds=buf.duration, n_bins=360)
+
+        self._buffer_track.update_waveform(bins)
+        self._buffer_track.update_levels(rms)
+        self._buffer_track.update_readouts(
+            buffered_s=buf.buffered_seconds,
+            capacity_s=buf.duration,
+            sample_rate=buf.sample_rate,
+            channels=buf.channels,
+            device_name=self._device_name,
+        )
 
         bs = buf.buffered_seconds
-        cap = buf.duration
-        pct = 100.0 * bs / cap if cap else 0.0
-        self._buffered_label.setText(
-            f"{_mmss(bs)} / {_mmss(cap)}   fill {pct:5.1f}%"
-        )
 
         # Checkout is allowed whenever the buffer has anything in it,
         # regardless of whether capture is currently running — user can
@@ -221,6 +214,7 @@ class MainWindow(QMainWindow):
             self._state.capture.stop()
             self._capture_btn.setText("START CAPTURE")
             self._device_label.setText("DEV  (stopped)")
+            self._device_name = "(STOPPED, BUFFER HELD)"
             # NOTE: do NOT disable the checkout button — buffered audio
             # from before the stop is still valid to check out. The tick
             # loop will re-enable it on the next pass based on buffered
@@ -242,6 +236,7 @@ class MainWindow(QMainWindow):
         self._start_time = time.monotonic()
         self._capture_btn.setText("STOP CAPTURE")
         self._device_label.setText("DEV  LOOPBACK (DEFAULT SPEAKER)")
+        self._device_name = "LOOPBACK (DEFAULT SPEAKER)"
 
     # ------------------------------------------------------------------
     # Flush (destructive, confirmation required)
@@ -428,16 +423,6 @@ class MainWindow(QMainWindow):
         self._refresh_timer.stop()
         self._state.shutdown()
         super().closeEvent(event)
-
-
-def _db(rms: float) -> str:
-    """Format an RMS float as a small dBFS string, or '—' if silent."""
-    if rms <= 1e-6:
-        return "  —  "
-    import math
-
-    db = 20.0 * math.log10(max(rms, 1e-6))
-    return f"{db:+5.1f}"
 
 
 def _mmss(seconds: float) -> str:
