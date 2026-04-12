@@ -295,6 +295,51 @@ def test_get_peak_bins_channels_independent():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Flush
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_flush_resets_counters_and_content():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 800, channels=1))
+    assert buf.buffered_seconds > 0
+    buf.flush()
+    assert buf.total_written == 0
+    assert buf.write_pos == 0
+    assert buf.buffered_seconds == 0.0
+    assert np.all(buf.buffer == 0.0)
+
+
+def test_flush_on_empty_buffer_is_harmless():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.flush()
+    assert buf.total_written == 0
+
+
+def test_writer_works_immediately_after_flush():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 500, channels=1))
+    buf.flush()
+    # Next write should start from position 0 and be visible via get_latest
+    buf.write(ramp_block(0, 100, channels=1) + 42.0)
+    assert buf.total_written == 100
+    latest = buf.get_latest(0.1)
+    assert latest.shape == (100, 1)
+    assert latest[0, 0] == pytest.approx(42.0)
+    assert latest[-1, 0] == pytest.approx(141.0)
+
+
+def test_flush_after_wrap_fully_clears_ring():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    # Write past the ring boundary so wrap-around overwrites sample 0
+    buf.write(ramp_block(0, 1500, channels=1))
+    buf.flush()
+    assert np.all(buf.buffer == 0.0)
+    assert buf.write_pos == 0
+    assert buf.total_written == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Non-blocking reads (seqlock verification)
 # ─────────────────────────────────────────────────────────────────────────
 

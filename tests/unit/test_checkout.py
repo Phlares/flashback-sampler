@@ -208,6 +208,27 @@ def test_save_unknown_id_raises(tmp_path: Path):
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def test_flushing_buffer_does_not_invalidate_existing_checkouts():
+    """
+    Checkouts are immutable in-RAM snapshots. Flushing the ring buffer
+    must not touch a checkout's audio. This guards the isolation boundary
+    between the Checkout lifecycle and the buffer lifecycle.
+    """
+    buf = AudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=2)
+    buf.write(sine_block(0, 24_000, freq_hz=440.0, sample_rate=48_000, channels=2))
+    mgr = CheckoutManager(buffer=buf)
+    co = mgr.create(duration_s=0.2)
+    snapshot = co.audio.copy()
+
+    buf.flush()
+    assert buf.buffered_seconds == 0.0
+
+    # Checkout's audio ndarray is untouched
+    assert np.array_equal(co.audio, snapshot)
+    # Manager still reports it as active
+    assert len(mgr.list()) == 1
+
+
 def test_discard_removes_from_active_list():
     buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
