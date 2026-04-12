@@ -42,13 +42,15 @@ if missing:
 import sounddevice as sd
 from flashback_sampler.core.buffer import AudioCircularBuffer
 from flashback_sampler.core.capture import AudioCapture
+from flashback_sampler.core.loopback_capture import LoopbackCapture
 from flashback_sampler.core.playback import AudioPlayback, AudioExporter
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SAMPLE_RATE   = 48_000
-CHANNELS      = 1        # Use 1 for a plain microphone test; 2 for stereo
+CHANNELS      = 2        # 2 for stereo loopback from Windows speakers
 BUFFER_MINS   = 1        # Keep 1 minute for this quick test (less RAM)
-CAPTURE_DEVICE = None    # None = system default input; change to int index if needed
+CAPTURE_DEVICE = None    # resolved below — WASAPI default output (loopback)
+WASAPI_LOOPBACK = True   # capture what Windows is playing (no mic needed)
 
 # ── Level meter (console) ─────────────────────────────────────────────────────
 _last_rms = [0.0]
@@ -74,16 +76,6 @@ def main():
     print("  Keys: [p]lay  [s]ave  [l]ist devices  [1-9]  [d]iag  [q]uit")
     print("═"*55 + "\n")
 
-    # ── List devices so user can spot the right one ───────────────────────────
-    print("Available input devices:")
-    devices = sd.query_devices()
-    for i, dev in enumerate(devices):
-        if dev["max_input_channels"] > 0:
-            marker = "→" if dev == sd.query_devices(kind="input") else " "
-            print(f"  {marker} [{i:2d}] {dev['name']}  "
-                  f"({dev['max_input_channels']}ch in)")
-    print()
-
     # ── Allocate buffer ───────────────────────────────────────────────────────
     buf = AudioCircularBuffer(
         duration_seconds=BUFFER_MINS * 60,
@@ -93,13 +85,39 @@ def main():
     player = AudioPlayback(sample_rate=SAMPLE_RATE, channels=CHANNELS)
 
     # ── Start capture ─────────────────────────────────────────────────────────
-    cap = AudioCapture(
-        buffer=buf,
-        device=CAPTURE_DEVICE,
-        sample_rate=SAMPLE_RATE,
-        channels=CHANNELS,
-        on_level=level_callback,
-    )
+    # WASAPI loopback: uses `soundcard` (bypasses PortAudio, which doesn't
+    # ship loopback support in the stock sounddevice wheel).
+    # Mic / normal input: uses AudioCapture (sounddevice).
+    if WASAPI_LOOPBACK:
+        import soundcard as sc
+        default_speaker = sc.default_speaker()
+        print("\nAvailable speakers (WASAPI loopback sources):")
+        for s in sc.all_speakers():
+            marker = "→" if s.name == default_speaker.name else " "
+            print(f"  {marker} {s.name}")
+        print()
+        cap = LoopbackCapture(
+            buffer=buf,
+            speaker_name=None,   # None = default speaker
+            sample_rate=SAMPLE_RATE,
+            channels=CHANNELS,
+            on_level=level_callback,
+        )
+    else:
+        print("\nAvailable input devices:")
+        for i, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] > 0:
+                marker = "→" if dev == sd.query_devices(kind="input") else " "
+                print(f"  {marker} [{i:2d}] {dev['name']}  "
+                      f"({dev['max_input_channels']}ch in)")
+        print()
+        cap = AudioCapture(
+            buffer=buf,
+            device=CAPTURE_DEVICE,
+            sample_rate=SAMPLE_RATE,
+            channels=CHANNELS,
+            on_level=level_callback,
+        )
     cap.start()
 
     # ── Meter redraw thread ───────────────────────────────────────────────────
