@@ -73,19 +73,16 @@ class AudioCircularBuffer:
     def get_latest(self, seconds: float) -> np.ndarray:
         """Return the most recent `seconds` of audio as [N, channels] float32."""
         n_want = int(seconds * self.sample_rate)
+        # Snapshot state under lock — just indices, no copy.
         with self._lock:
             n_avail = min(self.total_written, self.buffer_size)
             n = min(n_want, n_avail)
             if n == 0:
                 return np.zeros((0, self.channels), dtype=np.float32)
-            start = (self.write_pos - n) % self.buffer_size
-            if start < self.write_pos:
-                return self.buffer[start:self.write_pos].copy()
-            else:
-                return np.concatenate([
-                    self.buffer[start:],
-                    self.buffer[:self.write_pos]
-                ])
+            total_snapshot = self.total_written
+            abs_end = total_snapshot
+            abs_start = abs_end - n
+        return self._copy_abs_range(abs_start, abs_end)
 
     def get_segment(self, start_ago: float, end_ago: float) -> np.ndarray:
         """
@@ -97,30 +94,84 @@ class AudioCircularBuffer:
         if start_ago <= end_ago:
             raise ValueError("start_ago must be greater than end_ago")
 
+        # Snapshot state under lock — just indices, no copy.
         with self._lock:
             n_avail = min(self.total_written, self.buffer_size)
             avail_secs = n_avail / self.sample_rate
-
-            # Clamp to what's actually available
             start_ago = min(start_ago, avail_secs)
             end_ago = max(end_ago, 0.0)
-
             n_start = int(start_ago * self.sample_rate)
             n_end = int(end_ago * self.sample_rate)
             span = n_start - n_end
             if span <= 0:
                 return np.zeros((0, self.channels), dtype=np.float32)
+            total_snapshot = self.total_written
+            abs_end = total_snapshot - n_end
+            abs_start = total_snapshot - n_start
+        return self._copy_abs_range(abs_start, abs_end)
 
-            abs_start = (self.write_pos - n_start) % self.buffer_size
-            abs_end = (self.write_pos - n_end) % self.buffer_size
+    # ------------------------------------------------------------------
+    # Seqlock-style non-blocking read
+    # ------------------------------------------------------------------
 
-            if abs_start < abs_end:
-                return self.buffer[abs_start:abs_end].copy()
-            else:
-                return np.concatenate([
-                    self.buffer[abs_start:],
-                    self.buffer[:abs_end]
+    def _copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
+        """
+        Copy samples from the ring by absolute sample index (total_written
+        space), WITHOUT holding the writer lock during the memcpy.
+
+        Algorithm:
+          1. Under lock, snapshot total_written, compute ring indices,
+             release lock.
+          2. Copy from the ring outside the lock. Writer may advance.
+          3. Re-acquire the lock briefly and verify the writer has not
+             lapped the slice start (i.e. not written more than
+             buffer_size - span samples since step 1).
+          4. If lapped, retry up to 3 times. Otherwise return the copy.
+
+        The writer's critical section stays tiny — just the index-update
+        and a small-block memcpy in write() — so even multi-megabyte reads
+        do not stall audio capture.
+        """
+        n = abs_end - abs_start
+        if n <= 0:
+            return np.zeros((0, self.channels), dtype=np.float32)
+
+        for _ in range(3):
+            # Step 1: snapshot indices under lock
+            with self._lock:
+                current = self.total_written
+                if abs_end > current:
+                    # Range extends past what's written — empty.
+                    return np.zeros((0, self.channels), dtype=np.float32)
+                if current - abs_start > self.buffer_size:
+                    # Slice already fully overwritten — empty.
+                    return np.zeros((0, self.channels), dtype=np.float32)
+                ring_start = abs_start % self.buffer_size
+                ring_end = abs_end % self.buffer_size
+
+            # Step 2: copy outside the lock (this is the expensive part)
+            if n == self.buffer_size:
+                # Full ring — ring_start and ring_end coincide; split at start.
+                chunk = np.concatenate([
+                    self.buffer[ring_start:].copy(),
+                    self.buffer[:ring_start].copy(),
                 ])
+            elif ring_end > ring_start:
+                chunk = self.buffer[ring_start:ring_end].copy()
+            else:
+                chunk = np.concatenate([
+                    self.buffer[ring_start:].copy(),
+                    self.buffer[:ring_end].copy(),
+                ])
+
+            # Step 3: verify the writer did not lap our slice
+            with self._lock:
+                if self.total_written - abs_start <= self.buffer_size:
+                    return chunk
+            # Step 4: lapped — retry
+
+        # Gave up after 3 attempts — return empty rather than stale/torn data.
+        return np.zeros((0, self.channels), dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Utility
@@ -141,6 +192,38 @@ class AudioCircularBuffer:
         if len(audio) == 0:
             return np.zeros(self.channels)
         return np.sqrt(np.mean(audio ** 2, axis=0))
+
+    def get_peak_bins(self, seconds: float, n_bins: int) -> np.ndarray:
+        """
+        Downsample the most recent `seconds` of audio into `n_bins` min/max
+        pairs for waveform rendering.
+
+        Returns float32 array of shape (n_bins, 2, channels) where
+        result[i, 0, c] = min and result[i, 1, c] = max of channel `c` in
+        bin `i`. An empty buffer returns a zero array of the requested shape.
+        """
+        if n_bins <= 0:
+            raise ValueError("n_bins must be positive")
+        out = np.zeros((n_bins, 2, self.channels), dtype=np.float32)
+        audio = self.get_latest(seconds)
+        n = len(audio)
+        if n == 0:
+            return out
+        # Distribute samples across bins as evenly as possible. Use integer
+        # slicing boundaries computed via linspace so the last bin always
+        # covers to the end.
+        edges = np.linspace(0, n, n_bins + 1, dtype=np.int64)
+        for i in range(n_bins):
+            a, b = int(edges[i]), int(edges[i + 1])
+            if b <= a:
+                # Fewer samples than bins — repeat the last value pair
+                if i > 0:
+                    out[i] = out[i - 1]
+                continue
+            chunk = audio[a:b]
+            out[i, 0] = chunk.min(axis=0)
+            out[i, 1] = chunk.max(axis=0)
+        return out
 
     def status(self) -> dict:
         return {
