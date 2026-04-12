@@ -1,0 +1,236 @@
+"""
+Ratify existing AudioCircularBuffer behavior via tests.
+
+These tests exercise the buffer as it is today (pre-seqlock refactor). They
+must keep passing after the M2 seqlock refactor with no semantic changes.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import numpy as np
+import pytest
+
+from flashback_sampler.core.buffer import AudioCircularBuffer
+from tests.fixtures.sine_source import ramp_block
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Basic construction
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_new_buffer_is_empty():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+    assert buf.buffered_seconds == 0.0
+    assert buf.is_full is False
+    assert buf.total_written == 0
+    assert buf.buffer_size == 1000
+    assert buf.buffer.shape == (1000, 2)
+    assert buf.buffer.dtype == np.float32
+
+
+def test_empty_buffer_get_latest_returns_zero_length():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+    result = buf.get_latest(0.5)
+    assert result.shape == (0, 2)
+
+
+def test_status_shape():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+    s = buf.status()
+    for key in (
+        "buffered_seconds",
+        "buffer_capacity_seconds",
+        "fill_percent",
+        "write_pos",
+        "total_written_samples",
+        "sample_rate",
+        "channels",
+        "memory_mb",
+    ):
+        assert key in s
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Write path
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_write_advances_position_and_total():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 400, channels=1))
+    assert buf.write_pos == 400
+    assert buf.total_written == 400
+    assert buf.buffered_seconds == pytest.approx(0.4)
+
+
+def test_write_wraps_around_end_of_ring():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 800, channels=1))  # fills 0..800
+    buf.write(ramp_block(800, 400, channels=1))  # wraps: 800..1000 then 0..200
+    assert buf.write_pos == 200
+    assert buf.total_written == 1200
+    assert buf.is_full is True
+    # Sample at absolute position 1000 should have overwritten the sample at
+    # ring index 0 — check we see `1000.0` there, not `0.0`.
+    assert buf.buffer[0, 0] == pytest.approx(1000.0)
+    assert buf.buffer[199, 0] == pytest.approx(1199.0)
+    # The un-wrapped tail (200..800) should still hold its original content.
+    assert buf.buffer[200, 0] == pytest.approx(200.0)
+    assert buf.buffer[799, 0] == pytest.approx(799.0)
+
+
+def test_write_mono_1d_gets_reshaped():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    mono = np.arange(100, dtype=np.float32)
+    buf.write(mono)
+    assert buf.write_pos == 100
+    assert buf.buffer[50, 0] == 50.0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# get_latest
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_get_latest_below_buffered_returns_exact_tail():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 500, channels=1))
+    # Last 100 samples should be 400..500
+    latest = buf.get_latest(0.1)
+    assert latest.shape == (100, 1)
+    assert latest[0, 0] == pytest.approx(400.0)
+    assert latest[-1, 0] == pytest.approx(499.0)
+
+
+def test_get_latest_more_than_buffered_is_clamped():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 300, channels=1))
+    latest = buf.get_latest(1.0)  # asked for 1000, only have 300
+    assert latest.shape == (300, 1)
+    assert latest[0, 0] == pytest.approx(0.0)
+    assert latest[-1, 0] == pytest.approx(299.0)
+
+
+def test_get_latest_across_wrap_boundary():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 1200, channels=1))  # fills + wraps
+    # Buffer now holds samples 200..1200 (the oldest 200 were overwritten)
+    latest = buf.get_latest(1.0)
+    assert latest.shape == (1000, 1)
+    assert latest[0, 0] == pytest.approx(200.0)
+    assert latest[-1, 0] == pytest.approx(1199.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# get_segment
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_get_segment_non_wrapped():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 900, channels=1))
+    # Segment from 500ms ago to 100ms ago = samples 400..800
+    seg = buf.get_segment(start_ago=0.5, end_ago=0.1)
+    assert seg.shape[0] == 400
+    assert seg[0, 0] == pytest.approx(400.0)
+    assert seg[-1, 0] == pytest.approx(799.0)
+
+
+def test_get_segment_raises_on_inverted_boundaries():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 500, channels=1))
+    with pytest.raises(ValueError):
+        buf.get_segment(start_ago=0.1, end_ago=0.5)  # start must be > end
+
+
+def test_get_segment_across_wrap():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 1500, channels=1))  # holds 500..1500
+    # 800ms ago -> sample 700; 200ms ago -> sample 1300. Span: 600 samples.
+    seg = buf.get_segment(start_ago=0.8, end_ago=0.2)
+    assert seg.shape[0] == 600
+    assert seg[0, 0] == pytest.approx(700.0)
+    assert seg[-1, 0] == pytest.approx(1299.0)
+
+
+def test_get_segment_clamped_to_available():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 300, channels=1))
+    # Ask for 500ms ago when only 300ms exists — should clamp
+    seg = buf.get_segment(start_ago=0.5, end_ago=0.0)
+    # clamped start = 0.3s ago = sample 0; end at sample 300
+    assert seg.shape[0] == 300
+    assert seg[0, 0] == pytest.approx(0.0)
+    assert seg[-1, 0] == pytest.approx(299.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# RMS / levels
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_get_rms_levels_silence_is_zero():
+    buf = AudioCircularBuffer(duration_seconds=0.1, sample_rate=1000, channels=2)
+    buf.write(np.zeros((50, 2), dtype=np.float32))
+    rms = buf.get_rms_levels(window_seconds=0.05)
+    assert rms.shape == (2,)
+    assert np.allclose(rms, 0.0)
+
+
+def test_get_rms_levels_sine_is_sqrt_half_amplitude():
+    buf = AudioCircularBuffer(duration_seconds=0.1, sample_rate=48_000, channels=1)
+    # Full-amplitude sine — RMS should be ~ 1/sqrt(2)
+    t = np.arange(4800) / 48_000
+    sine = np.sin(2 * np.pi * 440.0 * t).astype(np.float32)[:, None]
+    buf.write(sine)
+    rms = buf.get_rms_levels(window_seconds=0.1)
+    assert rms.shape == (1,)
+    assert rms[0] == pytest.approx(1.0 / np.sqrt(2.0), rel=0.02)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Concurrency smoke test
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(5)
+def test_writer_and_reader_concurrent_no_corruption():
+    """
+    Pound the buffer from a writer thread while the main thread takes
+    repeated get_segment snapshots. Neither should crash, deadlock, or
+    return malformed arrays.
+    """
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=48_000, channels=2)
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer():
+        try:
+            pos = 0
+            while not stop.is_set():
+                buf.write(ramp_block(pos, 512, channels=2))
+                pos += 512
+        except BaseException as e:  # pragma: no cover
+            errors.append(e)
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 0.5
+        reads = 0
+        while time.monotonic() < deadline:
+            seg = buf.get_segment(start_ago=0.3, end_ago=0.05)
+            # Shape sanity — should never come back malformed
+            assert seg.ndim == 2
+            assert seg.shape[1] == 2
+            reads += 1
+        assert reads > 10  # we actually did some work
+    finally:
+        stop.set()
+        t.join(timeout=1.0)
+
+    assert errors == []

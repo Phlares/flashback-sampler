@@ -76,6 +76,8 @@ class AudioCircularBuffer:
         with self._lock:
             n_avail = min(self.total_written, self.buffer_size)
             n = min(n_want, n_avail)
+            if n == 0:
+                return np.zeros((0, self.channels), dtype=np.float32)
             start = (self.write_pos - n) % self.buffer_size
             if start < self.write_pos:
                 return self.buffer[start:self.write_pos].copy()
@@ -105,6 +107,9 @@ class AudioCircularBuffer:
 
             n_start = int(start_ago * self.sample_rate)
             n_end = int(end_ago * self.sample_rate)
+            span = n_start - n_end
+            if span <= 0:
+                return np.zeros((0, self.channels), dtype=np.float32)
 
             abs_start = (self.write_pos - n_start) % self.buffer_size
             abs_end = (self.write_pos - n_end) % self.buffer_size
