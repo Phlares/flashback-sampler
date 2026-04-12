@@ -186,6 +186,21 @@ class AudioCircularBuffer:
     def is_full(self) -> bool:
         return self.total_written >= self.buffer_size
 
+    def flush(self) -> None:
+        """
+        Discard all currently buffered audio. Resets write_pos and
+        total_written to zero and zeros out the ring.
+
+        Does NOT affect any Checkout snapshots already taken — those live
+        in their own ndarrays and are immutable after creation. Only the
+        ring's own contents are cleared. Safe to call during capture:
+        the writer's next write() will start filling from index 0 again.
+        """
+        with self._lock:
+            self.buffer.fill(0.0)
+            self.write_pos = 0
+            self.total_written = 0
+
     def get_rms_levels(self, window_seconds: float = 0.1) -> np.ndarray:
         """RMS level per channel for the last window_seconds (for metering)."""
         audio = self.get_latest(window_seconds)

@@ -126,6 +126,14 @@ class MainWindow(QMainWindow):
         transport_row.addWidget(self._dur_up_btn)
 
         transport_row.addStretch(1)
+
+        # Destructive action — separated from the primary transport and
+        # requires a confirmation dialog. Does NOT invalidate active
+        # checkouts; they live in their own RAM snapshots.
+        self._flush_btn = QPushButton("FLUSH BUFFER")
+        self._flush_btn.clicked.connect(self._flush_buffer)
+        transport_row.addWidget(self._flush_btn)
+
         vbox.addLayout(transport_row)
 
         # --- Checkout list ---------------------------------------------
@@ -234,6 +242,37 @@ class MainWindow(QMainWindow):
         self._start_time = time.monotonic()
         self._capture_btn.setText("STOP CAPTURE")
         self._device_label.setText("DEV  LOOPBACK (DEFAULT SPEAKER)")
+
+    # ------------------------------------------------------------------
+    # Flush (destructive, confirmation required)
+    # ------------------------------------------------------------------
+
+    def _flush_buffer(self) -> None:
+        bs = self._state.buffer.buffered_seconds
+        if bs <= 0.1:
+            # Nothing to flush — silently no-op to avoid a pointless modal
+            return
+        active_count = len(self._state.checkout_manager.list())
+        detail = (
+            f"This will discard {_mmss(bs)} of buffered audio.\n\n"
+            "Capture will continue from empty if it is running.\n"
+        )
+        if active_count > 0:
+            detail += (
+                f"\n{active_count} checked-out clip"
+                f"{'s' if active_count != 1 else ''} will NOT be affected — "
+                "checkouts are immutable snapshots held in their own memory."
+            )
+        reply = QMessageBox.question(
+            self,
+            "Flush ring buffer?",
+            detail,
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._state.buffer.flush()
 
     # ------------------------------------------------------------------
     # Duration stepper
