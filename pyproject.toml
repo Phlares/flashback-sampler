@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashback-sampler"
+version = "0.0.1"
+description = "Circular audio buffer that retains the past several minutes of audio for sampling, playback, and export."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Phlares" }]
+dependencies = [
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+]
+
+[project.optional-dependencies]
+pi = ["RPi.GPIO"]
+
+[tool.setuptools.packages.find]
+include = ["flashback_sampler*"]
+exclude = ["tests*"]
