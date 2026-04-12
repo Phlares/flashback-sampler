@@ -57,3 +57,66 @@ def test_checkout_from_live_buffer_then_bind_to_scrub_player():
     out = np.zeros((100, 1), dtype=np.float32)
     st.scrub_player._audio_callback(out, 100, None, None)
     assert np.allclose(out[:, 0], ramp[:100, 0])
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CLI argument parsing
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_cli_defaults():
+    from flashback_sampler.app.main import _parse_args
+
+    args = _parse_args([])
+    assert args.buffer_minutes == 15.0
+    assert args.sample_rate == 48_000
+    assert args.channels == 2
+
+
+def test_cli_custom_buffer_for_rollover_testing():
+    from flashback_sampler.app.main import _parse_args
+
+    args = _parse_args(["--buffer-minutes", "0.5"])
+    assert args.buffer_minutes == 0.5
+    # AppState constructor accepts the computed seconds
+    st = AppState(
+        buffer_seconds=args.buffer_minutes * 60,
+        sample_rate=args.sample_rate,
+        channels=args.channels,
+    )
+    assert st.buffer.duration == 30.0
+
+
+def test_cli_mono_override():
+    from flashback_sampler.app.main import _parse_args
+
+    args = _parse_args(["--channels", "1", "--sample-rate", "16000"])
+    assert args.channels == 1
+    assert args.sample_rate == 16_000
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Duration preset stepper logic (headless — tests the module constants
+# and math; no Qt widget required)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_duration_presets_are_monotonic():
+    from flashback_sampler.app.main_window import DURATION_PRESETS_S
+
+    # Must be strictly ascending so the stepper makes sense
+    for a, b in zip(DURATION_PRESETS_S, DURATION_PRESETS_S[1:]):
+        assert a < b
+    # Must contain the default (3:00) and cover 0:15 up to 15:00
+    assert 15.0 in DURATION_PRESETS_S
+    assert 180.0 in DURATION_PRESETS_S
+    assert 900.0 in DURATION_PRESETS_S
+
+
+def test_duration_default_index_maps_to_three_minutes():
+    from flashback_sampler.app.main_window import (
+        DEFAULT_DURATION_INDEX,
+        DURATION_PRESETS_S,
+    )
+
+    assert DURATION_PRESETS_S[DEFAULT_DURATION_INDEX] == 180.0
