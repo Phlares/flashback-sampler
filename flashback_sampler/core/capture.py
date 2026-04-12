@@ -44,6 +44,7 @@ class AudioCapture:
         channels: int = 2,
         blocksize: int = 1024,                 # frames per callback ~21ms
         on_level: Optional[Callable] = None,   # optional metering callback
+        extra_settings: Optional[object] = None,  # e.g. sd.WasapiSettings(loopback=True)
     ):
         self.buffer = buffer
         self.device = device
@@ -51,6 +52,7 @@ class AudioCapture:
         self.channels = channels
         self.blocksize = blocksize
         self.on_level = on_level
+        self.extra_settings = extra_settings
 
         self._stream: Optional[sd.InputStream] = None
         self._running = False
@@ -72,6 +74,7 @@ class AudioCapture:
             blocksize=self.blocksize,
             callback=self._callback,
             latency="low",
+            extra_settings=self.extra_settings,
         )
         self._stream.start()
         self._running = True
