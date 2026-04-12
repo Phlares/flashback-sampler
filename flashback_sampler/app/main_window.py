@@ -40,15 +40,25 @@ from PySide6.QtWidgets import (
 from flashback_sampler.app.state import AppState, make_loopback_capture
 
 
+# Duration presets for the checkout stepper. Keep in sync with the M6
+# 8-preset cluster from the frontend-design spec.
+DURATION_PRESETS_S: tuple[float, ...] = (
+    15.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0,
+)
+DEFAULT_DURATION_INDEX = 4  # 180 s = 3:00
+
+
 class MainWindow(QMainWindow):
     def __init__(self, state: AppState):
         super().__init__()
         self._state = state
         self._start_time: float = 0.0
+        self._duration_idx = DEFAULT_DURATION_INDEX
+        self._previewing_id: str | None = None
 
         self.setWindowTitle("flashback-sampler")
-        self.setMinimumSize(720, 400)
-        self.resize(960, 520)
+        self.setMinimumSize(720, 460)
+        self.resize(960, 560)
 
         self._build_ui()
 
@@ -96,11 +106,24 @@ class MainWindow(QMainWindow):
         self._capture_btn.clicked.connect(self._toggle_capture)
         transport_row.addWidget(self._capture_btn)
 
-        self._checkout_btn = QPushButton("CHECK OUT 3:00")
+        self._checkout_btn = QPushButton(
+            f"CHECK OUT {_mmss(DURATION_PRESETS_S[DEFAULT_DURATION_INDEX])}"
+        )
         self._checkout_btn.setProperty("variant", "primary")
         self._checkout_btn.clicked.connect(self._create_checkout)
         self._checkout_btn.setEnabled(False)
         transport_row.addWidget(self._checkout_btn)
+
+        # Minimal duration stepper — full 8-preset cluster lands in M6
+        self._dur_down_btn = QPushButton("–")
+        self._dur_down_btn.setFixedWidth(36)
+        self._dur_down_btn.clicked.connect(lambda: self._step_duration(-1))
+        transport_row.addWidget(self._dur_down_btn)
+
+        self._dur_up_btn = QPushButton("+")
+        self._dur_up_btn.setFixedWidth(36)
+        self._dur_up_btn.clicked.connect(lambda: self._step_duration(+1))
+        transport_row.addWidget(self._dur_up_btn)
 
         transport_row.addStretch(1)
         vbox.addLayout(transport_row)
@@ -116,7 +139,14 @@ class MainWindow(QMainWindow):
 
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
+
+        self._preview_btn = QPushButton("▶  PREVIEW")
+        self._preview_btn.clicked.connect(self._toggle_preview)
+        self._preview_btn.setEnabled(False)
+        action_row.addWidget(self._preview_btn)
+
         self._save_btn = QPushButton("SAVE")
+        self._save_btn.setProperty("variant", "primary")
         self._save_btn.clicked.connect(self._save_selected)
         self._save_btn.setEnabled(False)
         action_row.addWidget(self._save_btn)
@@ -159,11 +189,20 @@ class MainWindow(QMainWindow):
             f"{_mmss(bs)} / {_mmss(cap)}   fill {pct:5.1f}%"
         )
 
+        # Checkout is allowed whenever the buffer has anything in it,
+        # regardless of whether capture is currently running — user can
+        # stop capture and still pull a clip from what they recorded.
+        self._checkout_btn.setEnabled(bs > 0.5)
+
         if self._state.is_capturing():
-            self._checkout_btn.setEnabled(bs > 0.5)
             cap_src = self._state.capture
             xruns = cap_src.xrun_count() if hasattr(cap_src, "xrun_count") else 0
             self._xrun_label.setText(f"XR  {xruns:02d}")
+
+        # Auto-flip the preview button back when playback drains naturally
+        if self._previewing_id is not None and not self._state.scrub_player.is_playing:
+            self._previewing_id = None
+            self._preview_btn.setText("▶  PREVIEW")
 
     # ------------------------------------------------------------------
     # Capture control
@@ -173,8 +212,11 @@ class MainWindow(QMainWindow):
         if self._state.is_capturing():
             self._state.capture.stop()
             self._capture_btn.setText("START CAPTURE")
-            self._checkout_btn.setEnabled(False)
             self._device_label.setText("DEV  (stopped)")
+            # NOTE: do NOT disable the checkout button — buffered audio
+            # from before the stop is still valid to check out. The tick
+            # loop will re-enable it on the next pass based on buffered
+            # seconds.
             return
 
         try:
@@ -194,12 +236,30 @@ class MainWindow(QMainWindow):
         self._device_label.setText("DEV  LOOPBACK (DEFAULT SPEAKER)")
 
     # ------------------------------------------------------------------
+    # Duration stepper
+    # ------------------------------------------------------------------
+
+    def _step_duration(self, delta: int) -> None:
+        new_idx = max(0, min(len(DURATION_PRESETS_S) - 1, self._duration_idx + delta))
+        if new_idx == self._duration_idx:
+            return
+        self._duration_idx = new_idx
+        self._checkout_btn.setText(
+            f"CHECK OUT {_mmss(DURATION_PRESETS_S[self._duration_idx])}"
+        )
+
+    def _current_duration_s(self) -> float:
+        return DURATION_PRESETS_S[self._duration_idx]
+
+    # ------------------------------------------------------------------
     # Checkout control
     # ------------------------------------------------------------------
 
     def _create_checkout(self) -> None:
         try:
-            co = self._state.checkout_manager.create(duration_s=180.0)
+            co = self._state.checkout_manager.create(
+                duration_s=self._current_duration_s()
+            )
         except Exception as e:
             QMessageBox.warning(self, "Checkout failed", str(e))
             return
@@ -236,9 +296,55 @@ class MainWindow(QMainWindow):
         return item.data(Qt.UserRole) if item else None
 
     def _on_selection_changed(self) -> None:
-        has = self._selected_checkout_id() is not None
+        sel = self._selected_checkout_id()
+        has = sel is not None
         self._save_btn.setEnabled(has)
         self._discard_btn.setEnabled(has)
+        self._preview_btn.setEnabled(has)
+        # If the user switches selection mid-preview, stop the old playback
+        if self._previewing_id is not None and sel != self._previewing_id:
+            self._stop_preview()
+
+    # ------------------------------------------------------------------
+    # Preview — wire ScrubPlayer to the selected checkout
+    # ------------------------------------------------------------------
+
+    def _toggle_preview(self) -> None:
+        if self._previewing_id is not None:
+            self._stop_preview()
+            return
+
+        cid = self._selected_checkout_id()
+        if cid is None:
+            return
+        try:
+            co = self._state.checkout_manager.get(cid)
+        except KeyError:
+            return
+
+        player = self._state.scrub_player
+        try:
+            player.bind(co.audio)
+            player.open()  # lazy — first call creates the output stream
+            player.play()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Preview failed",
+                f"Could not start preview playback:\n\n{e}",
+            )
+            return
+
+        self._previewing_id = cid
+        self._preview_btn.setText("■  STOP PREVIEW")
+
+    def _stop_preview(self) -> None:
+        try:
+            self._state.scrub_player.pause()
+        except Exception:  # pragma: no cover
+            pass
+        self._previewing_id = None
+        self._preview_btn.setText("▶  PREVIEW")
 
     def _save_selected(self) -> None:
         cid = self._selected_checkout_id()
@@ -266,6 +372,8 @@ class MainWindow(QMainWindow):
         cid = self._selected_checkout_id()
         if cid is None:
             return
+        if self._previewing_id == cid:
+            self._stop_preview()
         try:
             self._state.checkout_manager.discard(cid)
         except Exception as e:
