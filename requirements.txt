@@ -1,0 +1,6 @@
+numpy>=1.24
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# Raspberry Pi only — install manually on Pi:
+#   pip install RPi.GPIO
