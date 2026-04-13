@@ -10,7 +10,7 @@ AudioCircularBuffer.get_peak_bins().
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, QLineF, QRectF
+from PySide6.QtCore import Qt, QLineF, QPointF, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -156,32 +156,47 @@ class WaveformView(QWidget):
                 p.drawLines(lines)
 
         # ── 6. Section band (optional, drawn BEHIND the playhead) ────
+        # Anti-alias these overlays so sub-pixel edges stay smooth even
+        # when the rotary or scrub cursor sits between whole pixels.
+        # The peak-bin waveform above was drawn with AA off for crisp
+        # 1 px lines; we toggle AA on locally for the ember overlays.
         if self._sel_start is not None and self._sel_end is not None:
             s = max(0.0, min(1.0, float(self._sel_start)))
             e = max(0.0, min(1.0, float(self._sel_end)))
             if e > s:
                 x1 = inner_x + s * inner_w
                 x2 = inner_x + e * inner_w
-                # Translucent ember fill
+                p.setRenderHint(QPainter.Antialiasing, True)
+                # Translucent ember fill — float-precise rect
                 fill = QColor(EREBUS["ember"])
                 fill.setAlpha(int(0.14 * 255))
                 p.fillRect(
-                    int(x1), inner_y, max(1, int(x2 - x1)), inner_h, fill
+                    QRectF(x1, float(inner_y), max(0.5, x2 - x1), float(inner_h)),
+                    fill,
                 )
                 # Dashed start edge (informational)
                 dash_pen = QPen(QColor(EREBUS["ember"]), 1, Qt.DashLine)
                 p.setPen(dash_pen)
-                p.drawLine(int(x1), inner_y, int(x1), inner_y + inner_h)
+                p.drawLine(
+                    QLineF(x1, float(inner_y), x1, float(inner_y + inner_h))
+                )
                 # Solid end edge (where the commit lands)
                 p.setPen(QPen(QColor(EREBUS["ember"]), 2))
-                p.drawLine(int(x2), inner_y, int(x2), inner_y + inner_h)
+                p.drawLine(
+                    QLineF(x2, float(inner_y), x2, float(inner_y + inner_h))
+                )
+                p.setRenderHint(QPainter.Antialiasing, False)
 
         # ── 7. Playhead (scrub cursor for Track 2 clip playback) ─────
         if self._playhead_frac is not None:
             frac = max(0.0, min(1.0, float(self._playhead_frac)))
-            x = int(inner_x + frac * inner_w)
-            p.setPen(QPen(QColor(EREBUS["ember"]), 1))
-            p.drawLine(x, inner_y, x, inner_y + inner_h)
+            x = inner_x + frac * inner_w
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(QColor(EREBUS["ember"]), 1.2))
+            p.drawLine(
+                QLineF(x, float(inner_y), x, float(inner_y + inner_h))
+            )
+            p.setRenderHint(QPainter.Antialiasing, False)
 
         p.end()
 
