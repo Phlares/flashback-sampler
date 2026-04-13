@@ -2,9 +2,10 @@
 AppState — the root object graph for the Qt application layer.
 
 Owns one buffer, one capture source, one checkout manager, and one scrub
-player. Instantiated once in main.py and shared across controllers and
-widgets. Nothing in this file imports PySide6 — it's a plain Python
-container so unit tests can drive it headless.
+player, plus the currently-selected capture/output device specs.
+Instantiated once in main.py and shared across widgets. Nothing in this
+file imports PySide6 — it's a plain Python container so unit tests can
+drive it headless.
 """
 
 from __future__ import annotations
@@ -12,6 +13,13 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
+from flashback_sampler.app.audio_devices import (
+    CaptureDevice,
+    OutputDevice,
+    build_capture_source,
+    default_capture_device,
+    default_output_device,
+)
 from flashback_sampler.core.buffer import AudioCircularBuffer
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.scrub_player import ScrubPlayer
@@ -49,9 +57,16 @@ class AppState:
             sample_rate=sample_rate,
             channels=channels,
         )
-        # Capture is lazy — wired by the CaptureController when the user
+        # Capture is lazy — wired by the main window when the user
         # clicks "Start Capture" for the first time.
         self._capture = None
+
+        # Device selections. Start with the system defaults and let the
+        # main window override them from config.json on startup.
+        self.capture_spec: Optional[CaptureDevice] = default_capture_device()
+        self.output_spec: Optional[OutputDevice] = default_output_device()
+        if self.output_spec is not None:
+            self.scrub_player.set_device(self.output_spec.id)
 
     @property
     def capture(self):
@@ -63,6 +78,29 @@ class AppState:
     def is_capturing(self) -> bool:
         return self._capture is not None and getattr(
             self._capture, "_running", False
+        )
+
+    def set_capture_spec(self, spec: CaptureDevice) -> None:
+        self.capture_spec = spec
+
+    def set_output_spec(self, spec: OutputDevice) -> None:
+        self.output_spec = spec
+        self.scrub_player.set_device(spec.id)
+
+    def build_capture(self):
+        """
+        Instantiate a capture source from the current capture_spec.
+        Raises if no spec is selected.
+        """
+        if self.capture_spec is None:
+            raise RuntimeError(
+                "No capture device selected. Pick one from the Audio menu."
+            )
+        return build_capture_source(
+            device=self.capture_spec,
+            buffer=self.buffer,
+            sample_rate=self.sample_rate,
+            channels=self.channels,
         )
 
     def shutdown(self) -> None:
@@ -80,20 +118,12 @@ class AppState:
 
 def make_loopback_capture(state: AppState):
     """
-    Construct the platform-appropriate default capture source. On Windows
-    this is the soundcard-based WASAPI loopback. Other platforms raise —
-    the UI will disable the Start Capture button until a non-default
-    source is wired.
+    DEPRECATED: use `state.build_capture()` instead. Kept for any leftover
+    callers from before M7.
     """
     if sys.platform != "win32":
         raise RuntimeError(
             "Loopback capture is Windows-only for now. "
             "Use a mic/line-in CaptureSource on this platform."
         )
-    from flashback_sampler.core.loopback_capture import LoopbackCapture
-
-    return LoopbackCapture(
-        buffer=state.buffer,
-        sample_rate=state.sample_rate,
-        channels=state.channels,
-    )
+    return state.build_capture()

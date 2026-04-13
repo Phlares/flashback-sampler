@@ -32,21 +32,25 @@ CLI flags:
 
 ## Flow
 
-1. **START CAPTURE** — begins WASAPI loopback capture from the default speaker. Watch the dBFS level meter and the fill % climb.
-2. **–** / **+** next to **CHECK OUT** — pick a clip duration: 0:15, 0:30, 1:00, 2:00, 3:00, 5:00, 10:00, 15:00.
-3. **CHECK OUT** — pulls that many seconds into a frozen in-RAM snapshot. Ring buffer keeps recording the whole time.
-4. Select the clip in the list → **▶ PREVIEW** to audition, **STOP PREVIEW** / natural drain to end playback.
-5. **SAVE** opens a file dialog (WAV or FLAC). **DISCARD** drops it. Repeat.
-6. **FLUSH BUFFER** discards everything currently buffered (with confirmation). Does not touch existing checkouts.
+1. **Audio menu** → **Capture Source** — pick which speaker to loopback (Windows WASAPI) or which input device (mic / line-in). Defaults to your system default speaker. The choice is persisted to `%APPDATA%\flashback-sampler\config.json`.
+2. **Audio menu** → **Preview Output** — pick which device to audition checkouts on. **Set this to a different device than your capture source** (e.g. headphones while capturing speakers) to avoid the preview feeding back into the ring. Also persisted.
+3. **START CAPTURE** — begins capturing from the selected source. Watch the dBFS level meter and the fill % climb.
+4. **RotaryKnob** labeled ANCHOR — drag to scrub the prospective checkout back in time through the live buffer. Double-click to snap to NOW. Hub readout shows `−MM:SS` offset.
+5. **DurationPreset** cluster — click a cell (0:15 / 0:30 / 1:00 / 2:00 / 3:00 / 5:00 / 10:00 / 15:00). The CHECK OUT button label updates live.
+6. **Section view** on the live waveform — translucent ember band shows exactly which range of audio CHECK OUT will pull, with a dashed edge at the start and a solid edge at the end.
+7. **CHECK OUT** — snapshots the selection into a frozen in-RAM clip. Ring buffer keeps recording throughout.
+8. Select the clip in the list → **▶ PREVIEW** plays it through the selected Preview Output. Click on the Track 2 waveform to seek.
+9. **SAVE** opens a file dialog (WAV or FLAC). **DISCARD** drops it.
+10. **FLUSH BUFFER** discards everything currently buffered (with confirmation). Does not touch existing checkouts.
 
 Checkouts are valid even after stopping capture — you can pull a clip from buffered audio without an active stream.
 
-## Known limitations (being addressed in later milestones)
+## Known limitations
 
-- **Preview plays through the same output device that loopback capture is listening to**, so the preview gets fed back into the ring. This is harmless (you can tell because the level meter pulses in time with the preview), but if you create a second checkout while a first is previewing, the new one will contain a mix of the original audio and the preview of the first. Landing in **M7** — device picker with separate input/output selection.
-- No waveform view, no trim handles on checkouts, no rotary knob. Placeholder rectangular Qt widgets until **M5 / M6**.
+- **Loopback capture is Windows-only.** Mic / line-in via `sounddevice` works cross-platform.
+- No trim handles on the checkout clip yet — click-to-seek works, but you can't yet drag in/out markers to shorten a clip before saving. Backlog item B1.
 - Typography is fallback Consolas until **M8** when Monaspace Krypton/Neon/Argon are bundled.
-- Loopback is Windows-only. Mic/line-in via `sounddevice` works cross-platform but isn't wired into the UI yet.
+- No settings dialog yet — buffer duration is CLI-only via `--buffer-minutes`. Backlog item B5.
 
 ## Architecture
 

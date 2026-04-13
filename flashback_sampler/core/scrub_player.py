@@ -109,6 +109,30 @@ class ScrubPlayer:
     def seek(self, seconds: float) -> None:
         self.seek_samples(int(round(seconds * self.sample_rate)))
 
+    def set_device(self, device: int | str | None) -> None:
+        """
+        Change the output device. If the underlying sounddevice
+        OutputStream is currently open, it is closed so that the next
+        call to open()/play() will create a fresh stream bound to the
+        new device. Called from the UI thread.
+        """
+        with self._lock:
+            if device == self.device:
+                return
+            self.device = device
+            had_stream = self._stream is not None
+            was_playing = self._playing
+        if had_stream:
+            try:
+                self.close()
+            except Exception:  # pragma: no cover
+                pass
+        # Leave the source bound and cursor in place so the next
+        # play() resumes from where we were.
+        if was_playing:
+            with self._lock:
+                self._playing = False
+
     # ------------------------------------------------------------------
     # Read-only state
     # ------------------------------------------------------------------
