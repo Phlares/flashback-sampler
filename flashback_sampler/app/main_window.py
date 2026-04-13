@@ -212,24 +212,34 @@ class MainWindow(QMainWindow):
     def _tick(self) -> None:
         buf = self._state.buffer
         rms = buf.get_rms_levels(window_seconds=0.1)
+        bs = buf.buffered_seconds
         bins = buf.get_peak_bins(seconds=buf.duration, n_bins=360)
 
         self._buffer_track.update_waveform(bins)
         self._buffer_track.update_levels(rms)
         self._buffer_track.update_readouts(
-            buffered_s=buf.buffered_seconds,
+            buffered_s=bs,
             capacity_s=buf.duration,
             sample_rate=buf.sample_rate,
             channels=buf.channels,
             device_name=self._device_name,
         )
 
-        # Ghost anchor playhead on Track 1 — shows where the next
-        # checkout would start pulling from. frac = 1 (far right) means
-        # "right now"; frac = 0 (far left) is "capacity seconds ago."
-        cap = buf.duration
-        if cap > 0 and self._anchor_offset_s > 0:
-            frac = 1.0 - (self._anchor_offset_s / cap)
+        # Clamp the rotary's max so every position yields a FULL-duration
+        # clip. rotary=0 means "last `duration` seconds"; rotary=max
+        # means "oldest `duration` seconds currently buffered." If
+        # buffered < duration, the max collapses to 0 (the whole
+        # clip is already clamped to what exists).
+        current_dur = self._current_duration_s()
+        rotary_max = max(0.0, bs - current_dur)
+        self._rotary.setRange(0.0, max(0.001, rotary_max))
+
+        # Ghost anchor playhead on Track 1 — shows where the END of the
+        # next checkout would land. rotary=0 → end is "now" (frac=1);
+        # rotary=max → end is `buffered_s - max` ago (frac ≈
+        # current_dur/bs → the end of the oldest full-duration window).
+        if bs > 0 and self._anchor_offset_s > 0:
+            frac = 1.0 - (self._anchor_offset_s / bs)
             self._buffer_track.set_anchor_playhead(max(0.0, min(1.0, frac)))
         else:
             self._buffer_track.set_anchor_playhead(None)

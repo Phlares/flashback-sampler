@@ -119,19 +119,38 @@ class CheckoutManager:
         if anchor_offset_s < 0:
             raise ValueError("anchor_offset_s must be non-negative")
 
-        if anchor_offset_s <= 0:
+        # Defensive clamp: the rotary UI can be dragged to anchor offsets
+        # up to the buffer's capacity, but early in capture only a few
+        # seconds of audio actually exist. We clamp the effective offset
+        # to leave at least a tiny span of audio for get_segment to
+        # return — concretely, offset_max = max(0, buffered_s - 1 sample)
+        # so the window always contains at least one sample when
+        # buffered_s > 0. get_segment then internally clamps the older
+        # boundary to what's actually available, so the returned clip is
+        # everything the ring has from the anchor going backward.
+        buffered_s = self._buffer.buffered_seconds
+        one_sample = 1.0 / float(self._buffer.sample_rate)
+        effective_offset_s = min(
+            float(anchor_offset_s),
+            max(0.0, buffered_s - one_sample),
+        )
+
+        if effective_offset_s <= 0:
             # Fast path — unchanged from before
             audio = self._buffer.get_latest(duration_s)
         else:
-            # Resolve to a segment ending `anchor_offset_s` seconds ago
+            # Resolve to a segment ending `effective_offset_s` seconds ago.
+            # get_segment clamps start_ago to avail_secs, so a duration
+            # request larger than what remains before the offset yields
+            # everything up to the offset point.
             audio = self._buffer.get_segment(
-                start_ago=anchor_offset_s + duration_s,
-                end_ago=anchor_offset_s,
+                start_ago=effective_offset_s + duration_s,
+                end_ago=effective_offset_s,
             )
         # Snapshot abs sample range under the buffer's lock (cheap) for metadata
         with self._buffer._lock:  # noqa: SLF001 — internal coordination
             total = self._buffer.total_written
-        abs_end = total - int(anchor_offset_s * self._buffer.sample_rate)
+        abs_end = total - int(effective_offset_s * self._buffer.sample_rate)
         abs_start = abs_end - audio.shape[0]
 
         # Check caps atomically with insertion

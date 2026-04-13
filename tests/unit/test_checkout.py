@@ -96,6 +96,62 @@ def test_checkout_anchor_offset_zero_matches_default_path():
     assert a.audio[-1, 0] == pytest.approx(799.0)
 
 
+def test_checkout_anchor_offset_clamped_when_past_buffered():
+    """
+    If the user asks for a clip ending further in the past than the
+    buffer has seen, clamp the effective anchor so the slice still
+    contains audio. Matches the UI expectation: dragging the rotary
+    past the rolling edge anchors "as far back as the buffer allows."
+    """
+    # Buffer capacity is 10 s; only 2 s of audio buffered so far.
+    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 2000, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+
+    # Ask for a 0.5 s clip ending 5 s ago. There's only 2 s in the ring.
+    # effective_offset clamps to just under buffered_s (≈1.999s). That
+    # gives get_segment a window of [≈2.499s ago, ≈1.999s ago]; the older
+    # bound clamps down to 2.0s, leaving a ~1-sample span. Not useful
+    # but non-empty — the UI is expected to prevent this edge case by
+    # clamping the rotary max to buffered_s on every tick; this test
+    # only verifies the core doesn't return zero-length from a valid
+    # user gesture.
+    co = mgr.create(duration_s=0.5, anchor_offset_s=5.0)
+    assert co.audio.shape[0] > 0
+
+
+def test_checkout_anchor_offset_just_inside_buffered_pulls_earliest_audio():
+    """
+    With the rotary dialed all the way back (offset ≈ buffered_s), the
+    returned clip points at the OLDEST audio in the ring. A ramp
+    starting at 0 should yield sample values near 0 at the clip's head.
+    """
+    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 3000, channels=1))  # 3 s buffered
+    mgr = CheckoutManager(buffer=buf)
+
+    co = mgr.create(duration_s=1.0, anchor_offset_s=3.0)
+    assert co.audio.shape[0] > 0
+    # First sample should come from the start of the ramp (~0.0)
+    assert co.audio[0, 0] == pytest.approx(0.0, abs=3.0)
+
+
+def test_checkout_anchor_offset_mid_buffer_pulls_middle_audio():
+    """
+    Rotary halfway back: offset = 1.5 s on a 3 s buffer, duration = 1 s.
+    Clip window = [2.5 s ago, 1.5 s ago]. With a 0..2999 ramp at 1 kHz,
+    that maps to samples [500..1500). First sample ≈ 500, last ≈ 1499.
+    """
+    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 3000, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+
+    co = mgr.create(duration_s=1.0, anchor_offset_s=1.5)
+    assert co.audio.shape == (1000, 1)
+    assert co.audio[0, 0] == pytest.approx(500.0)
+    assert co.audio[-1, 0] == pytest.approx(1499.0)
+
+
 def test_checkout_anchor_offset_rejects_negative():
     buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
