@@ -119,3 +119,43 @@ def test_setting_none_checkout_clears_overlay(bound_checkout_track):
     track.set_checkout(None)
     assert track.current_checkout_id() is None
     assert track.trim_range_seconds() is None
+
+
+def test_set_cursor_without_trimmed_preview_is_absolute(bound_checkout_track):
+    track, co = bound_checkout_track
+    # With no preview_trimmed, set_cursor(seconds) uses seconds as
+    # absolute clip position — the playhead lands exactly there.
+    track.set_preview_trimmed(False)
+    track.set_cursor(1.0)
+    # Playhead frac = 1.0 / 4.0 = 0.25
+    assert track._wave._playhead_frac == pytest.approx(0.25)
+
+
+def test_set_cursor_with_trimmed_preview_offsets_by_trim_in(bound_checkout_track):
+    """
+    When previewing trimmed audio, ScrubPlayer.cursor_seconds is
+    relative to trim-in. CheckoutTrack.set_cursor should add trim_in
+    to produce the absolute clip position for the playhead.
+    """
+    track, co = bound_checkout_track
+    # Set a trim: frac 0.25..0.75 -> samples 48000..144000 -> seconds 1..3
+    track._on_trim_drag_committed(0.25, 0.75)
+    track.set_preview_trimmed(True)
+    # 0.5 seconds into the trimmed region = absolute 1.5 s in full clip
+    track.set_cursor(0.5)
+    # Playhead frac = 1.5 / 4.0 = 0.375
+    assert track._wave._playhead_frac == pytest.approx(0.375)
+
+
+def test_set_cursor_with_trimmed_preview_respects_zero_trim_in(bound_checkout_track):
+    """
+    If trim_out is set but trim_in is 0, cursor seconds are already
+    absolute from the start of the clip.
+    """
+    track, co = bound_checkout_track
+    co.trim_in_samples = 0
+    co.trim_out_samples = 96000  # first 2 seconds
+    track.set_preview_trimmed(True)
+    track.set_cursor(1.0)
+    # 1.0 s into the clip, no offset
+    assert track._wave._playhead_frac == pytest.approx(0.25)
