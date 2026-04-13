@@ -188,6 +188,12 @@ IID_IActivateAudioInterfaceCompletionHandler = GUID.from_string(
 IID_IActivateAudioInterfaceAsyncOperation = GUID.from_string(
     "{72A22D78-CDE4-431D-B8CC-843A71199B6D}"
 )
+# Marker interface — claiming it tells COM the handler is safe to invoke
+# from any apartment. ActivateAudioInterfaceAsync QIs for this during
+# the call; returning E_NOINTERFACE surfaces as E_ILLEGAL_METHOD_CALL.
+IID_IAgileObject = GUID.from_string(
+    "{94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90}"
+)
 
 
 # The magic device path for process-loopback activation
@@ -228,8 +234,12 @@ class AUDIOCLIENT_ACTIVATION_PARAMS(Structure):
     ]
 
 
-# Minimal PROPVARIANT — we only populate VT_BLOB
-VT_BLOB = 0x0011
+# Minimal PROPVARIANT — we only populate VT_BLOB.
+# VARENUM values: VT_UI1 is 0x0011; VT_BLOB is 0x0041. Using the wrong
+# discriminator makes ActivateAudioInterfaceAsync return
+# E_ILLEGAL_METHOD_CALL (0x8000000E) because the activation params
+# blob never gets unpacked.
+VT_BLOB = 0x0041
 
 
 class BLOB(Structure):
@@ -465,6 +475,80 @@ class PROCESSENTRY32W(Structure):
     ]
 
 
+def _snapshot_process_map() -> dict[int, tuple[int, str]]:
+    """Return {pid: (parent_pid, exe_name)} for every running process."""
+    if not IS_WINDOWS:
+        return {}
+    _load_win_dlls()
+    assert _kernel32 is not None
+
+    CreateToolhelp32Snapshot = _kernel32.CreateToolhelp32Snapshot
+    CreateToolhelp32Snapshot.argtypes = [c_uint32, c_uint32]
+    CreateToolhelp32Snapshot.restype = c_void_p
+    Process32FirstW = _kernel32.Process32FirstW
+    Process32FirstW.argtypes = [c_void_p, POINTER(PROCESSENTRY32W)]
+    Process32FirstW.restype = c_int
+    Process32NextW = _kernel32.Process32NextW
+    Process32NextW.argtypes = [c_void_p, POINTER(PROCESSENTRY32W)]
+    Process32NextW.restype = c_int
+    CloseHandle = _kernel32.CloseHandle
+    CloseHandle.argtypes = [c_void_p]
+    CloseHandle.restype = c_int
+
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or (isinstance(snap, int) and snap == INVALID_HANDLE_VALUE):
+        return {}
+
+    entry = PROCESSENTRY32W()
+    entry.dwSize = sizeof(PROCESSENTRY32W)
+    out: dict[int, tuple[int, str]] = {}
+    try:
+        if not Process32FirstW(snap, byref(entry)):
+            return {}
+        while True:
+            pid = int(entry.th32ProcessID)
+            parent = int(entry.th32ParentProcessID)
+            name = str(entry.szExeFile) or ""
+            if pid > 0:
+                out[pid] = (parent, name)
+            if not Process32NextW(snap, byref(entry)):
+                break
+    finally:
+        CloseHandle(snap)
+    return out
+
+
+def resolve_audio_root_pid(pid: int) -> int:
+    """
+    Walk up the process tree from `pid` to the highest ancestor sharing
+    the same exe name. Apps like Spotify / Discord / Chrome launch
+    multiple child processes sharing the same exe; only the root's
+    audio session belongs to the whole tree. Returns the original pid
+    if no same-named ancestor exists or the map lookup fails.
+    """
+    if not IS_WINDOWS:
+        return pid
+    procs = _snapshot_process_map()
+    if pid not in procs:
+        return pid
+    _parent, name = procs[pid]
+    name_lc = name.lower()
+    current = pid
+    visited: set[int] = set()
+    while True:
+        if current in visited:
+            break
+        visited.add(current)
+        parent_pid, _ = procs.get(current, (0, ""))
+        if parent_pid <= 0 or parent_pid not in procs:
+            break
+        _, parent_name = procs[parent_pid]
+        if parent_name.lower() != name_lc:
+            break
+        current = parent_pid
+    return current
+
+
 def enumerate_audio_processes(limit: int = 4096) -> list[tuple[int, str]]:
     """
     Enumerate every running process via CreateToolhelp32Snapshot.
@@ -576,8 +660,10 @@ class _CompletionHandler:
         if not riid_ptr or not ppv_ptr:
             return E_POINTER
         riid = riid_ptr.contents
-        if riid.equals(IID_IUnknown) or riid.equals(
-            IID_IActivateAudioInterfaceCompletionHandler
+        if (
+            riid.equals(IID_IUnknown)
+            or riid.equals(IID_IActivateAudioInterfaceCompletionHandler)
+            or riid.equals(IID_IAgileObject)
         ):
             ppv_ptr[0] = ctypes.addressof(self._object)
             self._ref_count += 1
@@ -646,7 +732,14 @@ class ProcessLoopbackCapture:
                 "(May 2020) or newer."
             )
         self.buffer = buffer
-        self.pid = int(pid)
+        requested = int(pid)
+        resolved = resolve_audio_root_pid(requested)
+        if resolved != requested:
+            print(
+                f"[ProcessLoopbackCapture] pid {requested} resolved to "
+                f"root ancestor pid {resolved} (same-named parent chain)"
+            )
+        self.pid = resolved
         self.sample_rate = int(sample_rate)
         self.channels = int(channels)
         self.include_tree = bool(include_tree)
@@ -657,6 +750,15 @@ class ProcessLoopbackCapture:
         self._running = False
         self._dropped_callbacks = 0
         self._last_error: Optional[str] = None
+        # Format actually accepted by IAudioClient::Initialize — set
+        # inside _run_captured_com when negotiation picks a winner.
+        # Defaults mirror the first candidate so if someone reads
+        # these before start() fires they see the intended shape.
+        self._capture_format_tag: int = WAVE_FORMAT_IEEE_FLOAT
+        self._capture_bits: int = 32
+        self._capture_sample_rate: int = self.sample_rate
+        self._capture_channels: int = self.channels
+        self._capture_bytes_per_frame: int = 4 * self.channels
 
     # ------------------------------------------------------------------
     # CaptureSource protocol
@@ -667,6 +769,9 @@ class ProcessLoopbackCapture:
 
     def xrun_count(self) -> int:
         return int(self._dropped_callbacks)
+
+    def last_error(self) -> Optional[str]:
+        return self._last_error
 
     def start(self) -> None:
         if self._running:
@@ -708,25 +813,43 @@ class ProcessLoopbackCapture:
         assert _mmdevapi is not None
         assert _kernel32 is not None
 
-        # Initialize COM for this thread (MTA — ActivateAudioInterfaceAsync
-        # requires multithreaded apartment).
-        CoInitializeEx = _ole32.CoInitializeEx
-        CoInitializeEx.argtypes = [c_void_p, c_uint32]
-        CoInitializeEx.restype = c_long
-        CoUninitialize = _ole32.CoUninitialize
-        CoUninitialize.argtypes = []
-        CoUninitialize.restype = None
+        # ActivateAudioInterfaceAsync requires a Windows Runtime apartment
+        # (RoInitialize), not plain CoInitializeEx. With COM-only init,
+        # the call returns E_ILLEGAL_METHOD_CALL (0x8000000E). RoInitialize
+        # lives in combase.dll; it's a superset of CoInitializeEx and
+        # CoUninitialize is the paired teardown for both.
+        try:
+            combase = ctypes.WinDLL("combase.dll")
+            RoInitialize = combase.RoInitialize
+            RoInitialize.argtypes = [c_uint32]
+            RoInitialize.restype = c_long
+            RoUninitialize = combase.RoUninitialize
+            RoUninitialize.argtypes = []
+            RoUninitialize.restype = None
+        except OSError as e:
+            self._last_error = f"combase.dll unavailable: {e}"
+            self._running = False
+            return
 
-        hr = CoInitializeEx(None, COINIT_MULTITHREADED)
-        if _hresult_failed(hr) and hr != 0x80010106:  # RPC_E_CHANGED_MODE is ok
-            self._last_error = f"CoInitializeEx failed: {_hex_hr(hr)}"
+        RO_INIT_MULTITHREADED = 1
+        hr = RoInitialize(RO_INIT_MULTITHREADED)
+        # S_FALSE (1) = already initialized on this thread — ok
+        # RPC_E_CHANGED_MODE (0x80010106) = already STA — also continue, but
+        # the async op will likely fail; surface it so we can see what happened
+        if _hresult_failed(hr) and hr != 0x80010106:
+            self._last_error = f"RoInitialize failed: {_hex_hr(hr)}"
             self._running = False
             return
 
         try:
             self._run_captured_com()
         finally:
-            CoUninitialize()
+            if self._last_error:
+                print(
+                    f"[ProcessLoopbackCapture pid={self.pid}] "
+                    f"{self._last_error}"
+                )
+            RoUninitialize()
 
     def _run_captured_com(self) -> None:
         assert _mmdevapi is not None
@@ -831,33 +954,71 @@ class ProcessLoopbackCapture:
         REFTIME_MS = 10_000  # 1 ms = 10_000 units of 100 ns
         buffer_duration = 200 * REFTIME_MS
 
-        # Build WAVEFORMATEX for the requested format
-        fmt = WAVEFORMATEX()
-        fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT
-        fmt.nChannels = self.channels
-        fmt.nSamplesPerSec = self.sample_rate
-        fmt.wBitsPerSample = 32
-        fmt.nBlockAlign = (fmt.nChannels * fmt.wBitsPerSample) // 8
-        fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign
-        fmt.cbSize = 0
+        # Process loopback activation gives you an IAudioClient with NO
+        # device attached, so GetMixFormat is not meaningful — the caller
+        # must request a format explicitly. Windows only accepts a
+        # handful of shapes here; we walk a fallback chain from our
+        # preferred float32 down to the Microsoft ApplicationLoopback
+        # sample's known-good PCM16 @ 44100. The winning format is
+        # remembered so the capture loop can size frames correctly and
+        # convert int16 → float32 at write time.
+        candidates: list[tuple[int, int, int, int]] = [
+            # (format_tag, bits, sample_rate, channels)
+            (WAVE_FORMAT_IEEE_FLOAT, 32, self.sample_rate, self.channels),
+            (WAVE_FORMAT_IEEE_FLOAT, 32, 48_000, 2),
+            (WAVE_FORMAT_IEEE_FLOAT, 32, 44_100, 2),
+            (WAVE_FORMAT_PCM,        16, 44_100, 2),
+            (WAVE_FORMAT_PCM,        16, 48_000, 2),
+        ]
+        chosen: tuple[int, int, int, int] | None = None
+        last_hr = 0
+        for tag, bits, sr, ch in candidates:
+            fmt = WAVEFORMATEX()
+            fmt.wFormatTag = tag
+            fmt.nChannels = ch
+            fmt.nSamplesPerSec = sr
+            fmt.wBitsPerSample = bits
+            fmt.nBlockAlign = (ch * bits) // 8
+            fmt.nAvgBytesPerSec = sr * fmt.nBlockAlign
+            fmt.cbSize = 0
+            hr = ac_vtbl.Initialize(
+                ac_ptr,
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                buffer_duration,
+                0,
+                pointer(fmt),
+                None,
+            )
+            if not _hresult_failed(hr):
+                chosen = (tag, bits, sr, ch)
+                break
+            last_hr = hr
 
-        hr = ac_vtbl.Initialize(
-            ac_ptr,
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            buffer_duration,
-            0,
-            pointer(fmt),
-            None,
-        )
-        if _hresult_failed(hr):
+        if chosen is None:
             self._last_error = (
-                f"IAudioClient::Initialize failed: {_hex_hr(hr)} "
-                f"(may need to accept the native mix format — M12.2 work)"
+                f"IAudioClient::Initialize rejected every format "
+                f"(last hr {_hex_hr(last_hr)})"
             )
             ac_vtbl.Release(ac_ptr)
             self._running = False
             return
+
+        tag, bits, sr, ch = chosen
+        # Record the format so the capture loop + sample-rate-aware
+        # callers (the slot's ring buffer size math) can stay in sync.
+        self._capture_format_tag = tag
+        self._capture_bits = bits
+        self._capture_sample_rate = sr
+        self._capture_channels = ch
+        bytes_per_sample = bits // 8
+        self._capture_bytes_per_frame = bytes_per_sample * ch
+        print(
+            f"[ProcessLoopbackCapture pid={self.pid}] "
+            f"format negotiated: "
+            f"{'float32' if tag == WAVE_FORMAT_IEEE_FLOAT else 'int16'} "
+            f"{sr}Hz {ch}ch"
+        )
 
         # ── Event handle for buffer-ready callback ──────────────────
         CreateEventW = _kernel32.CreateEventW
@@ -902,12 +1063,25 @@ class ProcessLoopbackCapture:
         WaitForSingleObject.argtypes = [c_void_p, c_uint32]
         WaitForSingleObject.restype = c_uint32
 
+        print(
+            f"[ProcessLoopbackCapture pid={self.pid}] "
+            f"capture loop entered — awaiting buffer events"
+        )
+
         # ── Capture loop ────────────────────────────────────────────
+        total_frames = 0
+        next_log_at = 48_000  # log after ~1 s of audio
         try:
             while not self._stop_event.is_set():
                 rc = WaitForSingleObject(buffer_event, 500)
                 if rc == WAIT_TIMEOUT:
                     self._dropped_callbacks += 1
+                    if self._dropped_callbacks in (1, 4, 20):
+                        print(
+                            f"[ProcessLoopbackCapture pid={self.pid}] "
+                            f"no buffer event in 500 ms "
+                            f"(timeouts={self._dropped_callbacks})"
+                        )
                     continue
                 if rc != WAIT_OBJECT_0:
                     break
@@ -937,14 +1111,57 @@ class ProcessLoopbackCapture:
                         break
                     if n_frames.value > 0:
                         n = n_frames.value
-                        bytes_total = n * self.channels * 4  # float32
+                        bytes_total = n * self._capture_bytes_per_frame
                         arr = (ctypes.c_ubyte * bytes_total).from_address(
                             int(data_ptr.value)
                         )
-                        np_view = np.frombuffer(arr, dtype=np.float32).reshape(
-                            n, self.channels
-                        )
-                        self.buffer.write(np_view.copy())
+                        if self._capture_format_tag == WAVE_FORMAT_IEEE_FLOAT:
+                            raw = np.frombuffer(
+                                arr, dtype=np.float32
+                            ).reshape(n, self._capture_channels)
+                        else:
+                            # PCM16 fallback — convert to float32 [-1, 1]
+                            raw = (
+                                np.frombuffer(arr, dtype=np.int16)
+                                .reshape(n, self._capture_channels)
+                                .astype(np.float32)
+                                / 32768.0
+                            )
+
+                        silent = bool(flags.value & 0x2)  # AUDCLNT_BUFFERFLAGS_SILENT
+                        if silent:
+                            raw = np.zeros_like(raw)
+
+                        # Conform to the ring buffer's shape (channels
+                        # only — sample rate negotiation is reported
+                        # verbatim and the buffer's SR is expected to
+                        # match since build_capture_source constructs
+                        # both from the slot's spec; if Windows forces
+                        # a different SR we write at source rate, which
+                        # means the buffer's "seconds" readout is mildly
+                        # wrong but the audio still records).
+                        buf_ch = self.channels
+                        if self._capture_channels == buf_ch:
+                            np_view = raw
+                        elif self._capture_channels == 2 and buf_ch == 1:
+                            np_view = raw.mean(axis=1, keepdims=True)
+                        elif self._capture_channels == 1 and buf_ch == 2:
+                            np_view = np.repeat(raw, 2, axis=1)
+                        else:
+                            # Generic downmix / truncate
+                            np_view = raw[:, :buf_ch] if raw.shape[1] >= buf_ch else np.pad(
+                                raw, ((0, 0), (0, buf_ch - raw.shape[1]))
+                            )
+                        self.buffer.write(np.ascontiguousarray(np_view))
+                        total_frames += n
+                        if total_frames >= next_log_at:
+                            peak = float(np.max(np.abs(np_view))) if n else 0.0
+                            print(
+                                f"[ProcessLoopbackCapture pid={self.pid}] "
+                                f"frames={total_frames} last_pkt={n} "
+                                f"peak={peak:.4f} silent={silent}"
+                            )
+                            next_log_at = total_frames + 48_000 * 5  # every 5 s
                         if self.on_level:
                             rms = np.sqrt(np.mean(np_view ** 2, axis=0))
                             self.on_level(rms)

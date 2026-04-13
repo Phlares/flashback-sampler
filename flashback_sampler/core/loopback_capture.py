@@ -122,6 +122,9 @@ class LoopbackCapture:
     def xrun_count(self) -> int:
         return int(self._dropped_callbacks)
 
+    def last_error(self) -> str | None:
+        return getattr(self, "_last_error", None)
+
     def _run(self) -> None:
         if _IS_WIN:
             # S_OK (0) or S_FALSE (1) both fine; RPC_E_CHANGED_MODE (0x80010106)
