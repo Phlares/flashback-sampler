@@ -19,7 +19,10 @@ from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 
 from flashback_sampler.app.theme import EREBUS
-from flashback_sampler.app.widgets.waveform_view import WaveformView
+from flashback_sampler.app.widgets.waveform_view import (
+    WaveformView,
+    _paint_selection_duration_label,
+)
 
 
 # How close (in widget pixels) the cursor must be to an existing
@@ -286,4 +289,17 @@ class SelectableWaveform(WaveformView):
         p.setPen(edge_pen)
         p.drawLine(QLineF(x1, float(inner_y), x1, float(inner_y + inner_h)))
         p.drawLine(QLineF(x2, float(inner_y), x2, float(inner_y + inner_h)))
+
+        # Duration label centered on the band — uses the timeline
+        # total_seconds to convert the frac span to real time.
+        if self._timeline_total_s > 0:
+            dur = (e - s) * self._timeline_total_s
+            _paint_selection_duration_label(
+                p,
+                x1=x1,
+                x2=x2,
+                y_top=float(inner_y),
+                y_bot=float(inner_y + inner_h),
+                duration_seconds=dur,
+            )
         p.end()

@@ -46,6 +46,7 @@ from flashback_sampler.app.settings_dialog import (
     load_settings_from_config,
 )
 from flashback_sampler.app.state import AppState
+from flashback_sampler.app.time_format import format_time_cs, format_time_signed_cs
 from flashback_sampler.app.widgets.buffer_track import (
     BufferTrack,
     compute_anchor_section,
@@ -184,7 +185,7 @@ class MainWindow(QMainWindow):
         right_col.setSpacing(8)
         right_col.addStretch(1)
         self._checkout_btn = TactileButton(
-            f"CHECK OUT {_mmss(self._presets.active_duration())}",
+            f"CHECK OUT {format_time_cs(self._presets.active_duration())}",
             variant="primary",
         )
         self._checkout_btn.setMinimumHeight(60)
@@ -826,7 +827,7 @@ class MainWindow(QMainWindow):
             return
         active_count = len(self._state.checkout_manager.list())
         detail = (
-            f"This will discard {_mmss(bs)} of buffered audio.\n\n"
+            f"This will discard {format_time_cs(bs)} of buffered audio.\n\n"
             "Capture will continue from empty if it is running.\n"
         )
         if active_count > 0:
@@ -851,7 +852,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_duration_changed(self, dur_s: float) -> None:
-        self._checkout_btn.setText(f"CHECK OUT {_mmss(dur_s)}")
+        self._checkout_btn.setText(f"CHECK OUT {format_time_cs(dur_s)}")
 
     def _current_duration_s(self) -> float:
         return self._presets.active_duration()
@@ -861,7 +862,7 @@ class MainWindow(QMainWindow):
         if self._anchor_offset_s < 0.5:
             self._rotary.setHubText("NOW")
         else:
-            self._rotary.setHubText(f"-{_mmss(self._anchor_offset_s)}")
+            self._rotary.setHubText(format_time_signed_cs(-self._anchor_offset_s))
 
     def _refresh_rotary_range(self) -> None:
         """Rotary max follows the buffer capacity (in seconds)."""
@@ -1091,10 +1092,3 @@ class _ChassisWidget(QWidget):
         paint_topo_background(painter, self.width(), self.height())
         painter.end()
         super().paintEvent(event)
-
-
-def _mmss(seconds: float) -> str:
-    seconds = max(0.0, float(seconds))
-    m = int(seconds // 60)
-    s = int(seconds - m * 60)
-    return f"{m:02d}:{s:02d}"

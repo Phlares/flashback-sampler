@@ -15,6 +15,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.time_format import format_time_cs
 
 
 class WaveformView(QWidget):
@@ -127,12 +128,18 @@ class WaveformView(QWidget):
 
         # ── 3. Inner content region (with label strip + timeline) ───
         label_strip = 18
-        timeline_strip = 16 if self._timeline_total_s > 0 else 0
+        # Timeline strip wraps its own internal padding — 24 px gives
+        # the tick marks (~7 px) plus a 7 pt label line room to breathe
+        # without colliding with the widget's bottom border.
+        timeline_strip = 24 if self._timeline_total_s > 0 else 0
+        # Reserve a 4 px gutter between the waveform and the timeline
+        # so the bottommost peak-bin pixel doesn't kiss the tick row.
+        timeline_gutter = 4 if timeline_strip > 0 else 0
         inner_top = 1 + label_strip
         inner_x = 6
         inner_w = w - inner_x - 6
         inner_y = inner_top
-        inner_h = h - inner_top - 6 - timeline_strip
+        inner_h = h - inner_top - 6 - timeline_strip - timeline_gutter
         if inner_w <= 2 or inner_h <= 2:
             p.end()
             return
@@ -213,6 +220,17 @@ class WaveformView(QWidget):
                 p.drawLine(
                     QLineF(x2, float(inner_y), x2, float(inner_y + inner_h))
                 )
+                # Duration label centered inside the band
+                if self._timeline_total_s > 0:
+                    dur = (e - s) * self._timeline_total_s
+                    _paint_selection_duration_label(
+                        p,
+                        x1=x1,
+                        x2=x2,
+                        y_top=float(inner_y),
+                        y_bot=float(inner_y + inner_h),
+                        duration_seconds=dur,
+                    )
                 p.setRenderHint(QPainter.Antialiasing, False)
 
         # ── 7. Playhead (scrub cursor for Track 2 clip playback) ─────
@@ -231,14 +249,68 @@ class WaveformView(QWidget):
             _paint_timeline(
                 p,
                 x0=inner_x,
-                y0=inner_y + inner_h + 2,
+                y0=inner_y + inner_h + timeline_gutter,
                 width=inner_w,
-                height=timeline_strip - 2,
+                height=timeline_strip,
                 total_seconds=self._timeline_total_s,
                 anchor=self._timeline_anchor,
             )
 
         p.end()
+
+
+def _paint_selection_duration_label(
+    p: QPainter,
+    x1: float,
+    x2: float,
+    y_top: float,
+    y_bot: float,
+    duration_seconds: float,
+) -> None:
+    """
+    Paint a centered duration label inside a selection band.
+
+    The text floats near the top of the band in Monaspace Neon at 8 pt
+    ember. If the band is too narrow to fit the text comfortably
+    (width < ~48 px) the label is skipped so it never overlaps the
+    edge markers.
+    """
+    band_w = x2 - x1
+    if band_w < 48:
+        return
+    label = format_time_cs(max(0.0, float(duration_seconds)))
+
+    p.save()
+    font = p.font()
+    font.setPointSize(8)
+    font.setBold(True)
+    p.setFont(font)
+    fm = p.fontMetrics()
+    label_w = fm.horizontalAdvance(label) + 8
+    label_h = fm.height() + 2
+    # Skip if the label itself is wider than the band
+    if label_w > band_w - 4:
+        p.restore()
+        return
+
+    # Position: top-center of the band
+    cx = (x1 + x2) / 2.0
+    rect = QRectF(
+        cx - label_w / 2.0,
+        y_top + 4.0,
+        label_w,
+        label_h,
+    )
+    # Backing plate: void at 75% alpha so the label reads clearly
+    bg = QColor(EREBUS["void"])
+    bg.setAlpha(int(0.75 * 255))
+    p.setBrush(bg)
+    p.setPen(QPen(QColor(EREBUS["ember"]), 1))
+    p.drawRoundedRect(rect, 3, 3)
+
+    p.setPen(QColor(EREBUS["ember"]))
+    p.drawText(rect, Qt.AlignCenter, label)
+    p.restore()
 
 
 def _pick_timeline_step(total_seconds: float, pixel_width: int) -> tuple[float, float]:
@@ -310,7 +382,7 @@ def _paint_timeline(
     anchor="left":  0:00 at left, total_seconds at right
     anchor="right": 0:00 at right, labels show negative offsets going left
     """
-    if width <= 2 or height <= 2 or total_seconds <= 0:
+    if width <= 2 or height <= 6 or total_seconds <= 0:
         return
 
     major_step, minor_step = _pick_timeline_step(total_seconds, width)
@@ -328,17 +400,25 @@ def _paint_timeline(
     p.setPen(base_pen)
     p.drawLine(x0, y0, x0 + width, y0)
 
-    # Label font
+    # Label font — pinned to Monaspace Neon for consistency with the
+    # rest of the label type in the chassis
     font = p.font()
     font.setPointSize(7)
     font.setBold(False)
     p.setFont(font)
+    fm_height = p.fontMetrics().height()
 
+    # Layout inside the strip:
+    #   y0            ── baseline hairline
+    #   y0+1..y0+4    ── minor tick (4 px)
+    #   y0+1..y0+6    ── major tick (6 px)
+    #   y0+7..        ── label band (rest of the strip, at least fm_height)
     minor_top = y0 + 1
     minor_bot = y0 + 4
     major_top = y0 + 1
-    major_bot = y0 + 7
+    major_bot = y0 + 6
     text_top = y0 + 8
+    text_h = max(fm_height + 2, height - 8)
 
     def _tick_x_for_sec(s: float) -> float:
         if anchor == "right":
@@ -363,8 +443,6 @@ def _paint_timeline(
     # Draw major ticks + labels
     n_major = int(total_seconds / major_step) + 1
     p.setPen(major_pen)
-    # We want the last label flush to the anchor edge, so iterate and
-    # draw everything including a final label for the far edge.
     last_label_x: float = -1e9
     min_label_spacing_px = 40
 
@@ -387,7 +465,7 @@ def _paint_timeline(
         else:
             label = _format_timeline_label(s)
 
-        label_rect = QRectF(x - 40, text_top, 80, height - 8)
+        label_rect = QRectF(x - 40, text_top, 80, text_h)
         p.setPen(QColor(EREBUS["bone"]))
         p.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, label)
         last_label_x = x

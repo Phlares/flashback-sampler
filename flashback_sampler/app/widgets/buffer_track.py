@@ -12,6 +12,7 @@ import numpy as np
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from flashback_sampler.app.time_format import format_time_cs
 from flashback_sampler.app.widgets.level_meter import LevelMeter
 from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
 
@@ -306,7 +307,7 @@ class BufferTrack(QWidget):
         device_name: str,
     ) -> None:
         self._time_label.setText(
-            f"{_mmss(buffered_s)} / {_mmss(capacity_s)}"
+            f"{format_time_cs(buffered_s)} / {format_time_cs(capacity_s)}"
         )
         pct = 100.0 * buffered_s / capacity_s if capacity_s else 0.0
         self._fill_label.setText(f"FILL  {pct:5.1f}%")
@@ -323,8 +324,3 @@ class BufferTrack(QWidget):
         self._waveform.set_timeline(total_seconds=buffered_s, anchor="right")
 
 
-def _mmss(seconds: float) -> str:
-    seconds = max(0.0, float(seconds))
-    m = int(seconds // 60)
-    s = int(seconds - m * 60)
-    return f"{m:02d}:{s:02d}"
