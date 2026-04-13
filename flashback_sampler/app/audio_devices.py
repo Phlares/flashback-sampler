@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-CaptureKind = Literal["loopback", "input"]
+CaptureKind = Literal["loopback", "input", "process_loopback"]
 
 
 @dataclass(frozen=True)
@@ -26,10 +26,14 @@ class CaptureDevice:
     A source that feeds audio into the ring buffer.
 
     `kind`:
-        "loopback" — Windows WASAPI loopback on a speaker (captures what
-            that speaker is playing). `id` is the soundcard speaker name.
+        "loopback" — Windows WASAPI loopback on a speaker (captures
+            what that speaker is playing). `id` is the soundcard
+            speaker name.
         "input" — a normal sounddevice input (mic, line-in, virtual
             cable). `id` is the sounddevice device index as a string.
+        "process_loopback" — Windows 10 2004+ per-process WASAPI
+            loopback, captures only the target PID. `id` is the PID
+            as a string.
     """
     kind: CaptureKind
     name: str
@@ -228,6 +232,25 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
         return AudioCapture(
             buffer=buffer,
             device=idx,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+
+    if device.kind == "process_loopback":
+        from flashback_sampler.io.win32_process_loopback import (
+            ProcessLoopbackCapture,
+        )
+
+        try:
+            pid = int(device.id)
+        except ValueError as e:
+            raise ValueError(
+                f"process_loopback device id must be an integer PID; "
+                f"got {device.id!r}"
+            ) from e
+        return ProcessLoopbackCapture(
+            buffer=buffer,
+            pid=pid,
             sample_rate=sample_rate,
             channels=channels,
         )
