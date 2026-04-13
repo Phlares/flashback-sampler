@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.time_format import format_time_cs
 from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
 
 
@@ -208,9 +209,9 @@ class CheckoutTrack(QWidget):
         self._caption.setText(f"CLIP  {checkout.id}")
         self._meta.setText(
             f"{checkout.ram_bytes / 1024 / 1024:.1f} MB   "
-            f"{_mmss(self._duration_s)}"
+            f"{format_time_cs(self._duration_s)}"
         )
-        self._pos_label.setText(f"00:00 / {_mmss(self._duration_s)}")
+        self._pos_label.setText(f"00:00 / {format_time_cs(self._duration_s)}")
         self._state_label.setText(f"[{checkout.state.upper()}]")
 
         # Reflect any pre-existing trim on the widget
@@ -247,7 +248,7 @@ class CheckoutTrack(QWidget):
         frac = max(0.0, min(1.0, absolute / self._duration_s))
         self._wave.set_playhead(frac)
         self._pos_label.setText(
-            f"{_mmss(absolute)} / {_mmss(self._duration_s)}"
+            f"{format_time_cs(absolute)} / {format_time_cs(self._duration_s)}"
         )
 
     def set_preview_trimmed(self, trimmed: bool) -> None:
@@ -340,10 +341,3 @@ class CheckoutTrack(QWidget):
             co.trim_in_samples = 0
             co.trim_out_samples = 0
             self.trimCleared.emit()
-
-
-def _mmss(seconds: float) -> str:
-    seconds = max(0.0, float(seconds))
-    m = int(seconds // 60)
-    s = int(seconds - m * 60)
-    return f"{m:02d}:{s:02d}"
