@@ -40,6 +40,10 @@ class CaptureSource(Protocol):
                          callbacks / buffer misses since construction.
                          Surfaced to the UI's status bar so the user
                          can see OS-level scheduling problems.
+        `last_error()` — last human-readable error string produced by
+                         the backend, or None. Polled by the UI so a
+                         capture that died on a background thread can
+                         still communicate why.
 
     Required attributes:
         `sample_rate: int`
@@ -61,3 +65,4 @@ class CaptureSource(Protocol):
     def stop(self) -> None: ...
     def is_running(self) -> bool: ...
     def xrun_count(self) -> int: ...
+    def last_error(self) -> str | None: ...

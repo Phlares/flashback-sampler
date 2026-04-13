@@ -62,6 +62,9 @@ class SilenceCaptureSource:
     def xrun_count(self) -> int:
         return int(self._dropped_callbacks)
 
+    def last_error(self) -> str | None:
+        return None
+
     def _run(self) -> None:
         block = np.zeros((self.blocksize, self.channels), dtype=np.float32)
         interval = self.blocksize / self.sample_rate
@@ -106,6 +109,9 @@ class FakeCaptureSourceNoThread:
 
     def xrun_count(self) -> int:
         return int(self._xruns)
+
+    def last_error(self) -> str | None:
+        return None
 
     def fill(self, seconds: float, amplitude: float = 0.25) -> None:
         n = int(seconds * self.sample_rate)

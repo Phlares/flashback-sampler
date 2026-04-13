@@ -107,6 +107,9 @@ class AudioCapture:
     def xrun_count(self) -> int:
         return int(self._dropped_callbacks)
 
+    def last_error(self) -> str | None:
+        return getattr(self, "_last_error", None)
+
     # ------------------------------------------------------------------
     # Callback (runs on PortAudio thread — keep it lean)
     # ------------------------------------------------------------------
