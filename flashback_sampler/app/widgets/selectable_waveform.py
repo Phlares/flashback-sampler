@@ -16,21 +16,27 @@ even as the live waveform scrolls).
 from __future__ import annotations
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 
 from flashback_sampler.app.theme import EREBUS
 from flashback_sampler.app.widgets.waveform_view import WaveformView
 
 
+# How close (in widget pixels) the cursor must be to an existing
+# selection edge to grab it for dragging. 6 px is comfortable with a
+# mouse; a finer pointing device may want less.
+EDGE_GRAB_PX = 6
+
+
 class SelectableWaveform(WaveformView):
     """
     WaveformView that supports:
-    - Left click-drag: paint a manual selection band and emit
-      manualSelectionChanged on release.
-    - Right click: emit contextMenuRequested with the global position
-      so the host can pop up a QMenu. If a manual selection exists,
-      the menu is context-specific ("Check Out Segment"); otherwise
-      the menu is "no selection."
+    - Left click-drag on empty space: paint a new manual selection
+      band and emit manualSelectionChanged on release.
+    - Left click-drag on an existing mark-in/out edge: slide that
+      edge and emit manualSelectionChanged on release. The cursor
+      changes to Qt.SizeHorCursor while hovering over an edge.
+    - Right click: emit contextMenuRequested with the global position.
     - Double click: clear the current manual selection.
     """
 
@@ -44,7 +50,10 @@ class SelectableWaveform(WaveformView):
         self._manual_end: float | None = None
         self._drag_anchor: float | None = None  # mouse press x, as frac
         self._is_dragging: bool = False
-        self.setCursor(Qt.CrossCursor)
+        self._dragging_edge: str | None = None  # "start" | "end" | None
+        self._idle_cursor: Qt.CursorShape = Qt.CrossCursor
+        self.setMouseTracking(True)
+        self.setCursor(self._idle_cursor)
 
     # ------------------------------------------------------------------
     # Public API for the controller
@@ -98,11 +107,51 @@ class SelectableWaveform(WaveformView):
             return 0.0
         return max(0.0, min(1.0, x / self.width()))
 
+    def _inner_bounds(self) -> tuple[int, int]:
+        """Mirror the (inner_x, inner_w) used by WaveformView.paintEvent."""
+        w = self.width()
+        inner_x = 6
+        inner_w = max(1, w - inner_x - 6)
+        return inner_x, inner_w
+
+    def _edge_at(self, x: float) -> str | None:
+        """
+        Return "start" or "end" if the widget x-coordinate is within
+        EDGE_GRAB_PX of an existing selection edge, else None.
+        """
+        if not self.has_manual_selection():
+            return None
+        inner_x, inner_w = self._inner_bounds()
+        start_x = inner_x + float(self._manual_start) * inner_w
+        end_x = inner_x + float(self._manual_end) * inner_w
+        # If the two edges are very close, prefer whichever is nearest
+        d_start = abs(x - start_x)
+        d_end = abs(x - end_x)
+        if d_start <= EDGE_GRAB_PX and d_start <= d_end:
+            return "start"
+        if d_end <= EDGE_GRAB_PX:
+            return "end"
+        return None
+
+    def _refresh_hover_cursor(self, x: float) -> None:
+        """Update the mouse cursor based on whether we're over an edge."""
+        if self._edge_at(x) is not None:
+            self.setCursor(Qt.SizeHorCursor)
+        else:
+            self.setCursor(self._idle_cursor)
+
     def mousePressEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.LeftButton:
-            # Begin a new drag selection. Any prior selection is replaced
-            # once the drag produces a non-zero span; clicking without
-            # dragging just clears it on release.
+            # Priority 1: grab an existing mark edge and drag it
+            edge = self._edge_at(ev.position().x())
+            if edge is not None:
+                self._dragging_edge = edge
+                self._is_dragging = False
+                self._drag_anchor = None
+                self.setCursor(Qt.SizeHorCursor)
+                ev.accept()
+                return
+            # Priority 2: begin a new selection drag
             self._drag_anchor = self._pos_frac(ev.position().x())
             self._is_dragging = True
             ev.accept()
@@ -116,8 +165,28 @@ class SelectableWaveform(WaveformView):
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+        x = ev.position().x()
+
+        # Edge-drag takes priority over new-selection drag
+        if self._dragging_edge is not None and self.has_manual_selection():
+            new_frac = self._pos_frac(x)
+            # Leave at least one widget pixel between the two edges
+            inner_x, inner_w = self._inner_bounds()
+            epsilon = 1.0 / max(1, inner_w)
+            if self._dragging_edge == "start":
+                self._manual_start = max(
+                    0.0, min(float(self._manual_end) - epsilon, new_frac)
+                )
+            else:  # "end"
+                self._manual_end = min(
+                    1.0, max(float(self._manual_start) + epsilon, new_frac)
+                )
+            self.update()
+            ev.accept()
+            return
+
         if self._is_dragging and self._drag_anchor is not None:
-            cur = self._pos_frac(ev.position().x())
+            cur = self._pos_frac(x)
             lo = min(self._drag_anchor, cur)
             hi = max(self._drag_anchor, cur)
             self._manual_start = lo
@@ -125,25 +194,46 @@ class SelectableWaveform(WaveformView):
             self.update()
             ev.accept()
             return
+
+        # Hover: update the cursor based on proximity to an edge
+        if ev.buttons() == Qt.NoButton:
+            self._refresh_hover_cursor(x)
+
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton and self._is_dragging:
-            self._is_dragging = False
-            self._drag_anchor = None
-            if self.has_manual_selection():
-                self.manualSelectionChanged.emit(
-                    float(self._manual_start), float(self._manual_end)
-                )
-            else:
-                # A bare click without drag clears any existing selection
-                self._manual_start = None
-                self._manual_end = None
-                self.update()
-                self.manualSelectionCleared.emit()
-            ev.accept()
-            return
+        if ev.button() == Qt.LeftButton:
+            # Finish an edge drag
+            if self._dragging_edge is not None:
+                self._dragging_edge = None
+                self._refresh_hover_cursor(ev.position().x())
+                if self.has_manual_selection():
+                    self.manualSelectionChanged.emit(
+                        float(self._manual_start), float(self._manual_end)
+                    )
+                ev.accept()
+                return
+            # Finish a new-selection drag
+            if self._is_dragging:
+                self._is_dragging = False
+                self._drag_anchor = None
+                if self.has_manual_selection():
+                    self.manualSelectionChanged.emit(
+                        float(self._manual_start), float(self._manual_end)
+                    )
+                else:
+                    self._manual_start = None
+                    self._manual_end = None
+                    self.update()
+                    self.manualSelectionCleared.emit()
+                ev.accept()
+                return
         super().mouseReleaseEvent(ev)
+
+    def leaveEvent(self, ev) -> None:  # noqa: N802
+        # Reset to the idle cursor when the mouse leaves the widget
+        self.setCursor(self._idle_cursor)
+        super().leaveEvent(ev)
 
     def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.LeftButton:
