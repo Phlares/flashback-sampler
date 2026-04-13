@@ -1,0 +1,199 @@
+"""
+SelectableWaveform — WaveformView subclass with drag-to-select and
+right-click-for-context-menu interaction.
+
+Used by BufferTrack for the live buffer view so the user can mark a
+region on the waveform directly and right-click to "Check Out Segment."
+Distinct from `ClickableWaveform` (which does click-to-seek for the
+checkout clip in Track 2).
+
+The widget reports selection positions purely as fractions in [0, 1] —
+the owning controller is responsible for translating fractions to
+absolute sample positions (so the selection stays pinned to real audio
+even as the live waveform scrolls).
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
+
+from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.widgets.waveform_view import WaveformView
+
+
+class SelectableWaveform(WaveformView):
+    """
+    WaveformView that supports:
+    - Left click-drag: paint a manual selection band and emit
+      manualSelectionChanged on release.
+    - Right click: emit contextMenuRequested with the global position
+      so the host can pop up a QMenu. If a manual selection exists,
+      the menu is context-specific ("Check Out Segment"); otherwise
+      the menu is "no selection."
+    - Double click: clear the current manual selection.
+    """
+
+    manualSelectionChanged = Signal(float, float)  # start_frac, end_frac
+    manualSelectionCleared = Signal()
+    contextMenuRequested = Signal(QPointF)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._manual_start: float | None = None
+        self._manual_end: float | None = None
+        self._drag_anchor: float | None = None  # mouse press x, as frac
+        self._is_dragging: bool = False
+        self.setCursor(Qt.CrossCursor)
+
+    # ------------------------------------------------------------------
+    # Public API for the controller
+    # ------------------------------------------------------------------
+
+    def has_manual_selection(self) -> bool:
+        return (
+            self._manual_start is not None
+            and self._manual_end is not None
+            and self._manual_end > self._manual_start
+        )
+
+    def manual_selection(self) -> tuple[float, float] | None:
+        if not self.has_manual_selection():
+            return None
+        return (float(self._manual_start), float(self._manual_end))
+
+    def set_manual_selection(
+        self,
+        start_frac: float | None,
+        end_frac: float | None,
+    ) -> None:
+        """
+        Called by the controller (e.g. BufferTrack) to reflect a
+        selection whose position has been recomputed from absolute
+        samples. Does NOT emit manualSelectionChanged — that signal
+        is reserved for user-initiated changes.
+        """
+        if start_frac is None or end_frac is None or end_frac <= start_frac:
+            self._manual_start = None
+            self._manual_end = None
+        else:
+            self._manual_start = float(start_frac)
+            self._manual_end = float(end_frac)
+        self.update()
+
+    def clear_manual_selection(self) -> None:
+        if self._manual_start is None and self._manual_end is None:
+            return
+        self._manual_start = None
+        self._manual_end = None
+        self.update()
+        self.manualSelectionCleared.emit()
+
+    # ------------------------------------------------------------------
+    # Mouse
+    # ------------------------------------------------------------------
+
+    def _pos_frac(self, x: float) -> float:
+        if self.width() <= 0:
+            return 0.0
+        return max(0.0, min(1.0, x / self.width()))
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802
+        if ev.button() == Qt.LeftButton:
+            # Begin a new drag selection. Any prior selection is replaced
+            # once the drag produces a non-zero span; clicking without
+            # dragging just clears it on release.
+            self._drag_anchor = self._pos_frac(ev.position().x())
+            self._is_dragging = True
+            ev.accept()
+            return
+        if ev.button() == Qt.RightButton:
+            # Context menu: let the host decide what to show based on
+            # whether a manual selection currently exists.
+            self.contextMenuRequested.emit(ev.globalPosition())
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+        if self._is_dragging and self._drag_anchor is not None:
+            cur = self._pos_frac(ev.position().x())
+            lo = min(self._drag_anchor, cur)
+            hi = max(self._drag_anchor, cur)
+            self._manual_start = lo
+            self._manual_end = hi
+            self.update()
+            ev.accept()
+            return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
+        if ev.button() == Qt.LeftButton and self._is_dragging:
+            self._is_dragging = False
+            self._drag_anchor = None
+            if self.has_manual_selection():
+                self.manualSelectionChanged.emit(
+                    float(self._manual_start), float(self._manual_end)
+                )
+            else:
+                # A bare click without drag clears any existing selection
+                self._manual_start = None
+                self._manual_end = None
+                self.update()
+                self.manualSelectionCleared.emit()
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
+        if ev.button() == Qt.LeftButton:
+            self.clear_manual_selection()
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
+
+    # ------------------------------------------------------------------
+    # Paint — augments the base WaveformView with a manual selection
+    # band, drawn in a slightly stronger ember than the anchor section
+    # so the user can tell them apart at a glance.
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, ev) -> None:  # noqa: N802
+        super().paintEvent(ev)
+        if not self.has_manual_selection():
+            return
+
+        # Re-derive the inner content rect the same way WaveformView does
+        w = self.width()
+        h = self.height()
+        label_strip = 18
+        inner_top = 1 + label_strip
+        inner_x = 6
+        inner_w = w - inner_x - 6
+        inner_y = inner_top
+        inner_h = h - inner_top - 6
+        if inner_w <= 2 or inner_h <= 2:
+            return
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        s = float(self._manual_start)
+        e = float(self._manual_end)
+        x1 = inner_x + s * inner_w
+        x2 = inner_x + e * inner_w
+
+        # Slightly brighter translucent ember for manual selection
+        fill = QColor(EREBUS["ember"])
+        fill.setAlpha(int(0.22 * 255))
+        p.fillRect(
+            QRectF(x1, float(inner_y), max(0.5, x2 - x1), float(inner_h)),
+            fill,
+        )
+        # Solid ember edges on both sides — manual selection is
+        # committed; the anchor's "dashed start / solid end" semantics
+        # don't apply here.
+        edge_pen = QPen(QColor(EREBUS["ember"]), 2)
+        p.setPen(edge_pen)
+        p.drawLine(QLineF(x1, float(inner_y), x1, float(inner_y + inner_h)))
+        p.drawLine(QLineF(x2, float(inner_y), x2, float(inner_y + inner_h)))
+        p.end()

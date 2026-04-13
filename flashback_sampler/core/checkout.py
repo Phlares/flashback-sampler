@@ -182,6 +182,77 @@ class CheckoutManager:
             self._checkouts[co.id] = co
         return co
 
+    def create_from_abs_range(
+        self,
+        abs_start: int,
+        abs_end: int,
+    ) -> Checkout:
+        """
+        Create a Checkout from an absolute sample range in
+        `total_written` space. Used by the drag-select UI — the user
+        picks a range on the live waveform (which the BufferTrack pins
+        to absolute samples so the selection stays anchored to real
+        audio even as the ring scrolls), then right-clicks → Check Out
+        Segment to commit those exact samples.
+
+        Raises RuntimeError if the requested range has already scrolled
+        out of the ring, or has not yet been written, or if capacity
+        caps would be exceeded.
+        """
+        if abs_end <= abs_start:
+            raise ValueError(
+                f"abs_end must be greater than abs_start ({abs_end} <= {abs_start})"
+            )
+
+        # Check the range is still available in the ring
+        buf = self._buffer
+        with buf._lock:  # noqa: SLF001
+            total = buf.total_written
+        if abs_end > total:
+            raise RuntimeError(
+                f"requested range extends past current head "
+                f"(abs_end={abs_end}, total_written={total})"
+            )
+        if total - abs_start > buf.buffer_size:
+            raise RuntimeError(
+                "requested range has already been overwritten"
+            )
+
+        audio = buf._copy_abs_range(abs_start, abs_end)  # noqa: SLF001
+        if audio.shape[0] == 0:
+            raise RuntimeError(
+                "could not read requested range; the writer may have "
+                "lapped the slice during the copy"
+            )
+
+        with self._lock:
+            if len(self._checkouts) >= self._max_active:
+                raise RuntimeError(
+                    f"Maximum active checkouts reached ({self._max_active})"
+                )
+            prospective_bytes = (
+                sum(c.ram_bytes for c in self._checkouts.values()) + audio.nbytes
+            )
+            if prospective_bytes > self._max_ram_bytes:
+                raise RuntimeError(
+                    f"Checkout RAM cap exceeded: "
+                    f"{prospective_bytes / 1024 / 1024:.1f} MB > "
+                    f"{self._max_ram_bytes / 1024 / 1024:.1f} MB"
+                )
+
+            co = Checkout(
+                id=uuid.uuid4().hex[:12],
+                created_at=time.monotonic(),
+                sample_rate=buf.sample_rate,
+                channels=buf.channels,
+                audio=audio,
+                abs_sample_start=int(abs_start),
+                abs_sample_end=int(abs_end),
+                state="pending",
+            )
+            self._checkouts[co.id] = co
+        return co
+
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
