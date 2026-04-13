@@ -274,6 +274,8 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._sr_label)
         self._xrun_label = QLabel("XR  00")
         sb.addPermanentWidget(self._xrun_label)
+        self._ram_label = QLabel("RAM  —")
+        sb.addPermanentWidget(self._ram_label)
 
     # ------------------------------------------------------------------
     # Menu bar & device pickers
@@ -437,10 +439,11 @@ class MainWindow(QMainWindow):
     def _restore_settings(self) -> None:
         """
         On startup: read the persisted AppSettings from config.json and
-        apply the non-buffer caps (checkout count + RAM) to the running
-        AppState. Buffer duration is intentionally NOT applied at
-        startup — the CLI flag wins and rebuilding the buffer would
-        discard whatever the user has already started buffering.
+        apply the non-buffer caps (checkout count + RAM + project RAM
+        budget) to the running AppState. Buffer duration is intentionally
+        NOT applied at startup — the CLI flag wins and rebuilding the
+        buffer would discard whatever the user has already started
+        buffering.
         """
         cfg = load_config()
         settings = load_settings_from_config(cfg)
@@ -449,6 +452,7 @@ class MainWindow(QMainWindow):
             max_active=settings.max_checkouts,
             max_ram_mb=settings.max_ram_mb,
         )
+        self._state.set_project_ram_budget_mb(settings.project_ram_budget_mb)
 
     def _open_settings_dialog(self) -> None:
         current = getattr(self, "_app_settings", AppSettings())
@@ -479,6 +483,7 @@ class MainWindow(QMainWindow):
             max_active=new_settings.max_checkouts,
             max_ram_mb=new_settings.max_ram_mb,
         )
+        self._state.set_project_ram_budget_mb(new_settings.project_ram_budget_mb)
 
         # Rebuild buffer if duration changed
         if buffer_changed:
@@ -584,6 +589,22 @@ class MainWindow(QMainWindow):
             cap_src = self._state.capture
             xruns = cap_src.xrun_count()
             self._xrun_label.setText(f"XR  {xruns:02d}")
+
+        # Project-wide RAM readout (all slots + all checkouts)
+        total_mb = self._state.total_project_ram_mb()
+        budget_mb = self._state.project_ram_budget_mb
+        pct = 100.0 * total_mb / budget_mb if budget_mb > 0 else 0.0
+        self._ram_label.setText(
+            f"RAM  {total_mb:5.0f} / {budget_mb:4.0f} MB"
+        )
+        from flashback_sampler.app.theme import EREBUS as _E
+        if pct >= 95.0:
+            color = _E["rec"]
+        elif pct >= 80.0:
+            color = _E["ember"]
+        else:
+            color = _E["bone"]
+        self._ram_label.setStyleSheet(f"color: {color};")
 
         # Feed scrub-player cursor into the checkout track playhead
         if self._checkout_track.current_checkout_id() is not None:
@@ -759,6 +780,7 @@ class MainWindow(QMainWindow):
             return
         slot = self._state.slots[slot_index]
         can_remove = len(self._state.slots) > 1
+        has_buffered = slot.buffered_seconds() > 0.1
 
         menu = QMenu(self)
 
@@ -769,9 +791,25 @@ class MainWindow(QMainWindow):
         )
         menu.addAction(switch_act)
 
+        prime_label = "Stop Recording" if slot.is_capturing() else "Start Recording"
+        prime_act = QAction(prime_label, self)
+        prime_act.triggered.connect(
+            lambda: self._on_source_strip_prime_toggled(slot_index)
+        )
+        menu.addAction(prime_act)
+
         menu.addSeparator()
 
-        remove_act = QAction("Remove Source", self)
+        flush_act = QAction("Flush Buffer…", self)
+        flush_act.setEnabled(has_buffered)
+        flush_act.triggered.connect(
+            lambda: self._flush_slot_buffer(slot_index)
+        )
+        menu.addAction(flush_act)
+
+        menu.addSeparator()
+
+        remove_act = QAction("Remove Source…", self)
         remove_act.setEnabled(can_remove)
         remove_act.triggered.connect(
             lambda: self._remove_slot_with_confirmation(slot_index)
@@ -1061,31 +1099,41 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _flush_buffer(self) -> None:
-        bs = self._state.buffer.buffered_seconds
+        """FLUSH BUFFER button — flush the ACTIVE slot's ring."""
+        self._flush_slot_buffer(self._state.active_slot_index)
+
+    def _flush_slot_buffer(self, slot_index: int) -> None:
+        """Flush a specific slot's ring buffer with a confirmation modal."""
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        bs = slot.buffered_seconds()
         if bs <= 0.1:
             # Nothing to flush — silently no-op to avoid a pointless modal
             return
-        active_count = len(self._state.checkout_manager.list())
+        checkout_count = len(slot.checkout_manager.list())
         detail = (
-            f"This will discard {format_time_cs(bs)} of buffered audio.\n\n"
-            "Capture will continue from empty if it is running.\n"
+            f"Slot: {slot.name}\n\n"
+            f"This will discard {format_time_cs(bs)} of buffered audio.\n"
+            "Capture will continue from empty if it is running on this slot.\n"
         )
-        if active_count > 0:
+        if checkout_count > 0:
             detail += (
-                f"\n{active_count} checked-out clip"
-                f"{'s' if active_count != 1 else ''} will NOT be affected — "
-                "checkouts are immutable snapshots held in their own memory."
+                f"\n{checkout_count} checked-out clip"
+                f"{'s' if checkout_count != 1 else ''} on this slot will NOT "
+                "be affected — checkouts are immutable snapshots held in "
+                "their own memory."
             )
         reply = QMessageBox.question(
             self,
-            "Flush ring buffer?",
+            f"Flush {slot.name!r} buffer?",
             detail,
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Cancel,
         )
         if reply != QMessageBox.Yes:
             return
-        self._state.buffer.flush()
+        slot.buffer.flush()
 
     # ------------------------------------------------------------------
     # Duration presets + anchor rotary

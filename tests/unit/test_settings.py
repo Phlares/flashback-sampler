@@ -60,6 +60,31 @@ def test_from_dict_clamps_max_ram_mb():
     assert AppSettings.from_dict({"max_ram_mb": 9999999}).max_ram_mb == MAX_MAX_RAM_MB
 
 
+def test_from_dict_clamps_project_ram_budget_mb():
+    from flashback_sampler.app.settings_dialog import (
+        DEFAULT_PROJECT_RAM_BUDGET_MB,
+        MAX_PROJECT_RAM_BUDGET_MB,
+        MIN_PROJECT_RAM_BUDGET_MB,
+    )
+    s = AppSettings.from_dict({})
+    assert s.project_ram_budget_mb == DEFAULT_PROJECT_RAM_BUDGET_MB
+    assert AppSettings.from_dict({"project_ram_budget_mb": 0}).project_ram_budget_mb == MIN_PROJECT_RAM_BUDGET_MB
+    assert AppSettings.from_dict({"project_ram_budget_mb": 99999999}).project_ram_budget_mb == MAX_PROJECT_RAM_BUDGET_MB
+
+
+def test_project_ram_budget_round_trips():
+    from flashback_sampler.app.settings_dialog import (
+        apply_settings_to_config,
+        load_settings_from_config,
+    )
+
+    cfg = {}
+    s1 = AppSettings(project_ram_budget_mb=8192)
+    cfg = apply_settings_to_config(cfg, s1)
+    s2 = load_settings_from_config(cfg)
+    assert s2.project_ram_budget_mb == 8192
+
+
 def test_from_dict_coerces_string_numbers():
     s = AppSettings.from_dict(
         {"buffer_minutes": "10", "max_checkouts": "8", "max_ram_mb": "512"}

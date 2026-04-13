@@ -41,6 +41,10 @@ DEFAULT_MAX_RAM_MB = 1024
 MIN_MAX_RAM_MB = 128
 MAX_MAX_RAM_MB = 8192
 
+DEFAULT_PROJECT_RAM_BUDGET_MB = 4096
+MIN_PROJECT_RAM_BUDGET_MB = 256
+MAX_PROJECT_RAM_BUDGET_MB = 32768
+
 
 @dataclass
 class AppSettings:
@@ -51,6 +55,7 @@ class AppSettings:
     buffer_minutes: float = DEFAULT_BUFFER_MINUTES
     max_checkouts: int = DEFAULT_MAX_CHECKOUTS
     max_ram_mb: int = DEFAULT_MAX_RAM_MB
+    project_ram_budget_mb: int = DEFAULT_PROJECT_RAM_BUDGET_MB
     save_directory: str = ""  # empty = fall back to Documents
 
     def to_dict(self) -> dict:
@@ -58,6 +63,7 @@ class AppSettings:
             "buffer_minutes": float(self.buffer_minutes),
             "max_checkouts": int(self.max_checkouts),
             "max_ram_mb": int(self.max_ram_mb),
+            "project_ram_budget_mb": int(self.project_ram_budget_mb),
             "save_directory": str(self.save_directory),
         }
 
@@ -101,6 +107,12 @@ class AppSettings:
                 DEFAULT_MAX_RAM_MB,
                 MIN_MAX_RAM_MB,
                 MAX_MAX_RAM_MB,
+            ),
+            project_ram_budget_mb=_get_int(
+                "project_ram_budget_mb",
+                DEFAULT_PROJECT_RAM_BUDGET_MB,
+                MIN_PROJECT_RAM_BUDGET_MB,
+                MAX_PROJECT_RAM_BUDGET_MB,
             ),
             save_directory=str(data.get("save_directory", "") or ""),
         )
@@ -179,6 +191,16 @@ class SettingsDialog(QDialog):
         self._max_ram.setSuffix("  MB")
         form.addRow(QLabel("MAX CHECKOUT RAM"), self._max_ram)
 
+        self._project_ram = QSpinBox()
+        self._project_ram.setRange(MIN_PROJECT_RAM_BUDGET_MB, MAX_PROJECT_RAM_BUDGET_MB)
+        self._project_ram.setSuffix("  MB")
+        self._project_ram.setToolTip(
+            "Total RAM budget across ALL capture slots. Adding a new "
+            "source that would push the project past this cap is "
+            "blocked by the Add Source dialog."
+        )
+        form.addRow(QLabel("PROJECT RAM BUDGET"), self._project_ram)
+
         # Save directory row with a Browse button
         save_dir_row = QHBoxLayout()
         save_dir_row.setSpacing(6)
@@ -204,6 +226,7 @@ class SettingsDialog(QDialog):
         self._buffer_mins.setValue(int(round(s.buffer_minutes * 10)))
         self._max_checkouts.setValue(int(s.max_checkouts))
         self._max_ram.setValue(int(s.max_ram_mb))
+        self._project_ram.setValue(int(s.project_ram_budget_mb))
         self._save_dir_edit.setText(s.save_directory or "")
 
     def _pick_save_dir(self) -> None:
@@ -219,6 +242,7 @@ class SettingsDialog(QDialog):
             buffer_minutes=self._buffer_mins.value() / 10.0,
             max_checkouts=self._max_checkouts.value(),
             max_ram_mb=self._max_ram.value(),
+            project_ram_budget_mb=self._project_ram.value(),
             save_directory=self._save_dir_edit.text().strip(),
         )
 
