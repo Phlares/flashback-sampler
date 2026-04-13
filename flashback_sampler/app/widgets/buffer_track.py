@@ -82,6 +82,14 @@ class BufferTrack(QWidget):
     def update_waveform(self, bins: np.ndarray | None) -> None:
         self._waveform.set_data(bins)
 
+    def set_anchor_playhead(self, frac: float | None) -> None:
+        """
+        Horizontal ghost playhead indicating where the next checkout would
+        START (i.e. where the rotary's anchor points). frac is 0..1 across
+        the live buffer's visible span, or None to hide.
+        """
+        self._waveform.set_playhead(frac)
+
     def update_levels(self, rms_per_channel) -> None:
         self._meter.set_levels(rms_per_channel)
 

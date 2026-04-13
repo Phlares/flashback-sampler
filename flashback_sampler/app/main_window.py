@@ -1,20 +1,13 @@
 """
-MainWindow — the 960×520 landscape Erebus chassis.
+MainWindow — the Erebus chassis.
 
-M4 scope (this file):
-- Window geometry + chassis background
-- Start / Stop Capture button wired to LoopbackCapture
-- Live RMS readout (numeric, updated at 30 Hz via QTimer)
-- Check Out button wired to CheckoutManager
-- Active-checkout list with Save and Discard
+M6 wires in the custom-painted widgets — live BufferTrack with
+waveform + thermal level meter, RotaryKnob as the anchor-offset scrub
+control, the 8-preset DurationPreset cluster, and CheckoutTrack for
+reviewing the selected clip.
 
-M5–M8 scope (not here yet):
-- Custom-painted WaveformView (recessed screen)
-- RotaryKnob with hub-mounted time readout
-- TactileButton with thermal tell bar
-- VU LevelMeter with thermal segments
-- Two-track layout (State A / State B)
-- Monaspace font loading
+M7-8 deferred: TactileButton paintEvent, Monaspace fonts, device
+picker, trim handles on the checkout clip.
 """
 
 from __future__ import annotations
@@ -39,13 +32,17 @@ from PySide6.QtWidgets import (
 
 from flashback_sampler.app.state import AppState, make_loopback_capture
 from flashback_sampler.app.widgets.buffer_track import BufferTrack
-
-
-# Duration presets for the checkout stepper. Keep in sync with the M6
-# 8-preset cluster from the frontend-design spec.
-DURATION_PRESETS_S: tuple[float, ...] = (
-    15.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0,
+from flashback_sampler.app.widgets.checkout_track import CheckoutTrack
+from flashback_sampler.app.widgets.duration_preset import (
+    DEFAULT_PRESETS,
+    DurationPreset,
 )
+from flashback_sampler.app.widgets.rotary_knob import RotaryKnob
+
+
+# Legacy names kept as module-level exports so existing tests and any
+# import-sites don't break after the M6 refactor.
+DURATION_PRESETS_S: tuple[float, ...] = DEFAULT_PRESETS
 DEFAULT_DURATION_INDEX = 4  # 180 s = 3:00
 
 
@@ -54,12 +51,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._state = state
         self._start_time: float = 0.0
-        self._duration_idx = DEFAULT_DURATION_INDEX
         self._previewing_id: str | None = None
+        self._anchor_offset_s: float = 0.0  # driven by rotary
 
         self.setWindowTitle("flashback-sampler")
-        self.setMinimumSize(760, 560)
-        self.resize(980, 640)
+        self.setMinimumSize(920, 720)
+        self.resize(1120, 820)
         self._device_name: str = "(NOT CAPTURING)"
 
         self._build_ui()
@@ -78,8 +75,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         vbox = QVBoxLayout(root)
-        vbox.setContentsMargins(24, 24, 24, 12)
-        vbox.setSpacing(18)
+        vbox.setContentsMargins(24, 20, 24, 12)
+        vbox.setSpacing(14)
 
         # --- Title strip -----------------------------------------------
         title = QLabel("FLASHBACK")
@@ -88,46 +85,84 @@ class MainWindow(QMainWindow):
 
         # --- Track 1: live buffer view --------------------------------
         self._buffer_track = BufferTrack(channels=self._state.channels)
-        vbox.addWidget(self._buffer_track, 1)
+        vbox.addWidget(self._buffer_track, 2)
 
-        # --- Transport row ---------------------------------------------
+        # --- Transport cluster row: capture | rotary | presets | ck out ─
         transport_row = QHBoxLayout()
-        transport_row.setSpacing(12)
+        transport_row.setSpacing(18)
 
+        # Left column: capture + flush buttons
+        left_col = QVBoxLayout()
+        left_col.setSpacing(8)
         self._capture_btn = QPushButton("START CAPTURE")
         self._capture_btn.setProperty("variant", "primary")
         self._capture_btn.clicked.connect(self._toggle_capture)
-        transport_row.addWidget(self._capture_btn)
+        self._capture_btn.setMinimumHeight(42)
+        left_col.addWidget(self._capture_btn)
 
-        self._checkout_btn = QPushButton(
-            f"CHECK OUT {_mmss(DURATION_PRESETS_S[DEFAULT_DURATION_INDEX])}"
-        )
-        self._checkout_btn.setProperty("variant", "primary")
-        self._checkout_btn.clicked.connect(self._create_checkout)
-        self._checkout_btn.setEnabled(False)
-        transport_row.addWidget(self._checkout_btn)
-
-        # Minimal duration stepper — full 8-preset cluster lands in M6
-        self._dur_down_btn = QPushButton("–")
-        self._dur_down_btn.setFixedWidth(36)
-        self._dur_down_btn.clicked.connect(lambda: self._step_duration(-1))
-        transport_row.addWidget(self._dur_down_btn)
-
-        self._dur_up_btn = QPushButton("+")
-        self._dur_up_btn.setFixedWidth(36)
-        self._dur_up_btn.clicked.connect(lambda: self._step_duration(+1))
-        transport_row.addWidget(self._dur_up_btn)
-
-        transport_row.addStretch(1)
-
-        # Destructive action — separated from the primary transport and
-        # requires a confirmation dialog. Does NOT invalidate active
-        # checkouts; they live in their own RAM snapshots.
         self._flush_btn = QPushButton("FLUSH BUFFER")
         self._flush_btn.clicked.connect(self._flush_buffer)
-        transport_row.addWidget(self._flush_btn)
+        left_col.addWidget(self._flush_btn)
+        left_col.addStretch(1)
+        transport_row.addLayout(left_col, 1)
 
-        vbox.addLayout(transport_row)
+        # Center: rotary knob (anchor offset scrub)
+        rotary_col = QVBoxLayout()
+        rotary_col.setSpacing(4)
+        rotary_col.setAlignment(Qt.AlignCenter)
+        rotary_cap = QLabel("ANCHOR")
+        rotary_cap.setProperty("role", "label")
+        rotary_cap.setAlignment(Qt.AlignCenter)
+        rotary_col.addWidget(rotary_cap)
+
+        self._rotary = RotaryKnob(diameter=140)
+        self._rotary.setRange(0.0, max(1.0, self._state.buffer.duration))
+        self._rotary.setValue(0.0)
+        self._rotary.setDefaultValue(0.0)
+        self._rotary.setHubText("NOW")
+        self._rotary.valueChanged.connect(self._on_anchor_changed)
+        rotary_col.addWidget(self._rotary, 0, Qt.AlignCenter)
+
+        rotary_hint = QLabel("DBL-CLICK = NOW")
+        rotary_hint.setProperty("role", "label")
+        rotary_hint.setAlignment(Qt.AlignCenter)
+        rotary_col.addWidget(rotary_hint)
+        transport_row.addLayout(rotary_col, 0)
+
+        # Right-center: 8-preset duration cluster
+        preset_col = QVBoxLayout()
+        preset_col.setSpacing(4)
+        preset_cap = QLabel("DURATION")
+        preset_cap.setProperty("role", "label")
+        preset_cap.setAlignment(Qt.AlignCenter)
+        preset_col.addWidget(preset_cap)
+        self._presets = DurationPreset(default_index=DEFAULT_DURATION_INDEX)
+        self._presets.setMinimumWidth(90)
+        self._presets.durationChanged.connect(self._on_duration_changed)
+        preset_col.addWidget(self._presets, 1)
+        transport_row.addLayout(preset_col, 0)
+
+        # Right column: big CHECK OUT CTA stack
+        right_col = QVBoxLayout()
+        right_col.setSpacing(8)
+        right_col.addStretch(1)
+        self._checkout_btn = QPushButton(
+            f"CHECK OUT {_mmss(self._presets.active_duration())}"
+        )
+        self._checkout_btn.setProperty("variant", "primary")
+        self._checkout_btn.setMinimumHeight(52)
+        self._checkout_btn.clicked.connect(self._create_checkout)
+        self._checkout_btn.setEnabled(False)
+        right_col.addWidget(self._checkout_btn)
+        right_col.addStretch(1)
+        transport_row.addLayout(right_col, 1)
+
+        vbox.addLayout(transport_row, 0)
+
+        # --- Track 2: checkout clip view (starts empty) ---------------
+        self._checkout_track = CheckoutTrack()
+        self._checkout_track.seekRequested.connect(self._on_clip_seek)
+        vbox.addWidget(self._checkout_track, 2)
 
         # --- Checkout list ---------------------------------------------
         list_label = QLabel("CHECKED-OUT CLIPS")
@@ -135,8 +170,9 @@ class MainWindow(QMainWindow):
         vbox.addWidget(list_label)
 
         self._list = QListWidget()
+        self._list.setMaximumHeight(110)
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
-        vbox.addWidget(self._list, 1)
+        vbox.addWidget(self._list, 0)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
@@ -188,6 +224,16 @@ class MainWindow(QMainWindow):
             device_name=self._device_name,
         )
 
+        # Ghost anchor playhead on Track 1 — shows where the next
+        # checkout would start pulling from. frac = 1 (far right) means
+        # "right now"; frac = 0 (far left) is "capacity seconds ago."
+        cap = buf.duration
+        if cap > 0 and self._anchor_offset_s > 0:
+            frac = 1.0 - (self._anchor_offset_s / cap)
+            self._buffer_track.set_anchor_playhead(max(0.0, min(1.0, frac)))
+        else:
+            self._buffer_track.set_anchor_playhead(None)
+
         bs = buf.buffered_seconds
 
         # Checkout is allowed whenever the buffer has anything in it,
@@ -199,6 +245,12 @@ class MainWindow(QMainWindow):
             cap_src = self._state.capture
             xruns = cap_src.xrun_count() if hasattr(cap_src, "xrun_count") else 0
             self._xrun_label.setText(f"XR  {xruns:02d}")
+
+        # Feed scrub-player cursor into the checkout track playhead
+        if self._checkout_track.current_checkout_id() is not None:
+            self._checkout_track.set_cursor(
+                self._state.scrub_player.cursor_seconds
+            )
 
         # Auto-flip the preview button back when playback drains naturally
         if self._previewing_id is not None and not self._state.scrub_player.is_playing:
@@ -270,20 +322,26 @@ class MainWindow(QMainWindow):
         self._state.buffer.flush()
 
     # ------------------------------------------------------------------
-    # Duration stepper
+    # Duration presets + anchor rotary
     # ------------------------------------------------------------------
 
-    def _step_duration(self, delta: int) -> None:
-        new_idx = max(0, min(len(DURATION_PRESETS_S) - 1, self._duration_idx + delta))
-        if new_idx == self._duration_idx:
-            return
-        self._duration_idx = new_idx
-        self._checkout_btn.setText(
-            f"CHECK OUT {_mmss(DURATION_PRESETS_S[self._duration_idx])}"
-        )
+    def _on_duration_changed(self, dur_s: float) -> None:
+        self._checkout_btn.setText(f"CHECK OUT {_mmss(dur_s)}")
 
     def _current_duration_s(self) -> float:
-        return DURATION_PRESETS_S[self._duration_idx]
+        return self._presets.active_duration()
+
+    def _on_anchor_changed(self, offset_s: float) -> None:
+        self._anchor_offset_s = max(0.0, float(offset_s))
+        if self._anchor_offset_s < 0.5:
+            self._rotary.setHubText("NOW")
+        else:
+            self._rotary.setHubText(f"-{_mmss(self._anchor_offset_s)}")
+
+    def _refresh_rotary_range(self) -> None:
+        """Rotary max follows the buffer capacity (in seconds)."""
+        new_max = max(1.0, float(self._state.buffer.duration))
+        self._rotary.setRange(0.0, new_max)
 
     # ------------------------------------------------------------------
     # Checkout control
@@ -292,7 +350,8 @@ class MainWindow(QMainWindow):
     def _create_checkout(self) -> None:
         try:
             co = self._state.checkout_manager.create(
-                duration_s=self._current_duration_s()
+                duration_s=self._current_duration_s(),
+                anchor_offset_s=self._anchor_offset_s,
             )
         except Exception as e:
             QMessageBox.warning(self, "Checkout failed", str(e))
@@ -338,6 +397,22 @@ class MainWindow(QMainWindow):
         # If the user switches selection mid-preview, stop the old playback
         if self._previewing_id is not None and sel != self._previewing_id:
             self._stop_preview()
+        # Feed the selected checkout into Track 2
+        if sel is None:
+            self._checkout_track.set_checkout(None)
+        else:
+            try:
+                co = self._state.checkout_manager.get(sel)
+                self._checkout_track.set_checkout(co)
+            except KeyError:
+                self._checkout_track.set_checkout(None)
+
+    def _on_clip_seek(self, seconds: float) -> None:
+        """User clicked the Track 2 waveform — seek the scrub player."""
+        self._state.scrub_player.seek(seconds)
+        # If the scrub player has a source bound, nudge the playhead
+        # label immediately for snappier feedback.
+        self._checkout_track.set_cursor(seconds)
 
     # ------------------------------------------------------------------
     # Preview — wire ScrubPlayer to the selected checkout

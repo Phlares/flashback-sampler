@@ -96,27 +96,43 @@ class CheckoutManager:
     # Creation
     # ------------------------------------------------------------------
 
-    def create(self, duration_s: float, anchor: str = "latest") -> Checkout:
+    def create(
+        self,
+        duration_s: float,
+        anchor: str = "latest",
+        anchor_offset_s: float = 0.0,
+    ) -> Checkout:
         """
         Create a new Checkout by snapshotting `duration_s` seconds of audio
         from the buffer.
 
-        Currently only `anchor="latest"` is supported (take the most
-        recent N seconds). Additional anchors ("oldest", "from_mark") will
-        land with the UI integration in later milestones.
+        `anchor="latest"` is the only supported anchor today.
+        `anchor_offset_s` shifts the trailing edge of the slice earlier in
+        time. 0.0 (default) ends the clip at "now"; 60.0 ends it 60 s ago.
+        This is how the rotary knob moves a checkout back in time through
+        the ring buffer.
         """
         if anchor != "latest":
             raise NotImplementedError(f"anchor={anchor!r} not yet supported")
         if duration_s <= 0:
             raise ValueError("duration_s must be positive")
+        if anchor_offset_s < 0:
+            raise ValueError("anchor_offset_s must be non-negative")
 
-        # Pull the slice BEFORE checking caps — otherwise clamped-duration
-        # checkouts would produce stale cap estimates.
-        audio = self._buffer.get_latest(duration_s)
+        if anchor_offset_s <= 0:
+            # Fast path — unchanged from before
+            audio = self._buffer.get_latest(duration_s)
+        else:
+            # Resolve to a segment ending `anchor_offset_s` seconds ago
+            audio = self._buffer.get_segment(
+                start_ago=anchor_offset_s + duration_s,
+                end_ago=anchor_offset_s,
+            )
         # Snapshot abs sample range under the buffer's lock (cheap) for metadata
         with self._buffer._lock:  # noqa: SLF001 — internal coordination
-            abs_end = self._buffer.total_written
-            abs_start = abs_end - audio.shape[0]
+            total = self._buffer.total_written
+        abs_end = total - int(anchor_offset_s * self._buffer.sample_rate)
+        abs_start = abs_end - audio.shape[0]
 
         # Check caps atomically with insertion
         with self._lock:
