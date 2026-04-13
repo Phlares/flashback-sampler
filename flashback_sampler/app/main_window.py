@@ -757,7 +757,27 @@ class MainWindow(QMainWindow):
 
     def _open_add_source_dialog(self) -> None:
         default_name = f"Source {len(self._state.slots) + 1}"
-        dlg = AddSourceDialog(default_name=default_name, parent=self)
+        # Pull defaults from AppSettings so the dialog inherits the
+        # "default slot size" the user configured in Settings dialog.
+        settings = getattr(self, "_app_settings", AppSettings())
+        default_buffer_s = settings.buffer_minutes * 60.0
+        # Max is capped by the settings.buffer_minutes value — raise
+        # it in Settings to allow longer-per-slot captures.
+        max_buffer_s = max(
+            default_buffer_s, float(settings.buffer_minutes * 60.0)
+        )
+        # Inherit sample rate and channels from the current active slot
+        # (these aren't in settings yet; active slot is the closest
+        # thing to a "session default" we have).
+        active = self._state.active_slot
+        dlg = AddSourceDialog(
+            default_name=default_name,
+            default_buffer_seconds=default_buffer_s,
+            max_buffer_seconds=max_buffer_s,
+            default_sample_rate=active.sample_rate,
+            default_channels=active.channels,
+            parent=self,
+        )
         if dlg.exec() != AddSourceDialog.Accepted:
             return
         preset = dlg.result_preset()
@@ -934,7 +954,10 @@ class MainWindow(QMainWindow):
         target, _filter = QFileDialog.getSaveFileName(
             self,
             f"Save As {fmt}",
-            str(self._default_save_dir() / f"flashback_{co.id}{ext}"),
+            str(
+                self._default_save_dir()
+                / f"{self._suggested_filename(slot, co)}{ext}"
+            ),
             f"{fmt} audio (*{ext})",
         )
         if not target:
@@ -1017,7 +1040,10 @@ class MainWindow(QMainWindow):
         target, _selected = QFileDialog.getSaveFileName(
             self,
             f"Export selection as {fmt}",
-            str(self._default_save_dir() / f"flashback_{co.id}_trim{ext}"),
+            str(
+                self._default_save_dir()
+                / f"{self._suggested_filename(slot, co, suffix='trim')}{ext}"
+            ),
             f"{fmt} audio (*{ext})",
         )
         if not target:
@@ -1189,6 +1215,61 @@ class MainWindow(QMainWindow):
                 return slot
         return None
 
+    @staticmethod
+    def _sanitize_filename_part(text: str) -> str:
+        """
+        Turn a free-form slot name into something safe to drop into a
+        filename. Lowercased, alphanumeric + underscore only, empty
+        string falls back to "source".
+        """
+        import re
+        s = re.sub(r"[^A-Za-z0-9_-]+", "_", text or "").strip("_").lower()
+        return s or "source"
+
+    def _suggested_filename(self, slot, co, suffix: str = "") -> str:
+        """
+        Build a default save filename that ties the clip back to its
+        source slot, e.g. 'flashback_discord_abc123def456_trim.wav'.
+        """
+        slot_part = self._sanitize_filename_part(slot.name)
+        base = f"flashback_{slot_part}_{co.id}"
+        if suffix:
+            base += f"_{suffix}"
+        return base
+
+    def _switch_active_slot_gently(self, new_index: int) -> None:
+        """
+        Light-weight active-focus switch that preserves the current
+        checkout selection, preview, and Track 2 state. Used when the
+        user picks a clip from a non-active slot via the list — the
+        UI should follow the clip without destroying the user's
+        selection / playback state.
+        """
+        if new_index == self._state.active_slot_index:
+            return
+        if not (0 <= new_index < len(self._state.slots)):
+            return
+        # Save outgoing slot's transport state
+        old_slot = self._state.active_slot
+        old_slot.anchor_offset_s = self._anchor_offset_s
+        old_slot.duration_preset_idx = self._presets.active_index()
+
+        self._state.set_active_slot_index(new_index)
+        new_slot = self._state.active_slot
+
+        # Load incoming slot's transport state into the rotary + presets
+        self._anchor_offset_s = float(new_slot.anchor_offset_s)
+        self._presets.set_active_index(int(new_slot.duration_preset_idx))
+        self._rotary.setValue(self._anchor_offset_s)
+
+        # Capture button text tracks the new slot's capture state
+        if new_slot.is_capturing():
+            self._capture_btn.setText("STOP CAPTURE")
+        else:
+            self._capture_btn.setText("START CAPTURE")
+
+        # Track 1 content will repopulate on the next tick automatically.
+
     def _resolve_ref(self, ref):
         """
         Turn a (slot_id, checkout_id) tuple into (slot, Checkout) or
@@ -1228,14 +1309,13 @@ class MainWindow(QMainWindow):
 
         for _idx, slot in slot_iter:
             for co in slot.checkout_manager.list():
-                mins = int(co.duration_seconds // 60)
-                secs = int(co.duration_seconds - mins * 60)
-                if self._list_filter_mode == "all":
-                    prefix = f"[{slot.name.upper():<8s}]"
-                else:
-                    prefix = " " * 10
+                # Always prefix with [SOURCE] so the user can trace a
+                # clip back to its slot at a glance, regardless of
+                # filter mode. Pad to 10 chars so the alignment stays
+                # stable across slot name lengths.
+                prefix = f"[{slot.name.upper():<10s}]"
                 label = (
-                    f"  {prefix}  {co.id}   {mins:02d}:{secs:02d}"
+                    f"  {prefix}  {co.id}   {format_time_cs(co.duration_seconds)}"
                     f"   {co.ram_bytes / 1024 / 1024:5.1f} MB"
                     f"   [{co.state}]"
                 )
@@ -1271,9 +1351,22 @@ class MainWindow(QMainWindow):
         resolved = self._resolve_ref(ref)
         if resolved is None:
             self._checkout_track.set_checkout(None)
-        else:
-            _slot, co = resolved
-            self._checkout_track.set_checkout(co)
+            return
+
+        slot, co = resolved
+        self._checkout_track.set_checkout(co)
+
+        # Auto-switch active-focus to the clip's owning slot so Track 1
+        # shows the slot the user just selected a clip from. Keeps the
+        # mental model stable: looking at a clip means looking at its
+        # source. Uses the gentle-switch path so the just-made
+        # selection is preserved.
+        try:
+            slot_index = self._state.slots.index(slot)
+        except ValueError:
+            return
+        if slot_index != self._state.active_slot_index:
+            self._switch_active_slot_gently(slot_index)
 
     def _on_clip_seek(self, seconds: float) -> None:
         """
@@ -1377,7 +1470,10 @@ class MainWindow(QMainWindow):
         target, selected = QFileDialog.getSaveFileName(
             self,
             "Save checkout",
-            str(self._default_save_dir() / f"flashback_{co.id}.wav"),
+            str(
+                self._default_save_dir()
+                / f"{self._suggested_filename(slot, co)}.wav"
+            ),
             "WAV audio (*.wav);;FLAC audio (*.flac)",
         )
         if not target:
