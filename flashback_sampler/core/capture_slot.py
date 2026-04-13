@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from .buffer import AudioCircularBuffer
 from .capture_source import CaptureSource
@@ -46,6 +46,13 @@ class CaptureSlot:
         called by the app layer)
       - per-slot transport state so each slot remembers its own anchor
         offset and duration preset across UI switches
+      - an optional per-slot capture_spec override. `capture_spec` here
+        is deliberately typed as `Any` in the core layer because we
+        don't want to pull CaptureDevice (an app-layer dataclass) into
+        pure-python core. Concretely it holds a
+        `flashback_sampler.app.audio_devices.CaptureDevice` when the
+        app is wired up, or None when the slot follows whatever the
+        global AppState.capture_spec points at.
     """
 
     id: str
@@ -57,6 +64,7 @@ class CaptureSlot:
     buffer: AudioCircularBuffer
     checkout_manager: CheckoutManager
     capture_source: Optional[CaptureSource] = None
+    capture_spec: Any = None  # per-slot override; None = inherit global
     anchor_offset_s: float = 0.0
     duration_preset_idx: int = 4  # default 3:00 on the 8-preset cluster
 

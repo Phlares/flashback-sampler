@@ -848,6 +848,14 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
+        # Capture Source submenu — per-slot device routing. "Use
+        # Default (global)" at the top sets slot.capture_spec = None so
+        # the slot follows whatever the Audio menu has selected.
+        cap_menu = menu.addMenu("Capture Source")
+        self._populate_slot_capture_source_menu(cap_menu, slot_index)
+
+        menu.addSeparator()
+
         flush_act = QAction("Flush Buffer…", self)
         flush_act.setEnabled(has_buffered)
         flush_act.triggered.connect(
@@ -866,6 +874,87 @@ class MainWindow(QMainWindow):
 
         qpt = QPoint(int(global_pos.x()), int(global_pos.y()))
         menu.exec(qpt)
+
+    def _populate_slot_capture_source_menu(self, cap_menu: QMenu, slot_index: int) -> None:
+        """
+        Build (or rebuild) the per-slot Capture Source submenu. Lists
+        every available device with a checkmark on the currently
+        selected one (either the slot's override or the inherited
+        global). Extra "Use Default (global)" entry at the top lets
+        the user revert to inheritance.
+        """
+        slot = self._state.slots[slot_index]
+        current_spec = self._state.effective_capture_spec_for_slot(slot)
+        using_override = slot.capture_spec is not None
+
+        group = QActionGroup(cap_menu)
+        group.setExclusive(True)
+
+        global_default = QAction("Use Default (global)", cap_menu)
+        global_default.setCheckable(True)
+        global_default.setChecked(not using_override)
+        global_default.triggered.connect(
+            lambda _c=False, i=slot_index: self._set_slot_capture_spec(i, None)
+        )
+        group.addAction(global_default)
+        cap_menu.addAction(global_default)
+
+        cap_menu.addSeparator()
+
+        devices = list_capture_devices()
+        if not devices:
+            hint = QAction("(no capture devices)", cap_menu)
+            hint.setEnabled(False)
+            cap_menu.addAction(hint)
+            return
+
+        for dev in devices:
+            label = dev.name + ("   [default]" if dev.is_default else "")
+            act = QAction(label, cap_menu)
+            act.setCheckable(True)
+            if (
+                using_override
+                and current_spec is not None
+                and current_spec.kind == dev.kind
+                and current_spec.id == dev.id
+            ):
+                act.setChecked(True)
+            group.addAction(act)
+            cap_menu.addAction(act)
+            act.triggered.connect(
+                lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(i, d)
+            )
+
+    def _set_slot_capture_spec(
+        self, slot_index: int, device: CaptureDevice | None
+    ) -> None:
+        """
+        Set a slot's per-slot capture override (or clear it to follow
+        the global default). If the slot is currently capturing, stop
+        and restart with the new device so the change takes effect
+        immediately.
+        """
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        slot.capture_spec = device
+
+        if not slot.is_capturing():
+            return
+
+        # Restart on the new source
+        try:
+            slot.stop_capture()
+            new_source = self._state.build_capture_for_slot(slot)
+            slot.bind_capture(new_source)
+            slot.start_capture()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Capture restart failed",
+                f"Could not switch capture source on "
+                f"{slot.name!r}:\n\n{e}",
+            )
 
     def _remove_slot_with_confirmation(self, slot_index: int) -> None:
         if not (0 <= slot_index < len(self._state.slots)):
