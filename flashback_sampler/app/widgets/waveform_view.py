@@ -35,6 +35,12 @@ class WaveformView(QWidget):
         self._playhead_frac: float | None = None  # [0..1], None = hidden
         self._sel_start: float | None = None  # [0..1]
         self._sel_end: float | None = None  # [0..1]
+        # Timeline state: total duration in seconds, and which side
+        # is zero. "left" = ascending LTR 00:00..MM:SS (clip view),
+        # "right" = zero at right edge, descending into negatives
+        # (live buffer view, "-MM:SS ago").
+        self._timeline_total_s: float = 0.0
+        self._timeline_anchor: str = "left"  # "left" or "right"
 
     # ------------------------------------------------------------------
     # Public API
@@ -53,6 +59,27 @@ class WaveformView(QWidget):
     def set_playhead(self, frac: float | None) -> None:
         """0..1 horizontal position of the scrub marker, or None to hide."""
         self._playhead_frac = frac
+        self.update()
+
+    def set_timeline(self, total_seconds: float, anchor: str = "left") -> None:
+        """
+        Configure the timeline strip painted along the bottom of the
+        waveform. Pass `total_seconds <= 0` to hide it.
+
+        anchor:
+          "left"  — 00:00 at the left edge, ascending rightward
+                    (clip view: start of clip at left, end at right).
+          "right" — 00:00 at the right edge, descending leftward into
+                    negatives (live buffer: NOW at right, audio-ago
+                    at left).
+        """
+        total = max(0.0, float(total_seconds))
+        if anchor not in ("left", "right"):
+            anchor = "left"
+        if total == self._timeline_total_s and anchor == self._timeline_anchor:
+            return
+        self._timeline_total_s = total
+        self._timeline_anchor = anchor
         self.update()
 
     def set_selection(
@@ -98,13 +125,14 @@ class WaveformView(QWidget):
         p.drawLine(0, h - 1, w - 1, h - 1)
         p.drawLine(w - 1, 0, w - 1, h - 1)
 
-        # ── 3. Inner content region (with label strip) ───────────────
+        # ── 3. Inner content region (with label strip + timeline) ───
         label_strip = 18
+        timeline_strip = 16 if self._timeline_total_s > 0 else 0
         inner_top = 1 + label_strip
         inner_x = 6
         inner_w = w - inner_x - 6
         inner_y = inner_top
-        inner_h = h - inner_top - 6
+        inner_h = h - inner_top - 6 - timeline_strip
         if inner_w <= 2 or inner_h <= 2:
             p.end()
             return
@@ -198,7 +226,173 @@ class WaveformView(QWidget):
             )
             p.setRenderHint(QPainter.Antialiasing, False)
 
+        # ── 8. Timeline strip (bottom edge) ──────────────────────────
+        if self._timeline_total_s > 0 and timeline_strip > 0:
+            _paint_timeline(
+                p,
+                x0=inner_x,
+                y0=inner_y + inner_h + 2,
+                width=inner_w,
+                height=timeline_strip - 2,
+                total_seconds=self._timeline_total_s,
+                anchor=self._timeline_anchor,
+            )
+
         p.end()
+
+
+def _pick_timeline_step(total_seconds: float, pixel_width: int) -> tuple[float, float]:
+    """
+    Return (major_step_seconds, minor_step_seconds) for a timeline
+    that covers `total_seconds` over `pixel_width` pixels.
+
+    Picks the largest step from a fixed ladder such that major-tick
+    labels don't collide. Approximately 60 px between major labels.
+    """
+    if total_seconds <= 0 or pixel_width <= 40:
+        return (total_seconds, total_seconds)
+
+    # Candidate major step sizes in seconds, smallest to largest
+    CANDIDATES: tuple[float, ...] = (
+        0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0,
+        60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
+    )
+    target_label_spacing_px = 70
+    seconds_per_pixel = total_seconds / pixel_width
+    desired_step = target_label_spacing_px * seconds_per_pixel
+
+    major = CANDIDATES[-1]
+    for c in CANDIDATES:
+        if c >= desired_step:
+            major = c
+            break
+
+    # Minor step = 1/5 of major for most ranges, 1/4 for coarse ones
+    if major >= 60.0:
+        minor = major / 6.0
+    elif major >= 10.0:
+        minor = major / 5.0
+    else:
+        minor = major / 5.0
+    return (major, minor)
+
+
+def _format_timeline_label(seconds: float) -> str:
+    """Return a compact MM:SS or M:SS.s label for a timeline position."""
+    sign = "-" if seconds < 0 else ""
+    s = abs(float(seconds))
+    if s < 60:
+        whole = int(s)
+        frac = s - whole
+        if frac > 0.05:
+            return f"{sign}{whole}.{int(round(frac * 10))}"
+        return f"{sign}{whole}"
+    m = int(s // 60)
+    sec = int(round(s - m * 60))
+    if sec == 60:
+        m += 1
+        sec = 0
+    return f"{sign}{m}:{sec:02d}"
+
+
+def _paint_timeline(
+    p: QPainter,
+    x0: int,
+    y0: int,
+    width: int,
+    height: int,
+    total_seconds: float,
+    anchor: str,
+) -> None:
+    """
+    Paint a tick-strip timeline over the rectangle (x0, y0, width, height).
+
+    anchor="left":  0:00 at left, total_seconds at right
+    anchor="right": 0:00 at right, labels show negative offsets going left
+    """
+    if width <= 2 or height <= 2 or total_seconds <= 0:
+        return
+
+    major_step, minor_step = _pick_timeline_step(total_seconds, width)
+    px_per_sec = width / total_seconds
+
+    # Minor ticks
+    minor_pen = QPen(QColor(168, 163, 152, int(0.25 * 255)), 1)
+    major_pen = QPen(QColor(168, 163, 152, int(0.55 * 255)), 1)
+
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, False)
+
+    # Baseline — thin hairline across the top of the timeline strip
+    base_pen = QPen(QColor(242, 237, 223, int(0.10 * 255)), 1)
+    p.setPen(base_pen)
+    p.drawLine(x0, y0, x0 + width, y0)
+
+    # Label font
+    font = p.font()
+    font.setPointSize(7)
+    font.setBold(False)
+    p.setFont(font)
+
+    minor_top = y0 + 1
+    minor_bot = y0 + 4
+    major_top = y0 + 1
+    major_bot = y0 + 7
+    text_top = y0 + 8
+
+    def _tick_x_for_sec(s: float) -> float:
+        if anchor == "right":
+            # NOW at x0 + width; negative offsets extend leftward
+            # s is a positive "seconds ago" value
+            return x0 + width - s * px_per_sec
+        # anchor == "left"
+        return x0 + s * px_per_sec
+
+    # Draw minor ticks
+    n_minor = int(total_seconds / minor_step) + 1
+    p.setPen(minor_pen)
+    for i in range(n_minor + 1):
+        s = i * minor_step
+        if s > total_seconds + minor_step * 0.5:
+            break
+        x = _tick_x_for_sec(s)
+        if x < x0 - 1 or x > x0 + width + 1:
+            continue
+        p.drawLine(int(x), minor_top, int(x), minor_bot)
+
+    # Draw major ticks + labels
+    n_major = int(total_seconds / major_step) + 1
+    p.setPen(major_pen)
+    # We want the last label flush to the anchor edge, so iterate and
+    # draw everything including a final label for the far edge.
+    last_label_x: float = -1e9
+    min_label_spacing_px = 40
+
+    for i in range(n_major + 1):
+        s = i * major_step
+        if s > total_seconds + major_step * 0.5:
+            break
+        x = _tick_x_for_sec(s)
+        if x < x0 - 1 or x > x0 + width + 1:
+            continue
+        p.setPen(major_pen)
+        p.drawLine(int(x), major_top, int(x), major_bot)
+
+        # Don't paint labels that would collide with the previous one
+        if x - last_label_x < min_label_spacing_px:
+            continue
+
+        if anchor == "right":
+            label = _format_timeline_label(-s) if s > 0 else "NOW"
+        else:
+            label = _format_timeline_label(s)
+
+        label_rect = QRectF(x - 40, text_top, 80, height - 8)
+        p.setPen(QColor(EREBUS["bone"]))
+        p.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, label)
+        last_label_x = x
+
+    p.restore()
 
 
 def _make_peak_lines(

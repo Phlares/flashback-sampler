@@ -187,6 +187,7 @@ class CheckoutTrack(QWidget):
             self._wave.set_playhead(None)
             self._wave.clear_manual_selection()
             self._wave.set_labels("CLIP", "— — —")
+            self._wave.set_timeline(total_seconds=0.0)
             self._caption.setText("— NO CHECKOUT SELECTED —")
             self._meta.setText("")
             self._pos_label.setText("00:00 / 00:00")
@@ -202,6 +203,8 @@ class CheckoutTrack(QWidget):
             "CLIP",
             f"{checkout.sample_rate // 1000}K   {checkout.channels}CH",
         )
+        # Clip timeline: 00:00 at the left, clip duration at the right
+        self._wave.set_timeline(total_seconds=self._duration_s, anchor="left")
         self._caption.setText(f"CLIP  {checkout.id}")
         self._meta.setText(
             f"{checkout.ram_bytes / 1024 / 1024:.1f} MB   "
