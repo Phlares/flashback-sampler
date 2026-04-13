@@ -16,6 +16,30 @@ from flashback_sampler.app.widgets.level_meter import LevelMeter
 from flashback_sampler.app.widgets.waveform_view import WaveformView
 
 
+def compute_anchor_section(
+    anchor_offset_s: float,
+    duration_s: float,
+    buffered_s: float,
+) -> tuple[float, float] | None:
+    """
+    Compute (start_frac, end_frac) for the prospective checkout band on
+    the live buffer waveform. Both fractions are in [0, 1] where 0 is
+    the oldest buffered sample and 1 is the current head ("now").
+
+    Returns None when there is nothing meaningful to show — buffer empty,
+    degenerate duration, or start/end collapse.
+    """
+    if buffered_s <= 0.0 or duration_s <= 0.0:
+        return None
+    end_frac = 1.0 - (anchor_offset_s / buffered_s)
+    start_frac = 1.0 - ((anchor_offset_s + duration_s) / buffered_s)
+    end_frac = max(0.0, min(1.0, end_frac))
+    start_frac = max(0.0, min(1.0, start_frac))
+    if end_frac <= start_frac:
+        return None
+    return (start_frac, end_frac)
+
+
 class BufferTrack(QWidget):
     """
     Track 1 — always-visible live ring buffer display.
@@ -84,11 +108,21 @@ class BufferTrack(QWidget):
 
     def set_anchor_playhead(self, frac: float | None) -> None:
         """
-        Horizontal ghost playhead indicating where the next checkout would
-        START (i.e. where the rotary's anchor points). frac is 0..1 across
-        the live buffer's visible span, or None to hide.
+        DEPRECATED — use set_anchor_section instead. Kept as a thin
+        wrapper so older callers don't break.
         """
         self._waveform.set_playhead(frac)
+
+    def set_anchor_section(
+        self,
+        start_frac: float | None,
+        end_frac: float | None,
+    ) -> None:
+        """
+        Highlight the [start_frac, end_frac] band on the live waveform —
+        the prospective checkout range. Pass None / None to hide.
+        """
+        self._waveform.set_selection(start_frac, end_frac)
 
     def update_levels(self, rms_per_channel) -> None:
         self._meter.set_levels(rms_per_channel)
