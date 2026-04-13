@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from flashback_sampler.app.add_source_dialog import AddSourceDialog
 from flashback_sampler.app.audio_devices import (
     CaptureDevice,
     OutputDevice,
@@ -47,6 +48,7 @@ from flashback_sampler.app.settings_dialog import (
 )
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.time_format import format_time_cs, format_time_signed_cs
+from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.app.widgets.buffer_track import (
     BufferTrack,
     compute_anchor_section,
@@ -59,6 +61,7 @@ from flashback_sampler.app.widgets.duration_preset import (
     DurationPreset,
 )
 from flashback_sampler.app.widgets.rotary_knob import RotaryKnob
+from flashback_sampler.app.widgets.source_strip import SourceStrip
 
 
 # Legacy names kept as module-level exports so existing tests and any
@@ -112,6 +115,15 @@ class MainWindow(QMainWindow):
         title = QLabel("FLASHBACK")
         title.setProperty("role", "readout")
         vbox.addWidget(title)
+
+        # --- Source strip ---------------------------------------------
+        self._source_strip = SourceStrip()
+        self._source_strip.activeChanged.connect(self._on_source_strip_active_changed)
+        self._source_strip.addSourceRequested.connect(self._open_add_source_dialog)
+        self._source_strip.contextMenuRequested.connect(
+            self._on_source_strip_context_menu
+        )
+        vbox.addWidget(self._source_strip, 0)
 
         # --- Track 1: live buffer view --------------------------------
         self._buffer_track = BufferTrack(channels=self._state.channels)
@@ -508,6 +520,12 @@ class MainWindow(QMainWindow):
             device_name=self._device_name,
         )
 
+        # Push slot state into the source strip (chip labels, fill
+        # bars, REC dots, xrun counters all update in place).
+        self._source_strip.set_slots(
+            self._state.slots, self._state.active_slot_index
+        )
+
         # Snapshot the authoritative buffer state (total_written) and
         # either PIN a pending manual drag-selection or SYNC an
         # already-pinned one into the widget's fractional space so the
@@ -597,6 +615,152 @@ class MainWindow(QMainWindow):
         spec_name = self._state.capture_spec.name if self._state.capture_spec else "?"
         self._device_label.setText(f"DEV  {spec_name.upper()}")
         self._device_name = spec_name.upper()
+
+    # ------------------------------------------------------------------
+    # Source strip handlers — slot switching, add, remove
+    # ------------------------------------------------------------------
+
+    def _on_source_strip_active_changed(self, new_index: int) -> None:
+        if new_index == self._state.active_slot_index:
+            return
+        # Persist the current transport state on the outgoing slot so
+        # switching back restores the user's anchor / duration preset.
+        old_slot = self._state.active_slot
+        old_slot.anchor_offset_s = self._anchor_offset_s
+        old_slot.duration_preset_idx = self._presets.active_index()
+
+        # Stop any in-progress preview — it's tied to a checkout on
+        # the old slot and would point at a bound ndarray that the
+        # new slot's list doesn't know about.
+        if self._previewing_id is not None:
+            self._stop_preview()
+        self._checkout_track.set_checkout(None)
+        self._buffer_track.clear_manual_selection()
+        self._list.clearSelection()
+
+        try:
+            self._state.set_active_slot_index(new_index)
+        except IndexError:
+            return
+
+        new_slot = self._state.active_slot
+
+        # Load the new slot's per-slot transport state back into the
+        # rotary + preset cluster.
+        self._anchor_offset_s = float(new_slot.anchor_offset_s)
+        self._presets.set_active_index(int(new_slot.duration_preset_idx))
+        self._rotary.setValue(self._anchor_offset_s)
+
+        # Capture button reflects the new slot's capture state
+        if new_slot.is_capturing():
+            self._capture_btn.setText("STOP CAPTURE")
+            cap_name = (
+                self._state.capture_spec.name if self._state.capture_spec else "?"
+            )
+            self._device_name = cap_name.upper()
+            self._device_label.setText(f"DEV  {self._device_name}")
+        else:
+            self._capture_btn.setText("START CAPTURE")
+            self._device_name = f"(SLOT: {new_slot.name.upper()})"
+            self._device_label.setText(f"DEV  {self._device_name}")
+
+        # Refresh the checkout list to show the new slot's checkouts
+        self._refresh_checkout_list()
+
+    def _open_add_source_dialog(self) -> None:
+        default_name = f"Source {len(self._state.slots) + 1}"
+        dlg = AddSourceDialog(default_name=default_name, parent=self)
+        if dlg.exec() != AddSourceDialog.Accepted:
+            return
+        preset = dlg.result_preset()
+        if preset is None:
+            return
+        name = dlg.result_name() or default_name
+        try:
+            new_slot = self._state.add_slot(preset, name=name)
+        except Exception as e:
+            QMessageBox.warning(self, "Add source failed", str(e))
+            return
+        # Auto-switch to the newly-added slot
+        new_index = self._state.slots.index(new_slot)
+        self._on_source_strip_active_changed(new_index)
+
+    def _on_source_strip_context_menu(self, slot_index: int, global_pos) -> None:
+        from PySide6.QtCore import QPoint
+
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        can_remove = len(self._state.slots) > 1
+
+        menu = QMenu(self)
+
+        switch_act = QAction(f"Switch to {slot.name}", self)
+        switch_act.setEnabled(slot_index != self._state.active_slot_index)
+        switch_act.triggered.connect(
+            lambda: self._on_source_strip_active_changed(slot_index)
+        )
+        menu.addAction(switch_act)
+
+        menu.addSeparator()
+
+        remove_act = QAction("Remove Source", self)
+        remove_act.setEnabled(can_remove)
+        remove_act.triggered.connect(
+            lambda: self._remove_slot_with_confirmation(slot_index)
+        )
+        menu.addAction(remove_act)
+
+        qpt = QPoint(int(global_pos.x()), int(global_pos.y()))
+        menu.exec(qpt)
+
+    def _remove_slot_with_confirmation(self, slot_index: int) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        reply = QMessageBox.question(
+            self,
+            "Remove source?",
+            (
+                f"This will stop capture on {slot.name!r} and discard its "
+                f"{slot.buffered_seconds():.1f} s of buffered audio.\n\n"
+                "Existing checkouts on this slot will also be lost — "
+                "they live in the slot's CheckoutManager."
+            ),
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        # If we're removing the active slot, the AppState's
+        # remove_slot() will adjust active_slot_index. Run the full
+        # active-slot-changed path after so the UI re-syncs.
+        removing_active = slot_index == self._state.active_slot_index
+        try:
+            self._state.remove_slot(slot_index)
+        except Exception as e:
+            QMessageBox.warning(self, "Remove failed", str(e))
+            return
+        if removing_active:
+            # Simulate a switch to the (now-current) active slot
+            current = self._state.active_slot_index
+            # _on_source_strip_active_changed early-outs when the
+            # index is already current, so we nudge it by pretending
+            # we just switched to a different slot.
+            self._previewing_id = None
+            self._stop_preview()
+            self._checkout_track.set_checkout(None)
+            self._buffer_track.clear_manual_selection()
+            self._list.clearSelection()
+            new_slot = self._state.active_slot
+            self._anchor_offset_s = float(new_slot.anchor_offset_s)
+            self._presets.set_active_index(int(new_slot.duration_preset_idx))
+            self._rotary.setValue(self._anchor_offset_s)
+            self._capture_btn.setText(
+                "STOP CAPTURE" if new_slot.is_capturing() else "START CAPTURE"
+            )
+            self._device_name = f"(SLOT: {new_slot.name.upper()})"
+            self._refresh_checkout_list()
 
     # ------------------------------------------------------------------
     # Checkout list context menu — right-click quick actions
