@@ -128,13 +128,14 @@ class WaveformView(QWidget):
 
         # ── 3. Inner content region (with label strip + timeline) ───
         label_strip = 18
-        # Timeline strip wraps its own internal padding — 24 px gives
+        # Timeline strip wraps its own internal padding — 26 px gives
         # the tick marks (~7 px) plus a 7 pt label line room to breathe
         # without colliding with the widget's bottom border.
-        timeline_strip = 24 if self._timeline_total_s > 0 else 0
-        # Reserve a 4 px gutter between the waveform and the timeline
-        # so the bottommost peak-bin pixel doesn't kiss the tick row.
-        timeline_gutter = 4 if timeline_strip > 0 else 0
+        timeline_strip = 26 if self._timeline_total_s > 0 else 0
+        # Reserve an 8 px gutter between the waveform and the timeline
+        # so the bottommost peak-bin pixel visibly clears the tick row.
+        # 4 px was too tight under anti-aliasing at smaller heights.
+        timeline_gutter = 8 if timeline_strip > 0 else 0
         inner_top = 1 + label_strip
         inner_x = 6
         inner_w = w - inner_x - 6
@@ -170,22 +171,27 @@ class WaveformView(QWidget):
 
             signal = QColor(EREBUS["signal"])
 
-            # Stereo = two stacked rows; mono = one row spanning full inner_h
+            # Stereo = two stacked rows; mono = one row spanning full inner_h.
+            # `half` is floored at 1.0 so negative values (which would
+            # invert the waveform) can't happen, and ceilinged at the
+            # actual row half-height minus 2 px so peaks never bleed
+            # across the row midline into the neighbour's territory or
+            # into the timeline strip below.
             if channels >= 2:
                 row_h = inner_h / 2
+                safe_half = max(1.0, (row_h - 4) / 2)
                 for ch in (0, 1):
                     mid = inner_y + row_h * (ch + 0.5)
-                    half = (row_h - 4) / 2
                     lines = _make_peak_lines(
-                        bins, ch, inner_x, bin_width, mid, half
+                        bins, ch, inner_x, bin_width, mid, safe_half
                     )
                     p.setPen(QPen(signal, 1))
                     p.drawLines(lines)
             else:
                 mid = inner_y + inner_h / 2
-                half = (inner_h - 4) / 2
+                safe_half = max(1.0, (inner_h - 4) / 2)
                 lines = _make_peak_lines(
-                    bins, 0, inner_x, bin_width, mid, half
+                    bins, 0, inner_x, bin_width, mid, safe_half
                 )
                 p.setPen(QPen(signal, 1))
                 p.drawLines(lines)

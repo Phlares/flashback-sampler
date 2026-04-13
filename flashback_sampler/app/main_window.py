@@ -84,8 +84,13 @@ class MainWindow(QMainWindow):
         self._list_filter_mode: str = "active"
 
         self.setWindowTitle("flashback-sampler")
-        self.setMinimumSize(920, 720)
-        self.resize(1120, 820)
+        # Minimum computed from the vertical budget: source strip (104)
+        # + title (28) + transport row (~200) + two waveform tracks
+        # (~140 each) + list (~120) + action row (~50) + margins. If
+        # the window goes below this, paint math starts colliding
+        # (waveform kisses timeline, rotary label clips upward).
+        self.setMinimumSize(960, 860)
+        self.resize(1120, 900)
         self._device_name: str = "(NOT CAPTURING)"
 
         self._build_ui()
@@ -164,14 +169,23 @@ class MainWindow(QMainWindow):
         left_col.addStretch(1)
         transport_row.addLayout(left_col, 1)
 
-        # Center: rotary knob (anchor offset scrub)
-        rotary_col = QVBoxLayout()
+        # Center: rotary knob (anchor offset scrub). Wrapped in a
+        # QWidget with a hard minimum height so the ANCHOR label
+        # above and the hint below can never be clipped by a
+        # compressed transport row. Earlier version used
+        # setAlignment(AlignCenter) on the layout which let the
+        # block overflow upward when the row got too short.
+        from PySide6.QtWidgets import QWidget as _QW
+        rotary_host = _QW()
+        rotary_col = QVBoxLayout(rotary_host)
+        rotary_col.setContentsMargins(0, 0, 0, 0)
         rotary_col.setSpacing(4)
-        rotary_col.setAlignment(Qt.AlignCenter)
+
         rotary_cap = QLabel("ANCHOR")
         rotary_cap.setProperty("role", "label")
         rotary_cap.setAlignment(Qt.AlignCenter)
-        rotary_col.addWidget(rotary_cap)
+        rotary_cap.setMinimumHeight(14)
+        rotary_col.addWidget(rotary_cap, 0)
 
         self._rotary = RotaryKnob(diameter=140)
         self._rotary.setRange(0.0, max(1.0, self._state.buffer.duration))
@@ -184,8 +198,14 @@ class MainWindow(QMainWindow):
         rotary_hint = QLabel("DBL-CLICK = NOW")
         rotary_hint.setProperty("role", "label")
         rotary_hint.setAlignment(Qt.AlignCenter)
-        rotary_col.addWidget(rotary_hint)
-        transport_row.addLayout(rotary_col, 0)
+        rotary_hint.setMinimumHeight(14)
+        rotary_col.addWidget(rotary_hint, 0)
+
+        # 14 (label) + 4 + 140 (rotary) + 4 + 14 (hint) = 176. A
+        # little extra padding so descenders don't touch the edges.
+        rotary_host.setMinimumHeight(180)
+        rotary_host.setMinimumWidth(140)
+        transport_row.addWidget(rotary_host, 0, Qt.AlignVCenter)
 
         # Right-center: 8-preset duration cluster
         preset_col = QVBoxLayout()
@@ -486,15 +506,18 @@ class MainWindow(QMainWindow):
         new_settings = dlg.result_settings()
         buffer_changed = dlg.buffer_changed_from_initial(new_settings)
 
+        active_slot = self._state.active_slot
         if buffer_changed:
             reply = QMessageBox.question(
                 self,
                 "Rebuild ring buffer?",
                 (
-                    "Changing the buffer duration will DISCARD any currently "
-                    "buffered audio. Existing checked-out clips will be "
-                    "preserved (they're in their own RAM).\n\n"
-                    "Continue?"
+                    f"This will DISCARD the {active_slot.name!r} slot's "
+                    f"buffered audio and rebuild its ring at "
+                    f"{new_settings.buffer_minutes:.1f} min. Other slots "
+                    f"are untouched. Existing checked-out clips on every "
+                    f"slot are preserved (they're in their own RAM).\n\n"
+                    f"Continue?"
                 ),
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
@@ -502,31 +525,40 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
 
-        # Apply caps immediately
+        # Apply caps immediately (active slot's CheckoutManager caps only —
+        # documented behavior; a future per-slot settings dialog will
+        # handle non-active slots).
         self._state.apply_checkout_caps(
             max_active=new_settings.max_checkouts,
             max_ram_mb=new_settings.max_ram_mb,
         )
         self._state.set_project_ram_budget_mb(new_settings.project_ram_budget_mb)
 
-        # Rebuild buffer if duration changed
+        # Rebuild buffer if duration changed. The restart path has to
+        # respect arm/roll semantics: if the master transport is rolling
+        # AND the active slot is armed, stop-rebuild-start just that
+        # slot. Other rolling slots are untouched.
         if buffer_changed:
-            was_running = self._state.is_capturing()
+            was_rolling = bool(self._state.rolling)
+            slot_was_armed = bool(active_slot.armed)
+
             try:
                 self._state.rebuild_buffer(new_settings.buffer_minutes * 60.0)
             except Exception as e:
                 QMessageBox.critical(self, "Buffer rebuild failed", str(e))
                 return
-            if was_running:
+
+            if was_rolling and slot_was_armed:
                 try:
-                    new_cap = self._state.build_capture()
-                    new_cap.start()
-                    self._state.set_capture(new_cap)
+                    new_cap = self._state.build_capture_for_slot(active_slot)
+                    active_slot.bind_capture(new_cap)
+                    active_slot.start_capture()
                 except Exception as e:
                     QMessageBox.warning(
                         self,
                         "Capture restart failed",
-                        f"Buffer was rebuilt but capture did not restart:\n\n{e}",
+                        f"Buffer was rebuilt but capture did not restart "
+                        f"on {active_slot.name!r}:\n\n{e}",
                     )
 
         # Persist the new settings
@@ -571,17 +603,17 @@ class MainWindow(QMainWindow):
         for s in self._state.slots:
             spec = self._state.effective_capture_spec_for_slot(s)
             source_names.append(short_source_name(spec.name) if spec else "—")
+        is_rolling = bool(self._state.rolling)
         self._source_strip.set_slots(
             self._state.slots,
             self._state.active_slot_index,
             source_names=source_names,
+            is_rolling=is_rolling,
         )
-        # Master CAPTURE ALL button reflects the live primed count.
-        primed_count = sum(
-            1 for s in self._state.slots if s.is_capturing()
-        )
+        # Master button reflects armed count + rolling state.
+        armed_count = self._state.armed_count()
         self._source_strip.set_master_state(
-            primed_count, len(self._state.slots)
+            armed_count, len(self._state.slots), is_rolling
         )
 
         # Snapshot the authoritative buffer state (total_written) and
@@ -624,6 +656,31 @@ class MainWindow(QMainWindow):
         # stop capture and still pull a clip from what they recorded.
         self._checkout_btn.setEnabled(bs > 0.5)
 
+        # Button label reflects what CHECK OUT will actually do on
+        # click: a painted manual selection wins, otherwise it uses
+        # the preset duration from the cluster.
+        if self._buffer_track.has_manual_selection():
+            rng = self._buffer_track.manual_selection_abs_range()
+            if rng is not None:
+                sel_s = (rng[1] - rng[0]) / max(1, buf.sample_rate)
+                self._checkout_btn.setText(
+                    f"CHECK OUT SEL {format_time_cs(sel_s)}"
+                )
+        else:
+            self._checkout_btn.setText(
+                f"CHECK OUT {format_time_cs(self._current_duration_s())}"
+            )
+
+        # SAVE button label reflects trim state on the focused clip:
+        # "SAVE IN-OUT" when a trim is painted, "SAVE CLIP" otherwise.
+        if self._checkout_track.current_checkout_id() is not None:
+            if self._checkout_track.trim_range_seconds() is not None:
+                self._save_btn.setText("SAVE IN-OUT")
+            else:
+                self._save_btn.setText("SAVE CLIP")
+        else:
+            self._save_btn.setText("SAVE")
+
         if self._state.is_capturing():
             cap_src = self._state.capture
             xruns = cap_src.xrun_count()
@@ -657,63 +714,51 @@ class MainWindow(QMainWindow):
             self._preview_btn.setText("PREVIEW")
 
     # ------------------------------------------------------------------
-    # CAPTURE ALL — master prime/unprime for every slot
+    # START / STOP CAPTURE — master transport for every armed slot
     # ------------------------------------------------------------------
 
     def _on_capture_all_clicked(self) -> None:
         """
-        Master CAPTURE ALL button pressed. If every slot is currently
-        primed, stop capture on all of them. Otherwise, prime every
-        slot that isn't already capturing.
+        Master transport button. Flips between START CAPTURE and STOP
+        CAPTURE based on AppState.rolling. When starting, every slot
+        with `armed=True` gets a fresh capture source built, bound and
+        started. When stopping, every actively-capturing slot is
+        halted; armed flags are preserved for the next start.
         """
         slots = self._state.slots
         if not slots:
             return
 
-        all_primed = all(s.is_capturing() for s in slots)
-
-        if all_primed:
-            # Stop every slot — buffered audio is preserved per the
-            # prime-toggle semantics.
-            for slot in slots:
-                try:
-                    slot.stop_capture()
-                except Exception:  # pragma: no cover
-                    pass
-            self._device_name = "(ALL STOPPED, BUFFERS HELD)"
+        if self._state.rolling:
+            stopped = self._state.stop_rolling()
+            self._device_name = (
+                f"STOPPED  ({stopped} SLOTS HELD)" if stopped
+                else "STOPPED"
+            )
             self._device_label.setText(f"DEV  {self._device_name}")
             return
 
-        # Prime every slot that isn't already running. Each slot builds
-        # its own capture source wired to its own ring so concurrent
-        # writes don't contend.
-        first_error: Exception | None = None
-        started = 0
-        for slot in slots:
-            if slot.is_capturing():
-                continue
-            try:
-                source = self._state.build_capture_for_slot(slot)
-                slot.bind_capture(source)
-                slot.start_capture()
-                started += 1
-            except Exception as e:  # pragma: no cover — hardware path
-                first_error = first_error or e
+        started, first_error = self._state.start_rolling()
 
         if first_error is not None:
             QMessageBox.warning(
                 self,
                 "Capture failed",
-                f"Started {started} / {len(slots)} slots; first error:\n\n"
-                f"{first_error}",
+                f"Started {started} / {self._state.armed_count()} armed "
+                f"slots; first error:\n\n{first_error}",
             )
+
+        if started == 0 and self._state.armed_count() == 0:
+            self._device_name = "NO SOURCES ARMED"
+            self._device_label.setText(f"DEV  {self._device_name}")
+            return
 
         spec_name = (
             self._state.capture_spec.name
             if self._state.capture_spec is not None
             else "?"
         )
-        self._device_name = f"CAPTURING {started} SLOTS  {spec_name.upper()}"
+        self._device_name = f"ROLLING  {started} / {len(slots)} SLOTS"
         self._device_label.setText(f"DEV  {self._device_name}")
 
     # ------------------------------------------------------------------
@@ -728,6 +773,9 @@ class MainWindow(QMainWindow):
         old_slot = self._state.active_slot
         old_slot.anchor_offset_s = self._anchor_offset_s
         old_slot.duration_preset_idx = self._presets.active_index()
+        # Remember which clip the user had focused in Track 2 for this
+        # slot, so switching back restores it.
+        old_slot.focused_checkout_id = self._checkout_track.current_checkout_id()
 
         # Stop any in-progress preview — it's tied to a checkout on
         # the old slot and would point at a bound ndarray that the
@@ -762,59 +810,67 @@ class MainWindow(QMainWindow):
             self._device_name = f"(SLOT: {new_slot.name.upper()})"
             self._device_label.setText(f"DEV  {self._device_name}")
 
-        # Refresh the checkout list to show the new slot's checkouts
+        # Refresh the checkout list to show the new slot's checkouts,
+        # then re-select the previously-focused clip for this slot if
+        # it still exists. Setting currentItem triggers
+        # _on_selection_changed which pushes the clip into Track 2
+        # (with its preserved trim state).
         self._refresh_checkout_list()
+        self._restore_focused_checkout_for_active_slot()
+
+    def _restore_focused_checkout_for_active_slot(self) -> None:
+        slot = self._state.active_slot
+        target_cid = slot.focused_checkout_id
+        if not target_cid:
+            self._checkout_track.set_checkout(None)
+            return
+        # Walk the list for a matching (slot_id, cid) ref
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            ref = item.data(Qt.UserRole)
+            if isinstance(ref, tuple) and ref == (slot.id, target_cid):
+                self._list.setCurrentItem(item)
+                return
+        # Referenced checkout no longer exists — clear the stale id
+        slot.focused_checkout_id = None
+        self._checkout_track.set_checkout(None)
 
     def _on_source_strip_prime_toggled(self, slot_index: int) -> None:
         """
-        User clicked the REC button on a chip. Toggles that SPECIFIC
-        slot's capture state independently of which slot is currently
-        active-focused. Multiple slots can be primed simultaneously;
-        each gets its own capture source bound to its own buffer.
+        User clicked the REC button on a chip — toggles the slot's
+        ARMED flag (user intent). If the global transport is currently
+        rolling, we also start or stop that slot's capture source
+        immediately so the change is audible; otherwise it's purely a
+        visual/intent change that applies on the next START CAPTURE.
         """
         if not (0 <= slot_index < len(self._state.slots)):
             return
         slot = self._state.slots[slot_index]
 
-        if slot.is_capturing():
-            # Unprime: just halt the slot's capture. The buffer
-            # contents stay for later scrubbing / checkout.
+        new_armed = not slot.armed
+        slot.armed = new_armed
+
+        if not self._state.rolling:
+            # Quiet intent flip — no capture side-effect until the user
+            # presses START CAPTURE.
+            return
+
+        # Rolling: mirror the arm change in the live capture state.
+        if new_armed and not slot.is_capturing():
+            try:
+                source = self._state.build_capture_for_slot(slot)
+                slot.bind_capture(source)
+                slot.start_capture()
+            except Exception as e:
+                slot.armed = False  # roll back intent on failure
+                QMessageBox.critical(self, "Capture failed", str(e))
+                return
+        elif not new_armed and slot.is_capturing():
             try:
                 slot.stop_capture()
             except Exception as e:
                 QMessageBox.warning(self, "Stop capture failed", str(e))
                 return
-            # If this was the active slot, sync the big capture button
-            if slot_index == self._state.active_slot_index:
-                self._device_name = f"(SLOT: {slot.name.upper()})"
-                self._device_label.setText(f"DEV  {self._device_name}")
-            return
-
-        # Prime: build a capture source wired to THIS slot (not the
-        # active slot) and start it. Slot may replace any existing
-        # bound source; bind_capture stops the previous one first.
-        try:
-            source = self._state.build_capture_for_slot(slot)
-        except Exception as e:
-            QMessageBox.critical(self, "Capture failed", str(e))
-            return
-        try:
-            slot.bind_capture(source)
-            slot.start_capture()
-        except Exception as e:
-            QMessageBox.critical(self, "Capture failed", str(e))
-            return
-
-        # If this was the active slot, sync the big capture button and
-        # the device label so the main controls reflect the state.
-        if slot_index == self._state.active_slot_index:
-            spec_name = (
-                self._state.capture_spec.name
-                if self._state.capture_spec is not None
-                else "?"
-            )
-            self._device_name = spec_name.upper()
-            self._device_label.setText(f"DEV  {self._device_name}")
 
     def _open_add_source_dialog(self) -> None:
         default_name = f"Source {len(self._state.slots) + 1}"
@@ -1092,13 +1148,44 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        save_wav_act = QAction("Save As WAV…", self)
-        save_wav_act.triggered.connect(lambda: self._save_selected_with_fmt("WAV"))
-        menu.addAction(save_wav_act)
+        # Detect trim state on the currently-focused clip so we can
+        # offer In-Out save as a peer when trim is painted. When there
+        # is no trim, only the full-clip save shows.
+        resolved = self._resolve_ref(ref)
+        has_trim = False
+        if resolved is not None:
+            _slot, co = resolved
+            has_trim = co.trim_in_samples > 0 or (
+                co.trim_out_samples > 0
+                and co.trim_out_samples < co.audio.shape[0]
+            )
 
-        save_flac_act = QAction("Save As FLAC…", self)
-        save_flac_act.triggered.connect(lambda: self._save_selected_with_fmt("FLAC"))
-        menu.addAction(save_flac_act)
+        if has_trim:
+            save_trim_wav = QAction("Save In-Out as WAV…", self)
+            save_trim_wav.triggered.connect(
+                lambda: self._save_selected_with_fmt("WAV", trimmed=True)
+            )
+            menu.addAction(save_trim_wav)
+
+            save_trim_flac = QAction("Save In-Out as FLAC…", self)
+            save_trim_flac.triggered.connect(
+                lambda: self._save_selected_with_fmt("FLAC", trimmed=True)
+            )
+            menu.addAction(save_trim_flac)
+
+            menu.addSeparator()
+
+        save_full_wav = QAction("Save Full Clip as WAV…", self)
+        save_full_wav.triggered.connect(
+            lambda: self._save_selected_with_fmt("WAV", trimmed=False)
+        )
+        menu.addAction(save_full_wav)
+
+        save_full_flac = QAction("Save Full Clip as FLAC…", self)
+        save_full_flac.triggered.connect(
+            lambda: self._save_selected_with_fmt("FLAC", trimmed=False)
+        )
+        menu.addAction(save_full_flac)
 
         menu.addSeparator()
 
@@ -1108,12 +1195,15 @@ class MainWindow(QMainWindow):
 
         menu.exec(self._list.mapToGlobal(local_pos))
 
-    def _save_selected_with_fmt(self, fmt: str) -> None:
+    def _save_selected_with_fmt(
+        self, fmt: str, trimmed: bool = True
+    ) -> None:
         """
         Save the currently-selected checkout directly in the requested
         format (WAV or FLAC). Skips the format-picker dance in the
         standard _save_selected() path — used by the right-click menu
-        for quick exports.
+        for quick exports. When `trimmed` is False, writes the full
+        untrimmed audio regardless of whether a trim is painted.
         """
         ref = self._selected_checkout_ref()
         resolved = self._resolve_ref(ref)
@@ -1121,19 +1211,25 @@ class MainWindow(QMainWindow):
             return
         slot, co = resolved
         ext = ".wav" if fmt == "WAV" else ".flac"
+        has_trim = co.trim_in_samples > 0 or (
+            co.trim_out_samples > 0 and co.trim_out_samples < co.audio.shape[0]
+        )
+        suffix = "trim" if (trimmed and has_trim) else ""
         target, _filter = QFileDialog.getSaveFileName(
             self,
             f"Save As {fmt}",
             str(
                 self._default_save_dir()
-                / f"{self._suggested_filename(slot, co)}{ext}"
+                / f"{self._suggested_filename(slot, co, suffix=suffix)}{ext}"
             ),
             f"{fmt} audio (*{ext})",
         )
         if not target:
             return
         try:
-            slot.checkout_manager.save(co.id, Path(target), fmt=fmt)
+            slot.checkout_manager.save(
+                co.id, Path(target), fmt=fmt, trimmed=trimmed
+            )
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
@@ -1246,11 +1342,23 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QPoint
 
         has_sel = self._buffer_track.has_manual_selection()
+        preset_label = f"Check Out Preset ({format_time_cs(self._current_duration_s())})"
+
         menu = QMenu(self)
-        check_act = QAction("Check Out Segment", self)
-        check_act.setEnabled(has_sel)
-        check_act.triggered.connect(self._checkout_manual_selection)
-        menu.addAction(check_act)
+
+        # Segment (manual selection) — primary when a selection exists.
+        check_sel_act = QAction("Check Out Segment (selection)", self)
+        check_sel_act.setEnabled(has_sel)
+        check_sel_act.triggered.connect(self._checkout_manual_selection)
+        menu.addAction(check_sel_act)
+
+        # Preset — always available. Labels include the current duration
+        # so the user can see exactly what they'll get.
+        check_preset_act = QAction(preset_label, self)
+        check_preset_act.triggered.connect(self._create_checkout_from_preset)
+        menu.addAction(check_preset_act)
+
+        menu.addSeparator()
 
         clear_act = QAction("Clear Selection", self)
         clear_act.setEnabled(has_sel)
@@ -1358,6 +1466,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _create_checkout(self) -> None:
+        """
+        CHECK OUT button click. If a manual selection is painted on
+        Track 1, it wins — the user's explicit range beats the preset
+        time. Otherwise fall back to the preset duration + rotary
+        anchor.
+        """
+        if self._buffer_track.has_manual_selection():
+            self._checkout_manual_selection()
+            return
+        self._create_checkout_from_preset()
+
+    def _create_checkout_from_preset(self) -> None:
         try:
             co = self._state.checkout_manager.create(
                 duration_s=self._current_duration_s(),
@@ -1467,6 +1587,14 @@ class MainWindow(QMainWindow):
         if cur is not None:
             prev_ref = cur.data(Qt.UserRole)
 
+        # GC any stale `focused_checkout_id` whose underlying checkout
+        # was discarded or saved out — keeps the per-slot "last viewed
+        # clip" pointer from turning into a ghost reference.
+        for slot in self._state.slots:
+            cid = slot.focused_checkout_id
+            if cid and not any(co.id == cid for co in slot.checkout_manager.list()):
+                slot.focused_checkout_id = None
+
         self._list.clear()
 
         if self._list_filter_mode == "all":
@@ -1523,6 +1651,9 @@ class MainWindow(QMainWindow):
 
         slot, co = resolved
         self._checkout_track.set_checkout(co, source_name=slot.name)
+        # Record this as the slot's focused clip so switching away
+        # and back restores the same Track 2 content.
+        slot.focused_checkout_id = co.id
 
         # Auto-switch active-focus to the clip's owning slot so Track 1
         # shows the slot the user just selected a clip from. Keeps the

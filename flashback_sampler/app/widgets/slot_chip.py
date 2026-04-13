@@ -79,6 +79,9 @@ class SlotChip(QWidget):
         self._fill_percent: float = 0.0
         self._is_active: bool = False
         self._is_capturing: bool = False
+        self._is_armed: bool = True
+        self._is_rolling: bool = False
+        self._has_error: bool = False
         self._xrun_count: int = 0
         self._ram_mb: float = 0.0
         self.setFixedSize(CHIP_WIDTH, CHIP_HEIGHT)
@@ -103,12 +106,18 @@ class SlotChip(QWidget):
         xrun_count: int,
         ram_mb: float,
         source_short: str = "",
+        is_armed: bool = True,
+        is_rolling: bool = False,
+        has_error: bool = False,
     ) -> None:
         changed = (
             name != self._name
             or fill_percent != self._fill_percent
             or is_active != self._is_active
             or is_capturing != self._is_capturing
+            or is_armed != self._is_armed
+            or is_rolling != self._is_rolling
+            or has_error != self._has_error
             or xrun_count != self._xrun_count
             or abs(ram_mb - self._ram_mb) > 0.05
             or source_short != self._source_short
@@ -118,6 +127,9 @@ class SlotChip(QWidget):
         self._fill_percent = max(0.0, min(100.0, float(fill_percent)))
         self._is_active = bool(is_active)
         self._is_capturing = bool(is_capturing)
+        self._is_armed = bool(is_armed)
+        self._is_rolling = bool(is_rolling)
+        self._has_error = bool(has_error)
         self._xrun_count = int(xrun_count)
         self._ram_mb = float(ram_mb)
         if changed:
@@ -208,7 +220,7 @@ class SlotChip(QWidget):
         name_rect = QRectF(10, 6, w - 40, 16)
         p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, self._name or "—")
 
-        # ── Source line (device short name, bone) ────────────────────
+        # ── Source line (device short name, bone — red on error) ────
         if self._source_short:
             src_font = self.font()
             if fam:
@@ -218,7 +230,10 @@ class SlotChip(QWidget):
             src_font.setCapitalization(QFont.AllUppercase)
             src_font.setLetterSpacing(QFont.AbsoluteSpacing, 0.6)
             p.setFont(src_font)
-            p.setPen(QColor(EREBUS["bone"]))
+            p.setPen(
+                QColor(EREBUS["rec"]) if self._has_error
+                else QColor(EREBUS["bone"])
+            )
             src_rect = QRectF(10, 24, w - 20, 12)
             p.drawText(
                 src_rect,
@@ -226,28 +241,35 @@ class SlotChip(QWidget):
                 self._source_short,
             )
 
-        # ── Prime button (top-right corner) ────────────────────────
-        # Always present; its appearance reflects the current state.
-        #   Primed:    solid ember-red disc (REC indicator)
-        #   Unprimed:  1 px outline circle in bone — "click to prime"
+        # ── Arm button (top-right corner) ───────────────────────────
+        # Click toggles `slot.armed`. Visual states:
+        #   capturing (armed + rolling): solid rec disc + halo
+        #   armed + not rolling:         dim ember outline (queued)
+        #   not armed:                   hollow bone outline
         btn_cx = PRIME_BTN_X + PRIME_BTN_W / 2.0
         btn_cy = PRIME_BTN_Y + PRIME_BTN_H / 2.0
+        center = QPointF(btn_cx, btn_cy)
         if self._is_capturing:
-            p.setBrush(QColor(EREBUS["rec"]))
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(btn_cx, btn_cy), 5.5, 5.5)
-            # Outer faint halo so primed chips stand out
+            # Halo first, then solid on top
             halo = QColor(EREBUS["rec"])
             halo.setAlpha(int(0.25 * 255))
             p.setBrush(halo)
-            p.drawEllipse(QPointF(btn_cx, btn_cy), 8.5, 8.5)
-            # Re-draw the solid on top so the halo sits behind it
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(center, 8.5, 8.5)
             p.setBrush(QColor(EREBUS["rec"]))
-            p.drawEllipse(QPointF(btn_cx, btn_cy), 5.5, 5.5)
+            p.drawEllipse(center, 5.5, 5.5)
+        elif self._is_armed:
+            # Queued: ember ring with faint fill
+            ember = QColor(EREBUS["ember"])
+            fill = QColor(EREBUS["ember"])
+            fill.setAlphaF(0.20)
+            p.setBrush(fill)
+            p.setPen(QPen(ember, 1.4))
+            p.drawEllipse(center, 5.5, 5.5)
         else:
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(EREBUS["bone"]), 1.2))
-            p.drawEllipse(QPointF(btn_cx, btn_cy), 5.5, 5.5)
+            p.drawEllipse(center, 5.5, 5.5)
 
         # ── Fill bar (bottom-most 4 px) ────────────────────────────
         bar_y = h - 6

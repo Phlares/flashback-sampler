@@ -91,9 +91,14 @@ class SourceStrip(QWidget):
     # State push from the host
     # ------------------------------------------------------------------
 
-    def set_master_state(self, primed_count: int, total_count: int) -> None:
-        """Push the current (primed, total) slot count into the master."""
-        self._master_btn.set_state(primed_count, total_count)
+    def set_master_state(
+        self,
+        armed_count: int,
+        total_count: int,
+        is_rolling: bool = False,
+    ) -> None:
+        """Push (armed, total, rolling) into the master START/STOP button."""
+        self._master_btn.set_state(armed_count, total_count, is_rolling)
 
     def master_button(self) -> "CaptureAllButton":
         return self._master_btn
@@ -103,6 +108,7 @@ class SourceStrip(QWidget):
         slots: list,
         active_index: int,
         source_names: list | None = None,
+        is_rolling: bool = False,
     ) -> None:
         """
         Reconcile the chip list with the current slots list. Creates
@@ -145,14 +151,31 @@ class SourceStrip(QWidget):
             src_short = ""
             if source_names is not None and i < len(source_names):
                 src_short = source_names[i] or ""
+            # A capture-source error pre-empts the device line so the
+            # user sees WHY a chip isn't recording without reading
+            # stdout. The chip renders the error line in red.
+            err_line = ""
+            try:
+                err = slot.last_error() if hasattr(slot, "last_error") else None
+            except Exception:
+                err = None
+            if err:
+                # Strip noisy prefixes and trim to chip width
+                short = err.split(":", 1)[0]
+                if len(short) > 22:
+                    short = short[:21] + "…"
+                err_line = short
             self._chips[i].set_state(
                 name=slot.name,
                 fill_percent=fill_pct,
                 is_active=(i == active_index),
                 is_capturing=slot.is_capturing(),
+                is_armed=bool(getattr(slot, "armed", True)),
+                is_rolling=bool(is_rolling),
                 xrun_count=slot.xrun_count(),
                 ram_mb=slot.ram_mb(),
-                source_short=src_short,
+                source_short=err_line or src_short,
+                has_error=bool(err_line),
             )
 
     def _on_chip_clicked(self, index: int) -> None:
