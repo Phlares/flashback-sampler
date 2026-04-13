@@ -165,6 +165,63 @@ def test_apply_checkout_caps_scoped_to_active_slot():
     assert st.slots[1].checkout_manager._max_active == 16
 
 
+def test_total_project_ram_bytes_counts_every_slot():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
+    # Main slot ~1.92 MB (5s * 48k * 2 * 4)
+    main_bytes = st.slots[0].buffer.buffer.nbytes
+    assert main_bytes == 5 * 48_000 * 2 * 4
+
+    st.add_slot(preset_by_name("SCRATCH"))  # +~11 MB
+    total = st.total_project_ram_bytes()
+    assert total > main_bytes
+    # SCRATCH = 16k mono 180s = 16000 * 180 * 4 = 11_520_000
+    expected = main_bytes + 11_520_000
+    assert total == expected
+
+
+def test_total_project_ram_includes_checkouts():
+    st = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1)
+    buf_bytes = st.slots[0].buffer.buffer.nbytes
+    assert st.total_project_ram_bytes() == buf_bytes
+    # Write some audio and create a checkout
+    st.slots[0].buffer.write(
+        np.zeros((1000, 1), dtype=np.float32)  # 1 s
+    )
+    co = st.slots[0].checkout_manager.create(duration_s=0.5)
+    # Total now includes the checkout's ndarray
+    assert st.total_project_ram_bytes() == buf_bytes + co.ram_bytes
+
+
+def test_add_slot_rejects_when_over_budget():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
+    # Set a tight budget that only fits the initial slot
+    current = st.total_project_ram_mb()
+    st.set_project_ram_budget_mb(current + 1)  # tiny headroom
+
+    with pytest.raises(RuntimeError, match="Project RAM budget exceeded"):
+        st.add_slot(preset_by_name("FULL"))
+
+
+def test_add_slot_succeeds_within_budget():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_project_ram_budget_mb(4096.0)
+    slot = st.add_slot(preset_by_name("CHAT"))
+    assert slot is not None
+    assert len(st.slots) == 2
+
+
+def test_set_project_ram_budget_enforces_minimum():
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_project_ram_budget_mb(10)  # below 64 min
+    assert st.project_ram_budget_mb == 64.0
+
+
 def test_shutdown_stops_all_slots():
     from flashback_sampler.core.quality_presets import preset_by_name
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread

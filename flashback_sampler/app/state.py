@@ -39,6 +39,12 @@ DEFAULT_BUFFER_SECONDS = 15 * 60
 DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_CHANNELS = 2
 
+# Total RAM budget across all capture slots, in MB. Used by add_slot
+# as an admission-control guard. The settings dialog lets the user
+# raise or lower it. At 4 GB the default comfortably holds 10+ slots
+# of mixed FULL / MUSIC / VOICE / CHAT tracks.
+DEFAULT_PROJECT_RAM_BUDGET_MB = 4096.0
+
 
 class AppState:
     def __init__(
@@ -69,6 +75,7 @@ class AppState:
             )
         ]
         self.active_slot_index: int = 0
+        self.project_ram_budget_mb: float = DEFAULT_PROJECT_RAM_BUDGET_MB
 
         # ── Shared, non-per-slot state ───────────────────────────────
         self.scrub_player = ScrubPlayer(
@@ -108,7 +115,25 @@ class AppState:
         """
         Append a new CaptureSlot built from `preset`. Does NOT change
         the active slot index — the caller decides whether to switch.
+
+        Raises RuntimeError if adding the new slot's ring buffer would
+        push the total project RAM footprint past
+        self.project_ram_budget_mb.
         """
+        new_ring_bytes = preset.ram_bytes()
+        current_bytes = self.total_project_ram_bytes()
+        budget_bytes = int(self.project_ram_budget_mb * 1024 * 1024)
+        if current_bytes + new_ring_bytes > budget_bytes:
+            from flashback_sampler.core.quality_presets import MB
+
+            raise RuntimeError(
+                f"Project RAM budget exceeded: adding {preset.name} "
+                f"({new_ring_bytes / MB:.0f} MB) would bring total to "
+                f"{(current_bytes + new_ring_bytes) / MB:.0f} MB, "
+                f"over the {self.project_ram_budget_mb:.0f} MB budget. "
+                f"Raise the budget in Settings or pick a lighter preset."
+            )
+
         slot = CaptureSlot.from_quality_preset(
             preset,
             name=name or f"Source {len(self.slots) + 1}",
@@ -117,6 +142,29 @@ class AppState:
         )
         self.slots.append(slot)
         return slot
+
+    # ------------------------------------------------------------------
+    # Project-wide RAM accounting
+    # ------------------------------------------------------------------
+
+    def total_project_ram_bytes(self) -> int:
+        """
+        Sum of every slot's ring buffer bytes PLUS the bytes of every
+        live Checkout across every slot. Reflects the actual
+        resident-in-RAM footprint of the whole session.
+        """
+        total = 0
+        for slot in self.slots:
+            total += int(slot.buffer.buffer.nbytes)
+            for co in slot.checkout_manager.list():
+                total += co.ram_bytes
+        return total
+
+    def total_project_ram_mb(self) -> float:
+        return self.total_project_ram_bytes() / (1024.0 * 1024.0)
+
+    def set_project_ram_budget_mb(self, mb: float) -> None:
+        self.project_ram_budget_mb = max(64.0, float(mb))
 
     def remove_slot(self, index: int) -> None:
         """
