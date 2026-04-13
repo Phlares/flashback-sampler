@@ -75,8 +75,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._state = state
         self._start_time: float = 0.0
-        self._previewing_id: str | None = None
+        self._previewing_ref: tuple[str, str] | None = None  # (slot_id, cid)
         self._anchor_offset_s: float = 0.0  # driven by rotary
+        # Checkout list filter: "active" = only show active slot's
+        # checkouts (default); "all" = flatten every slot's manager
+        # into one list with a [SLOT] prefix on each row.
+        self._list_filter_mode: str = "active"
 
         self.setWindowTitle("flashback-sampler")
         self.setMinimumSize(920, 720)
@@ -219,9 +223,18 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self._checkout_track, 2)
 
         # --- Checkout list ---------------------------------------------
+        list_header_row = QHBoxLayout()
+        list_header_row.setSpacing(8)
         list_label = QLabel("CHECKED-OUT CLIPS")
         list_label.setProperty("role", "label")
-        vbox.addWidget(list_label)
+        list_header_row.addWidget(list_label, 0)
+        list_header_row.addStretch(1)
+        self._filter_btn = TactileButton("FILTER: ACTIVE", variant="secondary")
+        self._filter_btn.setMinimumHeight(28)
+        self._filter_btn.setMaximumWidth(180)
+        self._filter_btn.clicked.connect(self._toggle_list_filter)
+        list_header_row.addWidget(self._filter_btn, 0)
+        vbox.addLayout(list_header_row, 0)
 
         self._list = QListWidget()
         self._list.setMaximumHeight(110)
@@ -396,7 +409,7 @@ class MainWindow(QMainWindow):
                 self._device_name = f"{device.name} (not started)".upper()
 
     def _on_output_selected(self, device: OutputDevice) -> None:
-        was_previewing = self._previewing_id is not None
+        was_previewing = self._previewing_ref is not None
         if was_previewing:
             self._stop_preview()
         self._state.set_output_spec(device)
@@ -579,8 +592,8 @@ class MainWindow(QMainWindow):
             )
 
         # Auto-flip the preview button back when playback drains naturally
-        if self._previewing_id is not None and not self._state.scrub_player.is_playing:
-            self._previewing_id = None
+        if self._previewing_ref is not None and not self._state.scrub_player.is_playing:
+            self._previewing_ref = None
             self._preview_btn.setText("PREVIEW")
 
     # ------------------------------------------------------------------
@@ -633,7 +646,7 @@ class MainWindow(QMainWindow):
         # Stop any in-progress preview — it's tied to a checkout on
         # the old slot and would point at a bound ndarray that the
         # new slot's list doesn't know about.
-        if self._previewing_id is not None:
+        if self._previewing_ref is not None:
             self._stop_preview()
         self._checkout_track.set_checkout(None)
         self._buffer_track.clear_manual_selection()
@@ -801,7 +814,7 @@ class MainWindow(QMainWindow):
             # _on_source_strip_active_changed early-outs when the
             # index is already current, so we nudge it by pretending
             # we just switched to a different slot.
-            self._previewing_id = None
+            self._previewing_ref = None
             self._stop_preview()
             self._checkout_track.set_checkout(None)
             self._buffer_track.clear_manual_selection()
@@ -839,11 +852,11 @@ class MainWindow(QMainWindow):
 
         # Make the clicked row the active selection
         self._list.setCurrentItem(item)
-        cid = item.data(Qt.UserRole)
+        ref = item.data(Qt.UserRole)
 
         menu = QMenu(self)
 
-        is_previewing_this = self._previewing_id == cid
+        is_previewing_this = self._previewing_ref == ref
         preview_label = "Stop Preview" if is_previewing_this else "Preview"
         preview_act = QAction(preview_label, self)
         preview_act.triggered.connect(self._toggle_preview)
@@ -874,20 +887,22 @@ class MainWindow(QMainWindow):
         standard _save_selected() path — used by the right-click menu
         for quick exports.
         """
-        cid = self._selected_checkout_id()
-        if cid is None:
+        ref = self._selected_checkout_ref()
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             return
+        slot, co = resolved
         ext = ".wav" if fmt == "WAV" else ".flac"
         target, _filter = QFileDialog.getSaveFileName(
             self,
             f"Save As {fmt}",
-            str(self._default_save_dir() / f"flashback_{cid}{ext}"),
+            str(self._default_save_dir() / f"flashback_{co.id}{ext}"),
             f"{fmt} audio (*{ext})",
         )
         if not target:
             return
         try:
-            self._state.checkout_manager.save(cid, Path(target), fmt=fmt)
+            slot.checkout_manager.save(co.id, Path(target), fmt=fmt)
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
@@ -952,20 +967,25 @@ class MainWindow(QMainWindow):
         self._checkout_track.set_mark_out(self._playhead_seconds())
 
     def _export_selection(self, fmt: str) -> None:
-        cid = self._checkout_track.current_checkout_id()
-        if cid is None:
+        # The clip currently shown in Track 2 is always the one the
+        # selected list item points at, so route through the tuple
+        # ref for the correct slot's checkout_manager.
+        ref = self._selected_checkout_ref()
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             return
+        slot, co = resolved
         ext = ".wav" if fmt == "WAV" else ".flac"
         target, _selected = QFileDialog.getSaveFileName(
             self,
             f"Export selection as {fmt}",
-            str(self._default_save_dir() / f"flashback_{cid}_trim{ext}"),
+            str(self._default_save_dir() / f"flashback_{co.id}_trim{ext}"),
             f"{fmt} audio (*{ext})",
         )
         if not target:
             return
         try:
-            self._state.checkout_manager.save(cid, Path(target), fmt=fmt)
+            slot.checkout_manager.save(co.id, Path(target), fmt=fmt)
         except Exception as e:
             QMessageBox.warning(self, "Export failed", str(e))
             return
@@ -1024,10 +1044,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Checkout failed", str(e))
             return
+        active_slot_id = self._state.active_slot.id
         self._refresh_checkout_list()
         # Auto-select the new one
+        target = (active_slot_id, co.id)
         for i in range(self._list.count()):
-            if self._list.item(i).data(Qt.UserRole) == co.id:
+            if self._list.item(i).data(Qt.UserRole) == target:
                 self._list.setCurrentRow(i)
                 break
         # Clear the selection after committing — the user made their
@@ -1100,56 +1122,110 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Checkout failed", str(e))
             return
+        active_slot_id = self._state.active_slot.id
         self._refresh_checkout_list()
         # Auto-select the new one
+        target = (active_slot_id, co.id)
         for i in range(self._list.count()):
-            if self._list.item(i).data(Qt.UserRole) == co.id:
+            if self._list.item(i).data(Qt.UserRole) == target:
                 self._list.setCurrentRow(i)
                 break
 
+    # ------------------------------------------------------------------
+    # Cross-slot checkout lookup helpers
+    # ------------------------------------------------------------------
+
+    def _find_slot_by_id(self, slot_id: str):
+        for slot in self._state.slots:
+            if slot.id == slot_id:
+                return slot
+        return None
+
+    def _resolve_ref(self, ref):
+        """
+        Turn a (slot_id, checkout_id) tuple into (slot, Checkout) or
+        None if either the slot or the checkout can't be found.
+        """
+        if ref is None or not isinstance(ref, tuple) or len(ref) != 2:
+            return None
+        slot_id, cid = ref
+        slot = self._find_slot_by_id(slot_id)
+        if slot is None:
+            return None
+        try:
+            return slot, slot.checkout_manager.get(cid)
+        except KeyError:
+            return None
+
+    def _toggle_list_filter(self) -> None:
+        self._list_filter_mode = "all" if self._list_filter_mode == "active" else "active"
+        label = "FILTER: ALL" if self._list_filter_mode == "all" else "FILTER: ACTIVE"
+        self._filter_btn.setText(label)
+        self._refresh_checkout_list()
+
     def _refresh_checkout_list(self) -> None:
-        prev_selected_id = None
+        # Preserve the current selection by its (slot_id, cid) key
+        prev_ref = None
         cur = self._list.currentItem()
         if cur is not None:
-            prev_selected_id = cur.data(Qt.UserRole)
+            prev_ref = cur.data(Qt.UserRole)
 
         self._list.clear()
-        for co in self._state.checkout_manager.list():
-            mins = int(co.duration_seconds // 60)
-            secs = int(co.duration_seconds - mins * 60)
-            label = (
-                f"  {co.id}   {mins:02d}:{secs:02d}"
-                f"   {co.ram_bytes / 1024 / 1024:5.1f} MB"
-                f"   [{co.state}]"
-            )
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, co.id)
-            self._list.addItem(item)
-            if prev_selected_id == co.id:
-                self._list.setCurrentItem(item)
 
-    def _selected_checkout_id(self) -> str | None:
+        if self._list_filter_mode == "all":
+            slot_iter = list(enumerate(self._state.slots))
+        else:
+            active = self._state.active_slot
+            slot_iter = [(self._state.active_slot_index, active)]
+
+        for _idx, slot in slot_iter:
+            for co in slot.checkout_manager.list():
+                mins = int(co.duration_seconds // 60)
+                secs = int(co.duration_seconds - mins * 60)
+                if self._list_filter_mode == "all":
+                    prefix = f"[{slot.name.upper():<8s}]"
+                else:
+                    prefix = " " * 10
+                label = (
+                    f"  {prefix}  {co.id}   {mins:02d}:{secs:02d}"
+                    f"   {co.ram_bytes / 1024 / 1024:5.1f} MB"
+                    f"   [{co.state}]"
+                )
+                item = QListWidgetItem(label)
+                ref = (slot.id, co.id)
+                item.setData(Qt.UserRole, ref)
+                self._list.addItem(item)
+                if prev_ref == ref:
+                    self._list.setCurrentItem(item)
+
+    def _selected_checkout_ref(self):
         item = self._list.currentItem()
         return item.data(Qt.UserRole) if item else None
 
+    # Legacy compat for call sites that still want just the cid string.
+    # Returns the cid half of the current (slot_id, cid) tuple.
+    def _selected_checkout_id(self):
+        ref = self._selected_checkout_ref()
+        if ref is None:
+            return None
+        return ref[1]
+
     def _on_selection_changed(self) -> None:
-        sel = self._selected_checkout_id()
-        has = sel is not None
+        ref = self._selected_checkout_ref()
+        has = ref is not None
         self._save_btn.setEnabled(has)
         self._discard_btn.setEnabled(has)
         self._preview_btn.setEnabled(has)
         # If the user switches selection mid-preview, stop the old playback
-        if self._previewing_id is not None and sel != self._previewing_id:
+        if self._previewing_ref is not None and ref != self._previewing_ref:
             self._stop_preview()
         # Feed the selected checkout into Track 2
-        if sel is None:
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             self._checkout_track.set_checkout(None)
         else:
-            try:
-                co = self._state.checkout_manager.get(sel)
-                self._checkout_track.set_checkout(co)
-            except KeyError:
-                self._checkout_track.set_checkout(None)
+            _slot, co = resolved
+            self._checkout_track.set_checkout(co)
 
     def _on_clip_seek(self, seconds: float) -> None:
         """
@@ -1158,23 +1234,19 @@ class MainWindow(QMainWindow):
         trim-relative before passing to the player when preview is
         playing the trimmed slice.
         """
-        cid = self._previewing_id or self._selected_checkout_id()
+        ref = self._previewing_ref or self._selected_checkout_ref()
         player = self._state.scrub_player
-        if cid is None:
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             player.seek(seconds)
             self._checkout_track.set_cursor(seconds)
             return
-        try:
-            co = self._state.checkout_manager.get(cid)
-        except KeyError:
-            player.seek(seconds)
-            self._checkout_track.set_cursor(seconds)
-            return
+        _slot, co = resolved
 
         # Are we currently in trimmed-preview mode? If yes, the bound
         # array starts at trim_in and ends at trim_out, so clamp the
         # target and subtract trim_in for the scrub player seek.
-        if self._previewing_id == cid and self._checkout_track._preview_trimmed:
+        if self._previewing_ref == ref and self._checkout_track._preview_trimmed:
             trim_in_s = co.trim_in_samples / co.sample_rate
             trim_out_samples = (
                 co.trim_out_samples
@@ -1196,17 +1268,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _toggle_preview(self) -> None:
-        if self._previewing_id is not None:
+        if self._previewing_ref is not None:
             self._stop_preview()
             return
 
-        cid = self._selected_checkout_id()
-        if cid is None:
+        ref = self._selected_checkout_ref()
+        if ref is None:
             return
-        try:
-            co = self._state.checkout_manager.get(cid)
-        except KeyError:
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             return
+        _slot, co = resolved
 
         # If the user has set a trim, preview only the trimmed slice —
         # ScrubPlayer will auto-stop at the end of the bound array, so
@@ -1236,7 +1308,7 @@ class MainWindow(QMainWindow):
             self._checkout_track.set_preview_trimmed(False)
             return
 
-        self._previewing_id = cid
+        self._previewing_ref = ref
         self._preview_btn.setText("STOP PREVIEW")
 
     def _stop_preview(self) -> None:
@@ -1244,18 +1316,20 @@ class MainWindow(QMainWindow):
             self._state.scrub_player.pause()
         except Exception:  # pragma: no cover
             pass
-        self._previewing_id = None
+        self._previewing_ref = None
         self._checkout_track.set_preview_trimmed(False)
         self._preview_btn.setText("PREVIEW")
 
     def _save_selected(self) -> None:
-        cid = self._selected_checkout_id()
-        if cid is None:
+        ref = self._selected_checkout_ref()
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             return
+        slot, co = resolved
         target, selected = QFileDialog.getSaveFileName(
             self,
             "Save checkout",
-            str(self._default_save_dir() / f"flashback_{cid}.wav"),
+            str(self._default_save_dir() / f"flashback_{co.id}.wav"),
             "WAV audio (*.wav);;FLAC audio (*.flac)",
         )
         if not target:
@@ -1264,20 +1338,22 @@ class MainWindow(QMainWindow):
             ".flac"
         ) else "WAV"
         try:
-            self._state.checkout_manager.save(cid, Path(target), fmt=fmt)
+            slot.checkout_manager.save(co.id, Path(target), fmt=fmt)
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
         self._refresh_checkout_list()
 
     def _discard_selected(self) -> None:
-        cid = self._selected_checkout_id()
-        if cid is None:
+        ref = self._selected_checkout_ref()
+        resolved = self._resolve_ref(ref)
+        if resolved is None:
             return
-        if self._previewing_id == cid:
+        slot, co = resolved
+        if self._previewing_ref == ref:
             self._stop_preview()
         try:
-            self._state.checkout_manager.discard(cid)
+            slot.checkout_manager.discard(co.id)
         except Exception as e:
             QMessageBox.warning(self, "Discard failed", str(e))
             return
