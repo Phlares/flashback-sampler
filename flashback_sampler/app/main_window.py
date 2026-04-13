@@ -933,10 +933,43 @@ class MainWindow(QMainWindow):
                 self._checkout_track.set_checkout(None)
 
     def _on_clip_seek(self, seconds: float) -> None:
-        """User clicked the Track 2 waveform — seek the scrub player."""
-        self._state.scrub_player.seek(seconds)
-        # If the scrub player has a source bound, nudge the playhead
-        # label immediately for snappier feedback.
+        """
+        User clicked the Track 2 waveform — seek the scrub player.
+        `seconds` is absolute within the full clip; translate to
+        trim-relative before passing to the player when preview is
+        playing the trimmed slice.
+        """
+        cid = self._previewing_id or self._selected_checkout_id()
+        player = self._state.scrub_player
+        if cid is None:
+            player.seek(seconds)
+            self._checkout_track.set_cursor(seconds)
+            return
+        try:
+            co = self._state.checkout_manager.get(cid)
+        except KeyError:
+            player.seek(seconds)
+            self._checkout_track.set_cursor(seconds)
+            return
+
+        # Are we currently in trimmed-preview mode? If yes, the bound
+        # array starts at trim_in and ends at trim_out, so clamp the
+        # target and subtract trim_in for the scrub player seek.
+        if self._previewing_id == cid and self._checkout_track._preview_trimmed:
+            trim_in_s = co.trim_in_samples / co.sample_rate
+            trim_out_samples = (
+                co.trim_out_samples
+                if co.trim_out_samples > 0
+                else co.audio.shape[0]
+            )
+            trim_out_s = trim_out_samples / co.sample_rate
+            clamped = max(trim_in_s, min(trim_out_s - 1e-3, seconds))
+            player.seek(clamped - trim_in_s)
+            self._checkout_track.set_cursor(clamped - trim_in_s)
+            return
+
+        # Not in trimmed preview → bound array is the full clip
+        player.seek(seconds)
         self._checkout_track.set_cursor(seconds)
 
     # ------------------------------------------------------------------
@@ -956,9 +989,23 @@ class MainWindow(QMainWindow):
         except KeyError:
             return
 
+        # If the user has set a trim, preview only the trimmed slice —
+        # ScrubPlayer will auto-stop at the end of the bound array, so
+        # binding co.trimmed_audio() gives us natural "play the
+        # selection and halt" behaviour for free.
+        has_trim = (
+            co.trim_in_samples > 0
+            or (
+                co.trim_out_samples > 0
+                and co.trim_out_samples < co.audio.shape[0]
+            )
+        )
+        audio_to_bind = co.trimmed_audio() if has_trim else co.audio
+        self._checkout_track.set_preview_trimmed(has_trim)
+
         player = self._state.scrub_player
         try:
-            player.bind(co.audio)
+            player.bind(audio_to_bind)
             player.open()  # lazy — first call creates the output stream
             player.play()
         except Exception as e:
@@ -967,6 +1014,7 @@ class MainWindow(QMainWindow):
                 "Preview failed",
                 f"Could not start preview playback:\n\n{e}",
             )
+            self._checkout_track.set_preview_trimmed(False)
             return
 
         self._previewing_id = cid
@@ -978,7 +1026,8 @@ class MainWindow(QMainWindow):
         except Exception:  # pragma: no cover
             pass
         self._previewing_id = None
-        self._preview_btn.setText("▶  PREVIEW")
+        self._checkout_track.set_preview_trimmed(False)
+        self._preview_btn.setText("PREVIEW")
 
     def _save_selected(self) -> None:
         cid = self._selected_checkout_id()

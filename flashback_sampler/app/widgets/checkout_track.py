@@ -123,6 +123,11 @@ class CheckoutTrack(QWidget):
         self._checkout = None  # current Checkout (kept for trim updates)
         self._checkout_id: str | None = None
         self._duration_s: float = 0.0
+        # When True, ScrubPlayer is playing a slice of the full clip
+        # (Checkout.trimmed_audio()) and its cursor_seconds is
+        # relative to the trim-in point. set_cursor() shifts the
+        # playhead forward by trim_in when computing the frac.
+        self._preview_trimmed: bool = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -222,14 +227,32 @@ class CheckoutTrack(QWidget):
         self._wave.set_manual_selection(ti / n, to / n)
 
     def set_cursor(self, seconds: float) -> None:
-        """Feed playback cursor position in seconds for the playhead."""
+        """
+        Feed playback cursor position in seconds for the playhead.
+
+        When `_preview_trimmed` is True, `seconds` is relative to the
+        trim-in point (the ScrubPlayer is bound to trimmed audio), so we
+        offset by trim_in_samples / sample_rate to get the absolute
+        position within the full clip for painting and for the readout.
+        """
         if self._duration_s <= 0:
             return
-        frac = max(0.0, min(1.0, seconds / self._duration_s))
+        absolute = float(seconds)
+        co = self._checkout
+        if self._preview_trimmed and co is not None and co.trim_in_samples > 0:
+            absolute += co.trim_in_samples / co.sample_rate
+        frac = max(0.0, min(1.0, absolute / self._duration_s))
         self._wave.set_playhead(frac)
         self._pos_label.setText(
-            f"{_mmss(seconds)} / {_mmss(self._duration_s)}"
+            f"{_mmss(absolute)} / {_mmss(self._duration_s)}"
         )
+
+    def set_preview_trimmed(self, trimmed: bool) -> None:
+        """
+        Tell the track whether the ScrubPlayer is currently playing
+        trimmed audio (so set_cursor can apply the trim_in offset).
+        """
+        self._preview_trimmed = bool(trimmed)
 
     def current_checkout_id(self) -> str | None:
         return self._checkout_id
