@@ -1,11 +1,16 @@
 """
 AppState — the root object graph for the Qt application layer.
 
-Owns one buffer, one capture source, one checkout manager, and one scrub
-player, plus the currently-selected capture/output device specs.
-Instantiated once in main.py and shared across widgets. Nothing in this
-file imports PySide6 — it's a plain Python container so unit tests can
-drive it headless.
+M10.4 refactors this from "one buffer, one checkout manager, one
+optional capture source" to "a LIST of CaptureSlots with one active
+index." Each slot owns its own buffer / checkout manager / capture
+source. Backward-compat properties (buffer, checkout_manager, capture)
+delegate to the ACTIVE slot so every existing widget keeps working
+without changes — M10.5's source strip will then add a UI affordance
+for switching which slot is active.
+
+Nothing in this file imports PySide6 — it's a plain Python container
+so unit tests can drive it headless.
 """
 
 from __future__ import annotations
@@ -21,7 +26,9 @@ from flashback_sampler.app.audio_devices import (
     default_output_device,
 )
 from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import CheckoutManager
+from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.core.scrub_player import ScrubPlayer
 
 
@@ -40,52 +47,129 @@ class AppState:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         channels: int = DEFAULT_CHANNELS,
     ):
-        self.sample_rate = sample_rate
-        self.channels = channels
+        # ── Slot list ─────────────────────────────────────────────────
+        # Build one initial slot from the constructor args. It's
+        # conceptually a "CUSTOM" quality preset since the values come
+        # from CLI flags / settings rather than one of the named
+        # presets. M10.5's Add Source dialog will use the named
+        # presets for subsequent slots.
+        initial_preset = QualityPreset(
+            name="CUSTOM",
+            sample_rate=int(sample_rate),
+            channels=int(channels),
+            buffer_seconds=float(buffer_seconds),
+            description="Initial slot built from CLI args",
+        )
+        self.slots: list[CaptureSlot] = [
+            CaptureSlot.from_quality_preset(
+                initial_preset,
+                name="Main",
+                max_active_checkouts=16,
+                max_total_ram_mb=1024,
+            )
+        ]
+        self.active_slot_index: int = 0
 
-        self.buffer = AudioCircularBuffer(
-            duration_seconds=buffer_seconds,
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-        self.checkout_manager = CheckoutManager(
-            buffer=self.buffer,
-            max_active_checkouts=16,
-            max_total_ram_mb=1024,
-        )
+        # ── Shared, non-per-slot state ───────────────────────────────
         self.scrub_player = ScrubPlayer(
-            sample_rate=sample_rate,
-            channels=channels,
+            sample_rate=int(sample_rate),
+            channels=int(channels),
         )
-        # Capture is lazy — wired by the main window when the user
-        # clicks "Start Capture" for the first time.
-        self._capture = None
 
-        # Device selections. Start with the system defaults and let the
-        # main window override them from config.json on startup.
+        # Device selections. Start with the system defaults and let
+        # the main window override them from config.json on startup.
         self.capture_spec: Optional[CaptureDevice] = default_capture_device()
         self.output_spec: Optional[OutputDevice] = default_output_device()
         if self.output_spec is not None:
             self.scrub_player.set_device(self.output_spec.id)
 
+    # ------------------------------------------------------------------
+    # Slot access
+    # ------------------------------------------------------------------
+
+    @property
+    def active_slot(self) -> CaptureSlot:
+        return self.slots[self.active_slot_index]
+
+    def set_active_slot_index(self, index: int) -> None:
+        if not (0 <= index < len(self.slots)):
+            raise IndexError(
+                f"active_slot_index {index} out of range [0, {len(self.slots)})"
+            )
+        self.active_slot_index = int(index)
+
+    def add_slot(
+        self,
+        preset: QualityPreset,
+        name: str = "",
+        max_active_checkouts: int = 16,
+        max_total_ram_mb: float = 1024.0,
+    ) -> CaptureSlot:
+        """
+        Append a new CaptureSlot built from `preset`. Does NOT change
+        the active slot index — the caller decides whether to switch.
+        """
+        slot = CaptureSlot.from_quality_preset(
+            preset,
+            name=name or f"Source {len(self.slots) + 1}",
+            max_active_checkouts=max_active_checkouts,
+            max_total_ram_mb=max_total_ram_mb,
+        )
+        self.slots.append(slot)
+        return slot
+
+    def remove_slot(self, index: int) -> None:
+        """
+        Remove and stop the slot at `index`. The active_slot_index is
+        adjusted to stay in range. Raises if it would leave zero slots —
+        the app always has at least one slot.
+        """
+        if len(self.slots) <= 1:
+            raise RuntimeError("cannot remove the last slot")
+        if not (0 <= index < len(self.slots)):
+            raise IndexError(f"slot index {index} out of range")
+        slot = self.slots.pop(index)
+        try:
+            slot.stop_capture()
+        except Exception:  # pragma: no cover
+            pass
+        if self.active_slot_index >= len(self.slots):
+            self.active_slot_index = len(self.slots) - 1
+        elif self.active_slot_index > index:
+            self.active_slot_index -= 1
+
+    # ------------------------------------------------------------------
+    # Backward-compat properties — delegate to the active slot so every
+    # existing widget continues to work against state.buffer /
+    # state.checkout_manager / state.capture / state.sample_rate /
+    # state.channels as before M10.4.
+    # ------------------------------------------------------------------
+
+    @property
+    def buffer(self) -> AudioCircularBuffer:
+        return self.active_slot.buffer
+
+    @property
+    def checkout_manager(self) -> CheckoutManager:
+        return self.active_slot.checkout_manager
+
     @property
     def capture(self):
-        return self._capture
+        return self.active_slot.capture_source
 
     def set_capture(self, capture) -> None:
-        self._capture = capture
+        self.active_slot.capture_source = capture
+
+    @property
+    def sample_rate(self) -> int:
+        return self.active_slot.sample_rate
+
+    @property
+    def channels(self) -> int:
+        return self.active_slot.channels
 
     def is_capturing(self) -> bool:
-        if self._capture is None:
-            return False
-        # Prefer the CaptureSource protocol's public method; fall back
-        # to the pre-M10.1 _running attribute for any leftover objects
-        # that haven't been upgraded yet (keeps tests that use fakes
-        # without the full interface passing).
-        is_running = getattr(self._capture, "is_running", None)
-        if callable(is_running):
-            return bool(is_running())
-        return bool(getattr(self._capture, "_running", False))
+        return self.active_slot.is_capturing()
 
     def set_capture_spec(self, spec: CaptureDevice) -> None:
         self.capture_spec = spec
@@ -96,22 +180,23 @@ class AppState:
 
     def build_capture(self):
         """
-        Instantiate a capture source from the current capture_spec.
-        Raises if no spec is selected.
+        Instantiate a capture source for the ACTIVE slot from the
+        current capture_spec. Raises if no spec is selected.
         """
         if self.capture_spec is None:
             raise RuntimeError(
                 "No capture device selected. Pick one from the Audio menu."
             )
+        slot = self.active_slot
         return build_capture_source(
             device=self.capture_spec,
-            buffer=self.buffer,
-            sample_rate=self.sample_rate,
-            channels=self.channels,
+            buffer=slot.buffer,
+            sample_rate=slot.sample_rate,
+            channels=slot.channels,
         )
 
     # ------------------------------------------------------------------
-    # Runtime settings application
+    # Runtime settings application — now scoped to the active slot
     # ------------------------------------------------------------------
 
     def apply_checkout_caps(
@@ -119,47 +204,54 @@ class AppState:
         max_active: int | None = None,
         max_ram_mb: float | None = None,
     ) -> None:
-        """Update CheckoutManager's max active + RAM caps in place."""
+        """
+        Update the active slot's CheckoutManager caps in place.
+        Other slots' caps are intentionally left alone so a future
+        per-slot settings dialog can tune each independently.
+        """
+        mgr = self.active_slot.checkout_manager
         if max_active is not None:
-            self.checkout_manager._max_active = int(max_active)  # noqa: SLF001
+            mgr._max_active = int(max_active)  # noqa: SLF001
         if max_ram_mb is not None:
-            self.checkout_manager._max_ram_bytes = int(  # noqa: SLF001
+            mgr._max_ram_bytes = int(  # noqa: SLF001
                 float(max_ram_mb) * 1024 * 1024
             )
 
     def rebuild_buffer(self, new_seconds: float) -> None:
         """
-        Swap the ring buffer for one with a new duration. Stops
-        capture if it was running; the caller is responsible for
+        Rebuild the ACTIVE slot's ring buffer with a new duration.
+        Stops capture if it was running; the caller is responsible for
         restarting capture after the rebuild.
 
         Existing Checkouts are preserved — they're immutable in-RAM
-        snapshots. The CheckoutManager's _buffer reference is updated
-        so new checkouts pull from the fresh ring.
+        snapshots. The active slot's CheckoutManager._buffer reference
+        is updated so new checkouts pull from the fresh ring.
         """
-        was_running = self.is_capturing()
+        slot = self.active_slot
+        was_running = slot.is_capturing()
         if was_running:
             try:
-                self._capture.stop()
+                slot.stop_capture()
             except Exception:  # pragma: no cover
                 pass
 
         new_buf = AudioCircularBuffer(
             duration_seconds=float(new_seconds),
-            sample_rate=self.sample_rate,
-            channels=self.channels,
+            sample_rate=slot.sample_rate,
+            channels=slot.channels,
         )
-        self.buffer = new_buf
-        self.checkout_manager._buffer = new_buf  # noqa: SLF001
-        # Capture source, if present, is now referencing a stale buffer.
+        slot.buffer = new_buf
+        slot.buffer_seconds = float(new_seconds)
+        slot.checkout_manager._buffer = new_buf  # noqa: SLF001
+        # Capture source, if present, was writing into the old buffer.
         # Drop it so the caller rebuilds from state.build_capture().
-        self._capture = None
+        slot.capture_source = None
 
     def shutdown(self) -> None:
-        """Called on window close — stop capture + playback cleanly."""
-        if self._capture is not None:
+        """Called on window close — stop all slots + playback cleanly."""
+        for slot in self.slots:
             try:
-                self._capture.stop()
+                slot.stop_capture()
             except Exception:  # pragma: no cover
                 pass
         try:
