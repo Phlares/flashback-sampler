@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from flashback_sampler.app.add_source_dialog import AddSourceDialog
+from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.audio_devices import (
     CaptureDevice,
     OutputDevice,
@@ -933,6 +934,16 @@ class MainWindow(QMainWindow):
 
         cap_menu.addSeparator()
 
+        # Capture from Process... — opens the Windows-only process
+        # picker, returns a CaptureDevice with kind="process_loopback"
+        proc_act = QAction("Capture from Process…", cap_menu)
+        proc_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._pick_process_for_slot(i)
+        )
+        cap_menu.addAction(proc_act)
+
+        cap_menu.addSeparator()
+
         devices = list_capture_devices()
         if not devices:
             hint = QAction("(no capture devices)", cap_menu)
@@ -956,6 +967,19 @@ class MainWindow(QMainWindow):
             act.triggered.connect(
                 lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(i, d)
             )
+
+    def _pick_process_for_slot(self, slot_index: int) -> None:
+        """
+        Open the ProcessPickerDialog and, on accept, set the slot's
+        capture_spec to a per-process CaptureDevice.
+        """
+        dlg = ProcessPickerDialog(parent=self)
+        if dlg.exec() != ProcessPickerDialog.Accepted:
+            return
+        device = dlg.result_device()
+        if device is None:
+            return
+        self._set_slot_capture_spec(slot_index, device)
 
     def _set_slot_capture_spec(
         self, slot_index: int, device: CaptureDevice | None
