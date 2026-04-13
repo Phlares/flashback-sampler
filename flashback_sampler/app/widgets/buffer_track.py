@@ -317,6 +317,10 @@ class BufferTrack(QWidget):
             "LIVE BUFFER",
             f"{sample_rate // 1000}K   {channels}CH",
         )
+        # Timeline: "NOW" at the right edge, negative offsets into the
+        # buffered history to the left. Span = what's actually in the
+        # ring, not the capacity, so labels land on real audio.
+        self._waveform.set_timeline(total_seconds=buffered_s, anchor="right")
 
 
 def _mmss(seconds: float) -> str:
