@@ -40,6 +40,13 @@ SWEEP_DEG = SWEEP_END_DEG - SWEEP_START_DEG  # 270.0
 # sweep from min to max. Smaller = more sensitive.
 DRAG_PX_FULL_RANGE = 260.0
 
+# Mouse-wheel / keyboard step: each notch (or arrow press) moves this
+# fraction of the full range. A full sweep therefore takes 60 ticks.
+# Modifiers scale: Shift × 5 (coarse), Ctrl × 0.2 (fine).
+WHEEL_STEP_FRAC = 1.0 / 60.0
+WHEEL_STEP_COARSE_MULTIPLIER = 5.0
+WHEEL_STEP_FINE_MULTIPLIER = 0.2
+
 
 def value_to_angle_deg(value: float, lo: float, hi: float) -> float:
     """Map a value in [lo, hi] to a degrees position on the dial sweep."""
@@ -88,6 +95,12 @@ class RotaryKnob(QWidget):
         self._drag_start_value = 0.0
 
         self.setMouseTracking(True)
+        # Focus policy: click and tab both bring focus so keyboard and
+        # wheel input are routed to us. Wheel events require focus so
+        # scrolling OVER the knob doesn't steal it from the surrounding
+        # scroll area (even though we don't currently have one — good
+        # practice for future embedding).
+        self.setFocusPolicy(Qt.StrongFocus)
 
     # ------------------------------------------------------------------
     # API
@@ -150,6 +163,65 @@ class RotaryKnob(QWidget):
         # back to "NOW" — the 0 value).
         self.setValue(self._default_value)
 
+    def _modifier_step_value(self, modifiers) -> float:
+        """How much one wheel notch / arrow press should move the value."""
+        frac = WHEEL_STEP_FRAC
+        if modifiers & Qt.ShiftModifier:
+            frac *= WHEEL_STEP_COARSE_MULTIPLIER
+        elif modifiers & Qt.ControlModifier:
+            frac *= WHEEL_STEP_FINE_MULTIPLIER
+        return (self._max - self._min) * frac
+
+    def wheelEvent(self, ev) -> None:  # noqa: N802
+        notches = ev.angleDelta().y() / 120.0
+        if notches == 0:
+            ev.ignore()
+            return
+        # Grab focus on first interaction so the focus ring appears
+        if not self.hasFocus():
+            self.setFocus()
+        step = self._modifier_step_value(ev.modifiers())
+        new_val = clamp(self._value + notches * step, self._min, self._max)
+        if new_val != self._value:
+            self._value = new_val
+            self.valueChanged.emit(new_val)
+            self.update()
+        ev.accept()
+
+    def keyPressEvent(self, ev) -> None:  # noqa: N802
+        key = ev.key()
+        step = self._modifier_step_value(ev.modifiers())
+        if key in (Qt.Key_Up, Qt.Key_Right):
+            self.setValue(self._value + step)
+            ev.accept()
+            return
+        if key in (Qt.Key_Down, Qt.Key_Left):
+            self.setValue(self._value - step)
+            ev.accept()
+            return
+        if key == Qt.Key_Home:
+            self.setValue(self._min)
+            ev.accept()
+            return
+        if key == Qt.Key_End:
+            self.setValue(self._max)
+            ev.accept()
+            return
+        if key in (Qt.Key_0, Qt.Key_Return, Qt.Key_Enter):
+            # Snap-to-default (same as double-click)
+            self.setValue(self._default_value)
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def focusInEvent(self, ev) -> None:  # noqa: N802
+        self.update()
+        super().focusInEvent(ev)
+
+    def focusOutEvent(self, ev) -> None:  # noqa: N802
+        self.update()
+        super().focusOutEvent(ev)
+
     # ------------------------------------------------------------------
     # Paint
     # ------------------------------------------------------------------
@@ -179,6 +251,16 @@ class RotaryKnob(QWidget):
         p.setBrush(grad)
         p.setPen(QPen(QColor(0, 0, 0, 180), 1))
         p.drawEllipse(QPointF(cx, cy), r_outer, r_outer)
+
+        # ── Focus ring — thin ember circle inside the bezel ─────────
+        # Drawn only when the knob holds keyboard focus, so users can
+        # tell at a glance that wheel / arrow input is active.
+        if self.hasFocus():
+            focus_r = (r_dial + r_outer) / 2.0
+            p.setBrush(Qt.NoBrush)
+            focus_pen = QPen(QColor(EREBUS["ember"]), 1.2, Qt.DotLine)
+            p.setPen(focus_pen)
+            p.drawEllipse(QPointF(cx, cy), focus_r, focus_r)
 
         # ── Dial face ────────────────────────────────────────────────
         p.setBrush(QColor(EREBUS["ridge"]))
