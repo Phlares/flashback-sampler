@@ -152,6 +152,69 @@ def test_checkout_anchor_offset_mid_buffer_pulls_middle_audio():
     assert co.audio[-1, 0] == pytest.approx(1499.0)
 
 
+def test_create_from_abs_range_pulls_exact_samples():
+    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 3000, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+
+    co = mgr.create_from_abs_range(abs_start=1000, abs_end=2500)
+    assert co.audio.shape == (1500, 1)
+    assert co.audio[0, 0] == pytest.approx(1000.0)
+    assert co.audio[-1, 0] == pytest.approx(2499.0)
+    assert co.abs_sample_start == 1000
+    assert co.abs_sample_end == 2500
+
+
+def test_create_from_abs_range_rejects_inverted():
+    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 3000, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+    with pytest.raises(ValueError):
+        mgr.create_from_abs_range(abs_start=2000, abs_end=1000)
+
+
+def test_create_from_abs_range_rejects_past_head():
+    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 1000, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+    with pytest.raises(RuntimeError, match="past current head"):
+        mgr.create_from_abs_range(abs_start=500, abs_end=2000)
+
+
+def _chunked_write(buf, total_samples: int, chunk_size: int = 500) -> None:
+    """Write a sequential ramp in chunks smaller than the ring so the
+    buffer's single-wrap write() contract is respected."""
+    pos = 0
+    while pos < total_samples:
+        n = min(chunk_size, total_samples - pos)
+        buf.write(ramp_block(pos, n, channels=1))
+        pos += n
+
+
+def test_create_from_abs_range_rejects_overwritten():
+    """
+    Start of the requested range is older than the ring capacity —
+    it's already been overwritten by newer audio.
+    """
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    _chunked_write(buf, 3000)  # total_written=3000, only samples 2000..3000 still live
+    mgr = CheckoutManager(buffer=buf)
+    with pytest.raises(RuntimeError, match="already been overwritten"):
+        mgr.create_from_abs_range(abs_start=500, abs_end=1500)
+
+
+def test_create_from_abs_range_succeeds_within_live_ring():
+    """Pull the last 300 ms from a ring that's wrapped several times."""
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    _chunked_write(buf, 2500)  # total_written=2500, samples 1500..2500 still live
+    mgr = CheckoutManager(buffer=buf)
+
+    co = mgr.create_from_abs_range(abs_start=2200, abs_end=2500)
+    assert co.audio.shape == (300, 1)
+    assert co.audio[0, 0] == pytest.approx(2200.0)
+    assert co.audio[-1, 0] == pytest.approx(2499.0)
+
+
 def test_checkout_anchor_offset_rejects_negative():
     buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))

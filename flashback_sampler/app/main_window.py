@@ -102,6 +102,15 @@ class MainWindow(QMainWindow):
 
         # --- Track 1: live buffer view --------------------------------
         self._buffer_track = BufferTrack(channels=self._state.channels)
+        self._buffer_track.manualSelectionCommitted.connect(
+            self._on_live_selection_committed
+        )
+        self._buffer_track.manualSelectionCleared.connect(
+            self._on_live_selection_cleared
+        )
+        self._buffer_track.contextMenuRequested.connect(
+            self._on_live_context_menu
+        )
         vbox.addWidget(self._buffer_track, 2)
 
         # --- Transport cluster row: capture | rotary | presets | ck out ─
@@ -385,6 +394,17 @@ class MainWindow(QMainWindow):
             device_name=self._device_name,
         )
 
+        # Snapshot the authoritative buffer state (total_written) and
+        # either PIN a pending manual drag-selection or SYNC an
+        # already-pinned one into the widget's fractional space so the
+        # band tracks the audio it was anchored to as the ring scrolls.
+        with buf._lock:  # noqa: SLF001
+            total_w = buf.total_written
+        self._buffer_track.pin_manual_selection(bs, total_w, buf.sample_rate)
+        self._buffer_track.sync_manual_selection_to_buffer(
+            bs, total_w, buf.sample_rate
+        )
+
         # Rotary now spans the full buffered audio — max ≈ buffered_s
         # (minus an epsilon so the anchor never points past the ring
         # head). If the rotary sits past buffered_s - duration, the
@@ -463,6 +483,69 @@ class MainWindow(QMainWindow):
         spec_name = self._state.capture_spec.name if self._state.capture_spec else "?"
         self._device_label.setText(f"DEV  {spec_name.upper()}")
         self._device_name = spec_name.upper()
+
+    # ------------------------------------------------------------------
+    # Live buffer manual selection + context menu
+    # ------------------------------------------------------------------
+
+    def _on_live_selection_committed(self, abs_start: int, abs_end: int) -> None:
+        """
+        Fired after the user drags a selection on the live waveform and
+        BufferTrack has pinned it to absolute samples. No action yet —
+        the actual Check Out Segment call happens from the context menu.
+        """
+        # Could add a status bar hint here later.
+        pass
+
+    def _on_live_selection_cleared(self) -> None:
+        pass
+
+    def _on_live_context_menu(self, global_pos) -> None:
+        """Build and show the Track 1 right-click context menu."""
+        from PySide6.QtCore import QPoint
+
+        has_sel = self._buffer_track.has_manual_selection()
+        menu = QMenu(self)
+        check_act = QAction("Check Out Segment", self)
+        check_act.setEnabled(has_sel)
+        check_act.triggered.connect(self._checkout_manual_selection)
+        menu.addAction(check_act)
+
+        clear_act = QAction("Clear Selection", self)
+        clear_act.setEnabled(has_sel)
+        clear_act.triggered.connect(self._buffer_track.clear_manual_selection)
+        menu.addAction(clear_act)
+
+        menu.addSeparator()
+        hint = QAction("(Drag on waveform to select a range)", self)
+        hint.setEnabled(False)
+        menu.addAction(hint)
+
+        # Convert QPointF → QPoint for QMenu.exec
+        qpt = QPoint(int(global_pos.x()), int(global_pos.y()))
+        menu.exec(qpt)
+
+    def _checkout_manual_selection(self) -> None:
+        rng = self._buffer_track.manual_selection_abs_range()
+        if rng is None:
+            return
+        abs_start, abs_end = rng
+        try:
+            co = self._state.checkout_manager.create_from_abs_range(
+                abs_start=abs_start, abs_end=abs_end
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Checkout failed", str(e))
+            return
+        self._refresh_checkout_list()
+        # Auto-select the new one
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.UserRole) == co.id:
+                self._list.setCurrentRow(i)
+                break
+        # Clear the selection after committing — the user made their
+        # choice, they can drag a new one if they want another
+        self._buffer_track.clear_manual_selection()
 
     # ------------------------------------------------------------------
     # Flush (destructive, confirmation required)
