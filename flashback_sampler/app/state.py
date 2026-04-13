@@ -76,9 +76,16 @@ class AppState:
         self._capture = capture
 
     def is_capturing(self) -> bool:
-        return self._capture is not None and getattr(
-            self._capture, "_running", False
-        )
+        if self._capture is None:
+            return False
+        # Prefer the CaptureSource protocol's public method; fall back
+        # to the pre-M10.1 _running attribute for any leftover objects
+        # that haven't been upgraded yet (keeps tests that use fakes
+        # without the full interface passing).
+        is_running = getattr(self._capture, "is_running", None)
+        if callable(is_running):
+            return bool(is_running())
+        return bool(getattr(self._capture, "_running", False))
 
     def set_capture_spec(self, spec: CaptureDevice) -> None:
         self.capture_spec = spec

@@ -550,7 +550,7 @@ class MainWindow(QMainWindow):
 
         if self._state.is_capturing():
             cap_src = self._state.capture
-            xruns = cap_src.xrun_count() if hasattr(cap_src, "xrun_count") else 0
+            xruns = cap_src.xrun_count()
             self._xrun_label.setText(f"XR  {xruns:02d}")
 
         # Feed scrub-player cursor into the checkout track playhead

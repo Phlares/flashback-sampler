@@ -98,6 +98,16 @@ class AudioCapture:
         self.stop()
 
     # ------------------------------------------------------------------
+    # CaptureSource protocol
+    # ------------------------------------------------------------------
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def xrun_count(self) -> int:
+        return int(self._dropped_callbacks)
+
+    # ------------------------------------------------------------------
     # Callback (runs on PortAudio thread — keep it lean)
     # ------------------------------------------------------------------
 
