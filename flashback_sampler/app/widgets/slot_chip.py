@@ -18,13 +18,36 @@ from flashback_sampler.app.theme import EREBUS, font_family
 
 
 CHIP_WIDTH = 168
-CHIP_HEIGHT = 52
+CHIP_HEIGHT = 68
 
 # Prime-toggle hit rectangle in the chip's top-right corner
 PRIME_BTN_X = CHIP_WIDTH - 28
 PRIME_BTN_Y = 4
 PRIME_BTN_W = 24
 PRIME_BTN_H = 24
+
+
+def short_source_name(full: str, max_chars: int = 18) -> str:
+    """
+    Shorten a capture device name for the chip's source label line.
+    Strips well-known trailing tags ("[loopback]", "[default]") and
+    any final "(...)" qualifier, then truncates to `max_chars` with
+    an ellipsis. Empty / missing → "—".
+    """
+    if not full:
+        return "—"
+    s = str(full).strip()
+    for suffix in (" [loopback]", " [default]"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)].rstrip()
+    # Strip a trailing parenthesized qualifier (e.g. "(Realtek(R) Audio)")
+    if s.endswith(")"):
+        open_idx = s.rfind(" (")
+        if open_idx > 0:
+            s = s[:open_idx].rstrip()
+    if len(s) > max_chars:
+        s = s[: max_chars - 1].rstrip() + "…"
+    return s or "—"
 
 
 class SlotChip(QWidget):
@@ -52,6 +75,7 @@ class SlotChip(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._name: str = ""
+        self._source_short: str = ""
         self._fill_percent: float = 0.0
         self._is_active: bool = False
         self._is_capturing: bool = False
@@ -61,6 +85,9 @@ class SlotChip(QWidget):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
+        # Buttons shouldn't steal keyboard focus — spacebar is
+        # reserved for Preview. Chips are click-to-switch only.
+        self.setFocusPolicy(Qt.NoFocus)
 
     # ------------------------------------------------------------------
     # API
@@ -75,6 +102,7 @@ class SlotChip(QWidget):
         is_capturing: bool,
         xrun_count: int,
         ram_mb: float,
+        source_short: str = "",
     ) -> None:
         changed = (
             name != self._name
@@ -83,8 +111,10 @@ class SlotChip(QWidget):
             or is_capturing != self._is_capturing
             or xrun_count != self._xrun_count
             or abs(ram_mb - self._ram_mb) > 0.05
+            or source_short != self._source_short
         )
         self._name = name
+        self._source_short = source_short
         self._fill_percent = max(0.0, min(100.0, float(fill_percent)))
         self._is_active = bool(is_active)
         self._is_capturing = bool(is_capturing)
@@ -175,8 +205,26 @@ class SlotChip(QWidget):
             QColor(EREBUS["ember"]) if self._is_active else QColor(EREBUS["cream"])
         )
         p.setPen(name_color)
-        name_rect = QRectF(10, 6, w - 40, 18)
+        name_rect = QRectF(10, 6, w - 40, 16)
         p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, self._name or "—")
+
+        # ── Source line (device short name, bone) ────────────────────
+        if self._source_short:
+            src_font = self.font()
+            if fam:
+                src_font.setFamily(fam)
+            src_font.setPointSize(7)
+            src_font.setBold(False)
+            src_font.setCapitalization(QFont.AllUppercase)
+            src_font.setLetterSpacing(QFont.AbsoluteSpacing, 0.6)
+            p.setFont(src_font)
+            p.setPen(QColor(EREBUS["bone"]))
+            src_rect = QRectF(10, 24, w - 20, 12)
+            p.drawText(
+                src_rect,
+                Qt.AlignLeft | Qt.AlignVCenter,
+                self._source_short,
+            )
 
         # ── Prime button (top-right corner) ────────────────────────
         # Always present; its appearance reflects the current state.

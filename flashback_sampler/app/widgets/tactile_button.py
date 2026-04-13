@@ -39,6 +39,10 @@ class TactileButton(QPushButton):
         self._variant = variant
         self.setFlat(True)  # suppress Qt's default painting
         self.setCursor(Qt.PointingHandCursor)
+        # Buttons don't take keyboard focus — Space is reserved for
+        # the Preview shortcut, and keyboard activation of arbitrary
+        # buttons would be too easy a footgun.
+        self.setFocusPolicy(Qt.NoFocus)
         # Size hints — kept compact; main window overrides where needed
         self.setMinimumHeight(44 if variant == "secondary" else 52)
         self.setMinimumWidth(120)

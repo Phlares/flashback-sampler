@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QPainter
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menus()
+        self._build_shortcuts()
         self._restore_device_selection()
         self._refresh_device_menus()
         self._restore_settings()
@@ -281,6 +282,28 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Menu bar & device pickers
     # ------------------------------------------------------------------
+
+    def _build_shortcuts(self) -> None:
+        """
+        Global keyboard bindings. These use QShortcut with
+        Qt.ApplicationShortcut context so they fire regardless of
+        which widget has focus (important because the transport
+        buttons have NoFocus policy — Space won't activate a
+        currently-hovered button by accident).
+
+        Bindings:
+          Space   -> toggle Preview on the currently-selected clip
+          Ctrl+R  -> toggle CAPTURE ALL (master prime/unprime)
+        """
+        preview_sc = QShortcut(QKeySequence(Qt.Key_Space), self)
+        preview_sc.setContext(Qt.ApplicationShortcut)
+        preview_sc.activated.connect(self._toggle_preview)
+
+        capture_all_sc = QShortcut(
+            QKeySequence("Ctrl+R"), self
+        )
+        capture_all_sc.setContext(Qt.ApplicationShortcut)
+        capture_all_sc.activated.connect(self._on_capture_all_clicked)
 
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
@@ -539,9 +562,18 @@ class MainWindow(QMainWindow):
         )
 
         # Push slot state into the source strip (chip labels, fill
-        # bars, REC dots, xrun counters all update in place).
+        # bars, REC dots, xrun counters all update in place). We
+        # also compute a short "source" display string per slot so
+        # each chip can show which device it's wired to at a glance.
+        from flashback_sampler.app.widgets.slot_chip import short_source_name
+        source_names: list[str] = []
+        for s in self._state.slots:
+            spec = self._state.effective_capture_spec_for_slot(s)
+            source_names.append(short_source_name(spec.name) if spec else "—")
         self._source_strip.set_slots(
-            self._state.slots, self._state.active_slot_index
+            self._state.slots,
+            self._state.active_slot_index,
+            source_names=source_names,
         )
         # Master CAPTURE ALL button reflects the live primed count.
         primed_count = sum(
@@ -1466,7 +1498,7 @@ class MainWindow(QMainWindow):
             return
 
         slot, co = resolved
-        self._checkout_track.set_checkout(co)
+        self._checkout_track.set_checkout(co, source_name=slot.name)
 
         # Auto-switch active-focus to the clip's owning slot so Track 1
         # shows the slot the user just selected a clip from. Keeps the

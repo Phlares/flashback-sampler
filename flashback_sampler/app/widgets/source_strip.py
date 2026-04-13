@@ -29,7 +29,11 @@ from flashback_sampler.app.widgets.capture_all_button import (
     CAPTURE_ALL_HEIGHT,
     CaptureAllButton,
 )
-from flashback_sampler.app.widgets.slot_chip import CHIP_HEIGHT, SlotChip
+from flashback_sampler.app.widgets.slot_chip import (
+    CHIP_HEIGHT,
+    SlotChip,
+    short_source_name,
+)
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 
 
@@ -98,11 +102,16 @@ class SourceStrip(QWidget):
         self,
         slots: list,
         active_index: int,
+        source_names: list | None = None,
     ) -> None:
         """
         Reconcile the chip list with the current slots list. Creates
         new chips when slots are added, destroys chips when slots are
         removed, and updates in-place otherwise.
+
+        `source_names`, if provided, is a list parallel to `slots`
+        containing the short display name of each slot's effective
+        capture device. If None, no source line is shown.
         """
         # Resize the chip list
         while len(self._chips) < len(slots):
@@ -133,6 +142,9 @@ class SourceStrip(QWidget):
                 if buf.duration > 0
                 else 0.0
             )
+            src_short = ""
+            if source_names is not None and i < len(source_names):
+                src_short = source_names[i] or ""
             self._chips[i].set_state(
                 name=slot.name,
                 fill_percent=fill_pct,
@@ -140,6 +152,7 @@ class SourceStrip(QWidget):
                 is_capturing=slot.is_capturing(),
                 xrun_count=slot.xrun_count(),
                 ram_mb=slot.ram_mb(),
+                source_short=src_short,
             )
 
     def _on_chip_clicked(self, index: int) -> None:
