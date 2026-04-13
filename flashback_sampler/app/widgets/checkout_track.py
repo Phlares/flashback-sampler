@@ -3,19 +3,20 @@ CheckoutTrack — Track 2, shown when a checkout is selected.
 
 Renders the selected Checkout's audio as a static peak-bin waveform,
 with an ember playhead that follows ScrubPlayer.cursor_seconds. Click
-on the waveform to seek. Trim handles and the full IN / PLAY / OUT
-transport are stubs for M6.1.
+on the waveform to seek. Shift+click-drag to paint a trim selection.
+Right-click to open the clip context menu (Export Selection, Set
+Mark-In / Mark-Out to Playhead, Clear Trim).
 """
 
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from flashback_sampler.app.theme import EREBUS
-from flashback_sampler.app.widgets.waveform_view import WaveformView
+from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
 
 
 N_CLIP_BINS = 500
@@ -47,21 +48,47 @@ def _compute_clip_bins(audio: np.ndarray, n_bins: int) -> np.ndarray:
     return out
 
 
-class ClickableWaveform(WaveformView):
-    """WaveformView subclass that emits a click-to-seek signal."""
+class ClipWaveform(SelectableWaveform):
+    """
+    SelectableWaveform subclass that adds click-to-seek alongside the
+    inherited Shift+drag-to-select behaviour.
+
+    Interaction:
+      - Left click (no modifier) or left click+drag → emit seekRequested
+      - Shift + left click+drag → paint a trim selection
+        (SelectableWaveform.manualSelectionChanged)
+      - Right click → contextMenuRequested
+      - Double-click → clear manual selection
+    """
 
     seekRequested = Signal(float)  # 0..1 horizontal fraction
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() != Qt.LeftButton or self.width() <= 0:
+        if ev.button() == Qt.LeftButton:
+            if ev.modifiers() & Qt.ShiftModifier:
+                super().mousePressEvent(ev)
+                return
+            if self.width() > 0:
+                frac = max(0.0, min(1.0, ev.position().x() / self.width()))
+                self.seekRequested.emit(frac)
+            ev.accept()
             return
-        frac = max(0.0, min(1.0, ev.position().x() / self.width()))
-        self.seekRequested.emit(frac)
+        # Right click and others → SelectableWaveform handles them
+        super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+        # If a trim drag is in progress (started via Shift+press), let
+        # SelectableWaveform keep updating it. Otherwise a bare left
+        # drag = continuous click-to-seek (scrubbing the playhead).
+        if self._is_dragging:
+            super().mouseMoveEvent(ev)
+            return
         if ev.buttons() & Qt.LeftButton and self.width() > 0:
             frac = max(0.0, min(1.0, ev.position().x() / self.width()))
             self.seekRequested.emit(frac)
+            ev.accept()
+            return
+        super().mouseMoveEvent(ev)
 
 
 class CheckoutTrack(QWidget):
@@ -72,9 +99,13 @@ class CheckoutTrack(QWidget):
     """
 
     seekRequested = Signal(float)  # seconds into the clip
+    trimChanged = Signal(int, int)  # trim_in_samples, trim_out_samples
+    trimCleared = Signal()
+    contextMenuRequested = Signal(QPointF)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._checkout = None  # current Checkout (kept for trim updates)
         self._checkout_id: str | None = None
         self._duration_s: float = 0.0
         self._build_ui()
@@ -98,10 +129,13 @@ class CheckoutTrack(QWidget):
         root.addLayout(top, 0)
 
         # waveform
-        self._wave = ClickableWaveform(self)
+        self._wave = ClipWaveform(self)
         self._wave.setMinimumHeight(110)
         self._wave.set_labels("CLIP", "— — —")
         self._wave.seekRequested.connect(self._on_seek_frac)
+        self._wave.manualSelectionChanged.connect(self._on_trim_drag_committed)
+        self._wave.manualSelectionCleared.connect(self._on_trim_cleared)
+        self._wave.contextMenuRequested.connect(self.contextMenuRequested.emit)
         root.addWidget(self._wave, 1)
 
         # bottom time row
@@ -125,11 +159,13 @@ class CheckoutTrack(QWidget):
         Bind a Checkout (from flashback_sampler.core.checkout.Checkout)
         or None to clear. Called whenever the list selection changes.
         """
+        self._checkout = checkout
         if checkout is None:
             self._checkout_id = None
             self._duration_s = 0.0
             self._wave.set_data(None)
             self._wave.set_playhead(None)
+            self._wave.clear_manual_selection()
             self._wave.set_labels("CLIP", "— — —")
             self._caption.setText("— NO CHECKOUT SELECTED —")
             self._meta.setText("")
@@ -154,6 +190,22 @@ class CheckoutTrack(QWidget):
         self._pos_label.setText(f"00:00 / {_mmss(self._duration_s)}")
         self._state_label.setText(f"[{checkout.state.upper()}]")
 
+        # Reflect any pre-existing trim on the widget
+        self._refresh_trim_overlay_from_checkout()
+
+    def _refresh_trim_overlay_from_checkout(self) -> None:
+        co = self._checkout
+        if co is None or co.audio.shape[0] == 0:
+            self._wave.set_manual_selection(None, None)
+            return
+        n = co.audio.shape[0]
+        ti = max(0, int(co.trim_in_samples))
+        to = co.trim_out_samples if co.trim_out_samples > 0 else n
+        if ti == 0 and to == n:
+            self._wave.set_manual_selection(None, None)
+            return
+        self._wave.set_manual_selection(ti / n, to / n)
+
     def set_cursor(self, seconds: float) -> None:
         """Feed playback cursor position in seconds for the playhead."""
         if self._duration_s <= 0:
@@ -168,13 +220,85 @@ class CheckoutTrack(QWidget):
         return self._checkout_id
 
     # ------------------------------------------------------------------
-    # Internal
+    # Trim writes — mutate the bound Checkout in place
+    # ------------------------------------------------------------------
+
+    def set_mark_in(self, seconds: float) -> None:
+        co = self._checkout
+        if co is None:
+            return
+        n = co.audio.shape[0]
+        ti = max(0, min(n, int(seconds * co.sample_rate)))
+        to = co.trim_out_samples if co.trim_out_samples > 0 else n
+        if ti >= to:
+            return
+        co.trim_in_samples = ti
+        self._refresh_trim_overlay_from_checkout()
+        self.trimChanged.emit(co.trim_in_samples, co.trim_out_samples)
+
+    def set_mark_out(self, seconds: float) -> None:
+        co = self._checkout
+        if co is None:
+            return
+        n = co.audio.shape[0]
+        to = max(0, min(n, int(seconds * co.sample_rate)))
+        ti = max(0, int(co.trim_in_samples))
+        if to <= ti:
+            return
+        co.trim_out_samples = to
+        self._refresh_trim_overlay_from_checkout()
+        self.trimChanged.emit(co.trim_in_samples, co.trim_out_samples)
+
+    def clear_trim(self) -> None:
+        co = self._checkout
+        if co is None:
+            return
+        co.trim_in_samples = 0
+        co.trim_out_samples = 0
+        self._refresh_trim_overlay_from_checkout()
+        self.trimCleared.emit()
+
+    def trim_range_seconds(self) -> tuple[float, float] | None:
+        """Return the current [in, out] range in seconds, or None if full."""
+        co = self._checkout
+        if co is None or co.audio.shape[0] == 0:
+            return None
+        n = co.audio.shape[0]
+        ti = max(0, int(co.trim_in_samples))
+        to = co.trim_out_samples if co.trim_out_samples > 0 else n
+        if ti == 0 and to == n:
+            return None
+        return (ti / co.sample_rate, to / co.sample_rate)
+
+    # ------------------------------------------------------------------
+    # Internal slots
     # ------------------------------------------------------------------
 
     def _on_seek_frac(self, frac: float) -> None:
         if self._duration_s <= 0:
             return
         self.seekRequested.emit(frac * self._duration_s)
+
+    def _on_trim_drag_committed(self, start_frac: float, end_frac: float) -> None:
+        """Shift+drag on the clip waveform → set Checkout.trim_in/out."""
+        co = self._checkout
+        if co is None:
+            return
+        n = co.audio.shape[0]
+        ti = max(0, min(n, int(round(start_frac * n))))
+        to = max(ti + 1, min(n, int(round(end_frac * n))))
+        co.trim_in_samples = ti
+        co.trim_out_samples = to
+        self.trimChanged.emit(ti, to)
+
+    def _on_trim_cleared(self) -> None:
+        co = self._checkout
+        if co is None:
+            return
+        if co.trim_in_samples != 0 or co.trim_out_samples != 0:
+            co.trim_in_samples = 0
+            co.trim_out_samples = 0
+            self.trimCleared.emit()
 
 
 def _mmss(seconds: float) -> str:
