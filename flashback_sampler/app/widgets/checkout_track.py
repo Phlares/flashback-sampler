@@ -51,23 +51,37 @@ def _compute_clip_bins(audio: np.ndarray, n_bins: int) -> np.ndarray:
 class ClipWaveform(SelectableWaveform):
     """
     SelectableWaveform subclass that adds click-to-seek alongside the
-    inherited Shift+drag-to-select behaviour.
+    inherited Shift+drag-to-select and edge-drag behaviours.
 
-    Interaction:
-      - Left click (no modifier) or left click+drag → emit seekRequested
-      - Shift + left click+drag → paint a trim selection
-        (SelectableWaveform.manualSelectionChanged)
-      - Right click → contextMenuRequested
-      - Double-click → clear manual selection
+    Interaction priority on left click:
+      1. Cursor over an existing mark-in/out edge → drag that edge
+         (inherited from SelectableWaveform)
+      2. Shift modifier → start a new trim selection drag (inherited)
+      3. Otherwise → click-to-seek / drag-to-scrub the playhead
+    Right click → contextMenuRequested. Double-click → clear trim.
     """
 
     seekRequested = Signal(float)  # 0..1 horizontal fraction
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # ClipWaveform's idle mode is click-to-seek, not drag-to-select,
+        # so the default cursor is ArrowCursor. SelectableWaveform still
+        # flips it to SizeHorCursor when hovering an edge.
+        self._idle_cursor = Qt.ArrowCursor
+        self.setCursor(self._idle_cursor)
+
     def mousePressEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.LeftButton:
+            # Priority 1: edge drag (base-class handles the state)
+            if self._edge_at(ev.position().x()) is not None:
+                super().mousePressEvent(ev)
+                return
+            # Priority 2: Shift-drag for new trim selection
             if ev.modifiers() & Qt.ShiftModifier:
                 super().mousePressEvent(ev)
                 return
+            # Priority 3: click-to-seek
             if self.width() > 0:
                 frac = max(0.0, min(1.0, ev.position().x() / self.width()))
                 self.seekRequested.emit(frac)
@@ -77,10 +91,10 @@ class ClipWaveform(SelectableWaveform):
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:  # noqa: N802
-        # If a trim drag is in progress (started via Shift+press), let
+        # If a trim drag / edge drag is in progress, let
         # SelectableWaveform keep updating it. Otherwise a bare left
         # drag = continuous click-to-seek (scrubbing the playhead).
-        if self._is_dragging:
+        if self._is_dragging or self._dragging_edge is not None:
             super().mouseMoveEvent(ev)
             return
         if ev.buttons() & Qt.LeftButton and self.width() > 0:
@@ -88,6 +102,7 @@ class ClipWaveform(SelectableWaveform):
             self.seekRequested.emit(frac)
             ev.accept()
             return
+        # Hover path — let base class update the cursor
         super().mouseMoveEvent(ev)
 
 
