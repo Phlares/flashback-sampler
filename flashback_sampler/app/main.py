@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.main_window import MainWindow
-from flashback_sampler.app.theme import EREBUS, base_stylesheet
+from flashback_sampler.app.theme import EREBUS, base_stylesheet, load_fonts
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -65,6 +65,9 @@ def main() -> int:
     pal.setColor(QPalette.PlaceholderText, bone)
     app.setPalette(pal)
 
+    # Load bundled Monaspace fonts BEFORE building the stylesheet so
+    # the font-family stacks resolve correctly for the first paint.
+    load_fonts(app)
     app.setStyleSheet(base_stylesheet())
 
     state = AppState(

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction, QActionGroup, QPainter
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -45,6 +45,8 @@ from flashback_sampler.app.widgets.buffer_track import (
     compute_anchor_section,
 )
 from flashback_sampler.app.widgets.checkout_track import CheckoutTrack
+from flashback_sampler.app.widgets.tactile_button import TactileButton
+from flashback_sampler.app.widgets.topo_background import paint_topo_background
 from flashback_sampler.app.widgets.duration_preset import (
     DEFAULT_PRESETS,
     DurationPreset,
@@ -86,7 +88,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QWidget(self)
+        root = _ChassisWidget(self)
         self.setCentralWidget(root)
 
         vbox = QVBoxLayout(root)
@@ -109,13 +111,12 @@ class MainWindow(QMainWindow):
         # Left column: capture + flush buttons
         left_col = QVBoxLayout()
         left_col.setSpacing(8)
-        self._capture_btn = QPushButton("START CAPTURE")
-        self._capture_btn.setProperty("variant", "primary")
+        self._capture_btn = TactileButton("START CAPTURE", variant="primary")
         self._capture_btn.clicked.connect(self._toggle_capture)
-        self._capture_btn.setMinimumHeight(42)
+        self._capture_btn.setMinimumHeight(48)
         left_col.addWidget(self._capture_btn)
 
-        self._flush_btn = QPushButton("FLUSH BUFFER")
+        self._flush_btn = TactileButton("FLUSH BUFFER", variant="secondary")
         self._flush_btn.clicked.connect(self._flush_buffer)
         left_col.addWidget(self._flush_btn)
         left_col.addStretch(1)
@@ -161,11 +162,11 @@ class MainWindow(QMainWindow):
         right_col = QVBoxLayout()
         right_col.setSpacing(8)
         right_col.addStretch(1)
-        self._checkout_btn = QPushButton(
-            f"CHECK OUT {_mmss(self._presets.active_duration())}"
+        self._checkout_btn = TactileButton(
+            f"CHECK OUT {_mmss(self._presets.active_duration())}",
+            variant="primary",
         )
-        self._checkout_btn.setProperty("variant", "primary")
-        self._checkout_btn.setMinimumHeight(52)
+        self._checkout_btn.setMinimumHeight(60)
         self._checkout_btn.clicked.connect(self._create_checkout)
         self._checkout_btn.setEnabled(False)
         right_col.addWidget(self._checkout_btn)
@@ -192,18 +193,17 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
 
-        self._preview_btn = QPushButton("▶  PREVIEW")
+        self._preview_btn = TactileButton("PREVIEW", variant="secondary")
         self._preview_btn.clicked.connect(self._toggle_preview)
         self._preview_btn.setEnabled(False)
         action_row.addWidget(self._preview_btn)
 
-        self._save_btn = QPushButton("SAVE")
-        self._save_btn.setProperty("variant", "primary")
+        self._save_btn = TactileButton("SAVE", variant="primary")
         self._save_btn.clicked.connect(self._save_selected)
         self._save_btn.setEnabled(False)
         action_row.addWidget(self._save_btn)
 
-        self._discard_btn = QPushButton("DISCARD")
+        self._discard_btn = TactileButton("DISCARD", variant="secondary")
         self._discard_btn.clicked.connect(self._discard_selected)
         self._discard_btn.setEnabled(False)
         action_row.addWidget(self._discard_btn)
@@ -428,7 +428,7 @@ class MainWindow(QMainWindow):
         # Auto-flip the preview button back when playback drains naturally
         if self._previewing_id is not None and not self._state.scrub_player.is_playing:
             self._previewing_id = None
-            self._preview_btn.setText("▶  PREVIEW")
+            self._preview_btn.setText("PREVIEW")
 
     # ------------------------------------------------------------------
     # Capture control
@@ -619,7 +619,7 @@ class MainWindow(QMainWindow):
             return
 
         self._previewing_id = cid
-        self._preview_btn.setText("■  STOP PREVIEW")
+        self._preview_btn.setText("STOP PREVIEW")
 
     def _stop_preview(self) -> None:
         try:
@@ -672,6 +672,25 @@ class MainWindow(QMainWindow):
         self._refresh_timer.stop()
         self._state.shutdown()
         super().closeEvent(event)
+
+
+class _ChassisWidget(QWidget):
+    """
+    Central widget for MainWindow. Owns the topographical background
+    paint so child widgets (BufferTrack, CheckoutTrack, buttons) sit
+    on top of the pattern. Uses an objectName so the global QSS
+    QWidget rule can be neutralised for this specific instance.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ChassisRoot")
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        paint_topo_background(painter, self.width(), self.height())
+        painter.end()
+        super().paintEvent(event)
 
 
 def _mmss(seconds: float) -> str:
