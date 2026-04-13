@@ -194,3 +194,87 @@ def test_compute_clip_bins_empty_audio_returns_zeros():
     bins = _compute_clip_bins(np.zeros((0, 2), dtype=np.float32), n_bins=20)
     assert bins.shape == (20, 2, 2)
     assert np.all(bins == 0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# compute_anchor_section — section band math
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_anchor_section_at_now():
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    # 10 s buffered, 5 s duration, anchor at 0 → [5..10] seconds = [0.5..1.0]
+    result = compute_anchor_section(
+        anchor_offset_s=0.0, duration_s=5.0, buffered_s=10.0
+    )
+    assert result == pytest.approx((0.5, 1.0))
+
+
+def test_anchor_section_middle_of_buffer():
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    # 10 s buffered, 3 s duration, anchor 2 s ago → [5..7] seconds = [0.5..0.8]
+    result = compute_anchor_section(
+        anchor_offset_s=2.0, duration_s=3.0, buffered_s=10.0
+    )
+    assert result is not None
+    start, end = result
+    assert start == pytest.approx(0.5)
+    assert end == pytest.approx(0.8)
+
+
+def test_anchor_section_at_oldest():
+    """
+    When the anchor pushes the clip start off the left edge, the section
+    should clamp to [0, something] — still visible, just truncated.
+    """
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    # 10 s buffered, 5 s duration, anchor 9 s ago:
+    # requested [14..9 ago] → clamp start to 0
+    # end_frac = 1 - 9/10 = 0.1, start_frac = 1 - 14/10 = -0.4 → 0
+    result = compute_anchor_section(
+        anchor_offset_s=9.0, duration_s=5.0, buffered_s=10.0
+    )
+    assert result is not None
+    start, end = result
+    assert start == pytest.approx(0.0)
+    assert end == pytest.approx(0.1)
+
+
+def test_anchor_section_duration_larger_than_buffer():
+    """3 min preset on a 30 s buffer should fill the whole band."""
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    result = compute_anchor_section(
+        anchor_offset_s=0.0, duration_s=180.0, buffered_s=30.0
+    )
+    assert result is not None
+    start, end = result
+    assert start == pytest.approx(0.0)
+    assert end == pytest.approx(1.0)
+
+
+def test_anchor_section_empty_buffer_returns_none():
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    assert compute_anchor_section(0.0, 3.0, 0.0) is None
+    assert compute_anchor_section(0.0, 3.0, -1.0) is None
+
+
+def test_anchor_section_zero_duration_returns_none():
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    assert compute_anchor_section(0.0, 0.0, 10.0) is None
+
+
+def test_anchor_section_collapsed_at_oldest_returns_none():
+    """
+    When anchor is exactly at the oldest sample and duration is so
+    large that both boundaries collapse to 0, the function returns None
+    so the UI hides the band rather than drawing a zero-width rectangle.
+    """
+    from flashback_sampler.app.widgets.buffer_track import compute_anchor_section
+    # 10 s buffered, anchor 10 s ago (the oldest), any duration:
+    # end_frac = 1 - 10/10 = 0
+    # start_frac clamps to 0
+    # end <= start → None
+    result = compute_anchor_section(
+        anchor_offset_s=10.0, duration_s=5.0, buffered_s=10.0
+    )
+    assert result is None

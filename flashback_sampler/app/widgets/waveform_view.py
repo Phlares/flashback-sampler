@@ -33,6 +33,8 @@ class WaveformView(QWidget):
         self._label_top: str = ""
         self._label_right: str = ""
         self._playhead_frac: float | None = None  # [0..1], None = hidden
+        self._sel_start: float | None = None  # [0..1]
+        self._sel_end: float | None = None  # [0..1]
 
     # ------------------------------------------------------------------
     # Public API
@@ -51,6 +53,22 @@ class WaveformView(QWidget):
     def set_playhead(self, frac: float | None) -> None:
         """0..1 horizontal position of the scrub marker, or None to hide."""
         self._playhead_frac = frac
+        self.update()
+
+    def set_selection(
+        self,
+        start_frac: float | None,
+        end_frac: float | None,
+    ) -> None:
+        """
+        Highlight a horizontal selection band. Pass None / None to hide.
+        The band is drawn as a translucent ember fill with a dashed
+        boundary on the start edge and a solid boundary on the end edge —
+        matches the "anchor section view" intent: start is informational,
+        end is where the commit lands.
+        """
+        self._sel_start = start_frac
+        self._sel_end = end_frac
         self.update()
 
     # ------------------------------------------------------------------
@@ -137,7 +155,28 @@ class WaveformView(QWidget):
                 p.setPen(QPen(signal, 1))
                 p.drawLines(lines)
 
-        # ── 6. Playhead (scrub cursor) ───────────────────────────────
+        # ── 6. Section band (optional, drawn BEHIND the playhead) ────
+        if self._sel_start is not None and self._sel_end is not None:
+            s = max(0.0, min(1.0, float(self._sel_start)))
+            e = max(0.0, min(1.0, float(self._sel_end)))
+            if e > s:
+                x1 = inner_x + s * inner_w
+                x2 = inner_x + e * inner_w
+                # Translucent ember fill
+                fill = QColor(EREBUS["ember"])
+                fill.setAlpha(int(0.14 * 255))
+                p.fillRect(
+                    int(x1), inner_y, max(1, int(x2 - x1)), inner_h, fill
+                )
+                # Dashed start edge (informational)
+                dash_pen = QPen(QColor(EREBUS["ember"]), 1, Qt.DashLine)
+                p.setPen(dash_pen)
+                p.drawLine(int(x1), inner_y, int(x1), inner_y + inner_h)
+                # Solid end edge (where the commit lands)
+                p.setPen(QPen(QColor(EREBUS["ember"]), 2))
+                p.drawLine(int(x2), inner_y, int(x2), inner_y + inner_h)
+
+        # ── 7. Playhead (scrub cursor for Track 2 clip playback) ─────
         if self._playhead_frac is not None:
             frac = max(0.0, min(1.0, float(self._playhead_frac)))
             x = int(inner_x + frac * inner_w)

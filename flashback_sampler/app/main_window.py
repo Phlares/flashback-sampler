@@ -31,7 +31,10 @@ from PySide6.QtWidgets import (
 )
 
 from flashback_sampler.app.state import AppState, make_loopback_capture
-from flashback_sampler.app.widgets.buffer_track import BufferTrack
+from flashback_sampler.app.widgets.buffer_track import (
+    BufferTrack,
+    compute_anchor_section,
+)
 from flashback_sampler.app.widgets.checkout_track import CheckoutTrack
 from flashback_sampler.app.widgets.duration_preset import (
     DEFAULT_PRESETS,
@@ -225,24 +228,27 @@ class MainWindow(QMainWindow):
             device_name=self._device_name,
         )
 
-        # Clamp the rotary's max so every position yields a FULL-duration
-        # clip. rotary=0 means "last `duration` seconds"; rotary=max
-        # means "oldest `duration` seconds currently buffered." If
-        # buffered < duration, the max collapses to 0 (the whole
-        # clip is already clamped to what exists).
+        # Rotary now spans the full buffered audio — max ≈ buffered_s
+        # (minus an epsilon so the anchor never points past the ring
+        # head). If the rotary sits past buffered_s - duration, the
+        # prospective clip clips against the oldest sample and becomes
+        # shorter than the preset; the section band visualizes that.
         current_dur = self._current_duration_s()
-        rotary_max = max(0.0, bs - current_dur)
-        self._rotary.setRange(0.0, max(0.001, rotary_max))
+        rotary_max = max(0.001, bs - 0.001)
+        self._rotary.setRange(0.0, rotary_max)
 
-        # Ghost anchor playhead on Track 1 — shows where the END of the
-        # next checkout would land. rotary=0 → end is "now" (frac=1);
-        # rotary=max → end is `buffered_s - max` ago (frac ≈
-        # current_dur/bs → the end of the oldest full-duration window).
-        if bs > 0 and self._anchor_offset_s > 0:
-            frac = 1.0 - (self._anchor_offset_s / bs)
-            self._buffer_track.set_anchor_playhead(max(0.0, min(1.0, frac)))
+        # Anchor SECTION band on Track 1 — highlights the [start, end]
+        # range of the prospective checkout. Dashed ember on the start
+        # edge, solid on the end edge, translucent ember fill between.
+        section = compute_anchor_section(
+            anchor_offset_s=self._anchor_offset_s,
+            duration_s=current_dur,
+            buffered_s=bs,
+        )
+        if section is None:
+            self._buffer_track.set_anchor_section(None, None)
         else:
-            self._buffer_track.set_anchor_playhead(None)
+            self._buffer_track.set_anchor_section(*section)
 
         bs = buf.buffered_seconds
 
