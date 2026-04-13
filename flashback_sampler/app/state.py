@@ -183,11 +183,18 @@ class AppState:
         Instantiate a capture source for the ACTIVE slot from the
         current capture_spec. Raises if no spec is selected.
         """
+        return self.build_capture_for_slot(self.active_slot)
+
+    def build_capture_for_slot(self, slot: CaptureSlot):
+        """
+        Instantiate a capture source wired to `slot`'s buffer. Every
+        slot shares the same global capture_spec for now — per-slot
+        device routing lands in a later milestone.
+        """
         if self.capture_spec is None:
             raise RuntimeError(
                 "No capture device selected. Pick one from the Audio menu."
             )
-        slot = self.active_slot
         return build_capture_source(
             device=self.capture_spec,
             buffer=slot.buffer,

@@ -109,3 +109,51 @@ def test_slot_chip_state_update_triggers_repaint(qapp):
     assert chip._is_capturing is True
     assert chip._xrun_count == 5
     assert chip._ram_mb == 123.0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Prime button hit detection (independent of active-focus click)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_prime_button_hit_area_inside(qapp):
+    from flashback_sampler.app.widgets.slot_chip import (
+        PRIME_BTN_H,
+        PRIME_BTN_W,
+        PRIME_BTN_X,
+        PRIME_BTN_Y,
+    )
+
+    chip = SlotChip()
+    # Corners
+    assert chip._in_prime_button(PRIME_BTN_X, PRIME_BTN_Y) is True
+    assert chip._in_prime_button(
+        PRIME_BTN_X + PRIME_BTN_W, PRIME_BTN_Y + PRIME_BTN_H
+    ) is True
+    # Center
+    assert chip._in_prime_button(
+        PRIME_BTN_X + PRIME_BTN_W / 2, PRIME_BTN_Y + PRIME_BTN_H / 2
+    ) is True
+
+
+def test_prime_button_hit_area_outside(qapp):
+    from flashback_sampler.app.widgets.slot_chip import PRIME_BTN_X
+
+    chip = SlotChip()
+    # Left side of the chip — click-to-switch territory
+    assert chip._in_prime_button(20, 20) is False
+    # Below the button
+    assert chip._in_prime_button(PRIME_BTN_X + 5, 40) is False
+
+
+def test_source_strip_forwards_prime_toggled(qapp):
+    strip = SourceStrip()
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))
+    strip.set_slots(st.slots, st.active_slot_index)
+
+    fired: list[int] = []
+    strip.primeToggled.connect(lambda i: fired.append(i))
+    strip._chips[0].primeToggled.emit()
+    strip._chips[1].primeToggled.emit()
+    assert fired == [0, 1]

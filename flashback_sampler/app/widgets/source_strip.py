@@ -31,6 +31,7 @@ from flashback_sampler.app.widgets.tactile_button import TactileButton
 
 class SourceStrip(QWidget):
     activeChanged = Signal(int)
+    primeToggled = Signal(int)
     addSourceRequested = Signal()
     contextMenuRequested = Signal(int, QPointF)
 
@@ -94,6 +95,9 @@ class SourceStrip(QWidget):
             idx = len(self._chips)
             chip.clicked.connect(
                 lambda _checked=False, i=idx: self._on_chip_clicked(i)
+            )
+            chip.primeToggled.connect(
+                lambda i=idx: self.primeToggled.emit(i)
             )
             chip.contextMenuRequested.connect(
                 lambda pos, i=idx: self.contextMenuRequested.emit(i, pos)
