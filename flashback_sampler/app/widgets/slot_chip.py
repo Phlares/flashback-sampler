@@ -20,9 +20,33 @@ from flashback_sampler.app.theme import EREBUS, font_family
 CHIP_WIDTH = 168
 CHIP_HEIGHT = 52
 
+# Prime-toggle hit rectangle in the chip's top-right corner
+PRIME_BTN_X = CHIP_WIDTH - 28
+PRIME_BTN_Y = 4
+PRIME_BTN_W = 24
+PRIME_BTN_H = 24
+
 
 class SlotChip(QWidget):
+    """
+    Visual representation of one CaptureSlot.
+
+    Two independent click actions:
+      - Click anywhere EXCEPT the top-right REC button → emit
+        `clicked()` so the host switches the active-focus slot.
+      - Click the REC button in the top-right → emit `primeToggled()`
+        so the host starts or stops the slot's capture
+        independently of which slot is currently active-focused.
+      - Right-click anywhere → emit contextMenuRequested(QPointF).
+
+    Active-focus and primed-state are orthogonal — a slot can be
+    primed but not active (capturing in the background while the
+    user is watching a different slot), or active but not primed
+    (UI is driving it, but it's frozen / held for review).
+    """
+
     clicked = Signal()
+    primeToggled = Signal()
     contextMenuRequested = Signal(QPointF)
 
     def __init__(self, parent=None):
@@ -36,6 +60,7 @@ class SlotChip(QWidget):
         self.setFixedSize(CHIP_WIDTH, CHIP_HEIGHT)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
 
     # ------------------------------------------------------------------
     # API
@@ -72,8 +97,23 @@ class SlotChip(QWidget):
     # Mouse
     # ------------------------------------------------------------------
 
+    def _in_prime_button(self, x: float, y: float) -> bool:
+        return (
+            PRIME_BTN_X <= x <= PRIME_BTN_X + PRIME_BTN_W
+            and PRIME_BTN_Y <= y <= PRIME_BTN_Y + PRIME_BTN_H
+        )
+
     def mousePressEvent(self, ev) -> None:  # noqa: N802
+        px = ev.position().x()
+        py = ev.position().y()
         if ev.button() == Qt.LeftButton:
+            # Prime-toggle hit area takes priority over the main
+            # active-focus click, so you can prime / unprime without
+            # first switching which slot the UI is showing.
+            if self._in_prime_button(px, py):
+                self.primeToggled.emit()
+                ev.accept()
+                return
             self.clicked.emit()
             ev.accept()
             return
@@ -82,6 +122,13 @@ class SlotChip(QWidget):
             ev.accept()
             return
         super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+        # Hover cursor: pointing hand over the body, forbidden cursor
+        # nowhere — just keep the pointer consistent. (The prime button
+        # could flip to a different cursor, but PointingHand for the
+        # whole chip keeps the signal simple.)
+        super().mouseMoveEvent(ev)
 
     # ------------------------------------------------------------------
     # Paint
@@ -131,11 +178,28 @@ class SlotChip(QWidget):
         name_rect = QRectF(10, 6, w - 40, 18)
         p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, self._name or "—")
 
-        # ── REC dot (top-right) when capturing ─────────────────────
+        # ── Prime button (top-right corner) ────────────────────────
+        # Always present; its appearance reflects the current state.
+        #   Primed:    solid ember-red disc (REC indicator)
+        #   Unprimed:  1 px outline circle in bone — "click to prime"
+        btn_cx = PRIME_BTN_X + PRIME_BTN_W / 2.0
+        btn_cy = PRIME_BTN_Y + PRIME_BTN_H / 2.0
         if self._is_capturing:
             p.setBrush(QColor(EREBUS["rec"]))
             p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(w - 14.0, 14.0), 4.0, 4.0)
+            p.drawEllipse(QPointF(btn_cx, btn_cy), 5.5, 5.5)
+            # Outer faint halo so primed chips stand out
+            halo = QColor(EREBUS["rec"])
+            halo.setAlpha(int(0.25 * 255))
+            p.setBrush(halo)
+            p.drawEllipse(QPointF(btn_cx, btn_cy), 8.5, 8.5)
+            # Re-draw the solid on top so the halo sits behind it
+            p.setBrush(QColor(EREBUS["rec"]))
+            p.drawEllipse(QPointF(btn_cx, btn_cy), 5.5, 5.5)
+        else:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(EREBUS["bone"]), 1.2))
+            p.drawEllipse(QPointF(btn_cx, btn_cy), 5.5, 5.5)
 
         # ── Fill bar (bottom-most 4 px) ────────────────────────────
         bar_y = h - 6

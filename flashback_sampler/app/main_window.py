@@ -119,6 +119,7 @@ class MainWindow(QMainWindow):
         # --- Source strip ---------------------------------------------
         self._source_strip = SourceStrip()
         self._source_strip.activeChanged.connect(self._on_source_strip_active_changed)
+        self._source_strip.primeToggled.connect(self._on_source_strip_prime_toggled)
         self._source_strip.addSourceRequested.connect(self._open_add_source_dialog)
         self._source_strip.contextMenuRequested.connect(
             self._on_source_strip_context_menu
@@ -666,6 +667,59 @@ class MainWindow(QMainWindow):
 
         # Refresh the checkout list to show the new slot's checkouts
         self._refresh_checkout_list()
+
+    def _on_source_strip_prime_toggled(self, slot_index: int) -> None:
+        """
+        User clicked the REC button on a chip. Toggles that SPECIFIC
+        slot's capture state independently of which slot is currently
+        active-focused. Multiple slots can be primed simultaneously;
+        each gets its own capture source bound to its own buffer.
+        """
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+
+        if slot.is_capturing():
+            # Unprime: just halt the slot's capture. The buffer
+            # contents stay for later scrubbing / checkout.
+            try:
+                slot.stop_capture()
+            except Exception as e:
+                QMessageBox.warning(self, "Stop capture failed", str(e))
+                return
+            # If this was the active slot, sync the big capture button
+            if slot_index == self._state.active_slot_index:
+                self._capture_btn.setText("START CAPTURE")
+                self._device_name = f"(SLOT: {slot.name.upper()})"
+                self._device_label.setText(f"DEV  {self._device_name}")
+            return
+
+        # Prime: build a capture source wired to THIS slot (not the
+        # active slot) and start it. Slot may replace any existing
+        # bound source; bind_capture stops the previous one first.
+        try:
+            source = self._state.build_capture_for_slot(slot)
+        except Exception as e:
+            QMessageBox.critical(self, "Capture failed", str(e))
+            return
+        try:
+            slot.bind_capture(source)
+            slot.start_capture()
+        except Exception as e:
+            QMessageBox.critical(self, "Capture failed", str(e))
+            return
+
+        # If this was the active slot, sync the big capture button and
+        # the device label so the main controls reflect the state.
+        if slot_index == self._state.active_slot_index:
+            self._capture_btn.setText("STOP CAPTURE")
+            spec_name = (
+                self._state.capture_spec.name
+                if self._state.capture_spec is not None
+                else "?"
+            )
+            self._device_name = spec_name.upper()
+            self._device_label.setText(f"DEV  {self._device_name}")
 
     def _open_add_source_dialog(self) -> None:
         default_name = f"Source {len(self._state.slots) + 1}"
