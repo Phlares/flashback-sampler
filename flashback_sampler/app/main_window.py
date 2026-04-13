@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -24,13 +25,21 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from flashback_sampler.app.state import AppState, make_loopback_capture
+from flashback_sampler.app.audio_devices import (
+    CaptureDevice,
+    OutputDevice,
+    list_capture_devices,
+    list_output_devices,
+)
+from flashback_sampler.app.config import load_config, save_config
+from flashback_sampler.app.state import AppState
 from flashback_sampler.app.widgets.buffer_track import (
     BufferTrack,
     compute_anchor_section,
@@ -63,6 +72,9 @@ class MainWindow(QMainWindow):
         self._device_name: str = "(NOT CAPTURING)"
 
         self._build_ui()
+        self._build_menus()
+        self._restore_device_selection()
+        self._refresh_device_menus()
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(33)  # ~30 Hz
@@ -209,6 +221,151 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._xrun_label)
 
     # ------------------------------------------------------------------
+    # Menu bar & device pickers
+    # ------------------------------------------------------------------
+
+    def _build_menus(self) -> None:
+        menu_bar = self.menuBar()
+        audio_menu = menu_bar.addMenu("&Audio")
+
+        self._capture_menu: QMenu = audio_menu.addMenu("Capture Source")
+        self._output_menu: QMenu = audio_menu.addMenu("Preview Output")
+
+        audio_menu.addSeparator()
+        refresh_act = QAction("Refresh Device List", self)
+        refresh_act.triggered.connect(self._refresh_device_menus)
+        audio_menu.addAction(refresh_act)
+
+        # Action groups keep the radio-button exclusivity inside each submenu
+        self._capture_action_group: QActionGroup | None = None
+        self._output_action_group: QActionGroup | None = None
+
+    def _restore_device_selection(self) -> None:
+        """
+        Pull the last-used capture and output device IDs from config.json
+        and apply them to AppState. Matching is by (kind, id) for capture
+        and by name for output (IDs are unstable across device hot-plug).
+        """
+        cfg = load_config()
+
+        cap_cfg = cfg.get("capture_source") or {}
+        if cap_cfg:
+            want_kind = cap_cfg.get("kind")
+            want_id = cap_cfg.get("id")
+            for dev in list_capture_devices():
+                if dev.kind == want_kind and dev.id == want_id:
+                    self._state.set_capture_spec(dev)
+                    break
+
+        out_cfg = cfg.get("preview_output") or {}
+        if out_cfg:
+            want_name = out_cfg.get("name")
+            for dev in list_output_devices():
+                if dev.name == want_name:
+                    self._state.set_output_spec(dev)
+                    break
+
+    def _refresh_device_menus(self) -> None:
+        # Capture submenu
+        self._capture_menu.clear()
+        self._capture_action_group = QActionGroup(self)
+        self._capture_action_group.setExclusive(True)
+
+        current_cap = self._state.capture_spec
+        cap_devs = list_capture_devices()
+        if not cap_devs:
+            placeholder = QAction("(no capture devices)", self)
+            placeholder.setEnabled(False)
+            self._capture_menu.addAction(placeholder)
+        else:
+            for dev in cap_devs:
+                label = dev.name + ("   [default]" if dev.is_default else "")
+                act = QAction(label, self)
+                act.setCheckable(True)
+                act.setData(dev)
+                if current_cap is not None and (
+                    current_cap.kind == dev.kind and current_cap.id == dev.id
+                ):
+                    act.setChecked(True)
+                self._capture_action_group.addAction(act)
+                self._capture_menu.addAction(act)
+                act.triggered.connect(
+                    lambda _checked=False, d=dev: self._on_capture_selected(d)
+                )
+
+        # Output submenu
+        self._output_menu.clear()
+        self._output_action_group = QActionGroup(self)
+        self._output_action_group.setExclusive(True)
+
+        current_out = self._state.output_spec
+        out_devs = list_output_devices()
+        if not out_devs:
+            placeholder = QAction("(no output devices)", self)
+            placeholder.setEnabled(False)
+            self._output_menu.addAction(placeholder)
+        else:
+            for dev in out_devs:
+                label = dev.name + ("   [default]" if dev.is_default else "")
+                act = QAction(label, self)
+                act.setCheckable(True)
+                act.setData(dev)
+                if current_out is not None and current_out.id == dev.id:
+                    act.setChecked(True)
+                self._output_action_group.addAction(act)
+                self._output_menu.addAction(act)
+                act.triggered.connect(
+                    lambda _checked=False, d=dev: self._on_output_selected(d)
+                )
+
+    def _on_capture_selected(self, device: CaptureDevice) -> None:
+        was_running = self._state.is_capturing()
+        if was_running:
+            try:
+                self._state.capture.stop()
+            except Exception:  # pragma: no cover
+                pass
+        self._state.set_capture_spec(device)
+        self._persist_device_selection()
+        if was_running:
+            try:
+                new_cap = self._state.build_capture()
+                new_cap.start()
+                self._state.set_capture(new_cap)
+                self._device_name = device.name.upper()
+                self._device_label.setText(f"DEV  {self._device_name}")
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Capture failed",
+                    f"Could not switch capture source:\n\n{e}",
+                )
+                self._capture_btn.setText("START CAPTURE")
+                self._device_name = f"{device.name} (not started)".upper()
+
+    def _on_output_selected(self, device: OutputDevice) -> None:
+        was_previewing = self._previewing_id is not None
+        if was_previewing:
+            self._stop_preview()
+        self._state.set_output_spec(device)
+        self._persist_device_selection()
+        # The user can click PREVIEW again on the new output
+
+    def _persist_device_selection(self) -> None:
+        cfg = load_config()
+        cap = self._state.capture_spec
+        out = self._state.output_spec
+        if cap is not None:
+            cfg["capture_source"] = {
+                "kind": cap.kind,
+                "id": cap.id,
+                "name": cap.name,
+            }
+        if out is not None:
+            cfg["preview_output"] = {"id": out.id, "name": out.name}
+        save_config(cfg)
+
+    # ------------------------------------------------------------------
     # Tick — pulls status from the core at ~30 Hz
     # ------------------------------------------------------------------
 
@@ -290,21 +447,22 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            cap = make_loopback_capture(self._state)
+            cap = self._state.build_capture()
             cap.start()
             self._state.set_capture(cap)
         except Exception as e:  # pragma: no cover — hardware path
             QMessageBox.critical(
                 self,
                 "Capture failed",
-                f"Could not start loopback capture:\n\n{e}",
+                f"Could not start capture:\n\n{e}",
             )
             return
 
         self._start_time = time.monotonic()
         self._capture_btn.setText("STOP CAPTURE")
-        self._device_label.setText("DEV  LOOPBACK (DEFAULT SPEAKER)")
-        self._device_name = "LOOPBACK (DEFAULT SPEAKER)"
+        spec_name = self._state.capture_spec.name if self._state.capture_spec else "?"
+        self._device_label.setText(f"DEV  {spec_name.upper()}")
+        self._device_name = spec_name.upper()
 
     # ------------------------------------------------------------------
     # Flush (destructive, confirmation required)

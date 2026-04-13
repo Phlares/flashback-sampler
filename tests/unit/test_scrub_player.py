@@ -233,6 +233,34 @@ def test_1d_input_raises():
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def test_set_device_updates_attribute():
+    sp = ScrubPlayer(sample_rate=48_000, channels=2)
+    assert sp.device is None
+    sp.set_device(7)
+    assert sp.device == 7
+    # Idempotent: setting to same value is a no-op
+    sp.set_device(7)
+    assert sp.device == 7
+    # None is valid (means "default device")
+    sp.set_device(None)
+    assert sp.device is None
+
+
+def test_set_device_does_not_require_open_stream():
+    """
+    Changing the device on a ScrubPlayer that never opened its
+    sounddevice stream should be a pure attribute update — no error.
+    """
+    sp = ScrubPlayer(sample_rate=48_000, channels=2)
+    source = np.zeros((1000, 2), dtype=np.float32)
+    sp.bind(source)
+    sp.play()
+    sp.set_device(3)  # no real stream to close
+    assert sp.device == 3
+    # Internal state is consistent — source still bound
+    assert sp.source_length_samples == 1000
+
+
 @pytest.mark.timeout(5)
 def test_concurrent_seek_during_callback_is_safe():
     sp = ScrubPlayer(sample_rate=48_000, channels=2)
