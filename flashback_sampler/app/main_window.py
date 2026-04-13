@@ -83,6 +83,11 @@ class MainWindow(QMainWindow):
         self._refresh_timer.timeout.connect(self._tick)
         self._refresh_timer.start()
 
+        # Populate the checkout list from any Checkouts that already
+        # exist on the shared CheckoutManager (e.g. re-opened window
+        # or a test harness seeded by a unit test).
+        self._refresh_checkout_list()
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -187,6 +192,9 @@ class MainWindow(QMainWindow):
         # --- Track 2: checkout clip view (starts empty) ---------------
         self._checkout_track = CheckoutTrack()
         self._checkout_track.seekRequested.connect(self._on_clip_seek)
+        self._checkout_track.contextMenuRequested.connect(
+            self._on_clip_context_menu
+        )
         vbox.addWidget(self._checkout_track, 2)
 
         # --- Checkout list ---------------------------------------------
@@ -483,6 +491,84 @@ class MainWindow(QMainWindow):
         spec_name = self._state.capture_spec.name if self._state.capture_spec else "?"
         self._device_label.setText(f"DEV  {spec_name.upper()}")
         self._device_name = spec_name.upper()
+
+    # ------------------------------------------------------------------
+    # Clip track context menu — trim + export actions
+    # ------------------------------------------------------------------
+
+    def _on_clip_context_menu(self, global_pos) -> None:
+        from PySide6.QtCore import QPoint
+
+        cid = self._checkout_track.current_checkout_id()
+        has_clip = cid is not None
+        has_trim = has_clip and self._checkout_track.trim_range_seconds() is not None
+
+        menu = QMenu(self)
+
+        export_wav = QAction("Export Selection as WAV…", self)
+        export_wav.setEnabled(has_trim)
+        export_wav.triggered.connect(lambda: self._export_selection("WAV"))
+        menu.addAction(export_wav)
+
+        export_flac = QAction("Export Selection as FLAC…", self)
+        export_flac.setEnabled(has_trim)
+        export_flac.triggered.connect(lambda: self._export_selection("FLAC"))
+        menu.addAction(export_flac)
+
+        menu.addSeparator()
+
+        mark_in = QAction("Set Mark-In to Playhead", self)
+        mark_in.setEnabled(has_clip)
+        mark_in.triggered.connect(self._set_mark_in_to_playhead)
+        menu.addAction(mark_in)
+
+        mark_out = QAction("Set Mark-Out to Playhead", self)
+        mark_out.setEnabled(has_clip)
+        mark_out.triggered.connect(self._set_mark_out_to_playhead)
+        menu.addAction(mark_out)
+
+        clear_trim = QAction("Clear Trim", self)
+        clear_trim.setEnabled(has_trim)
+        clear_trim.triggered.connect(self._checkout_track.clear_trim)
+        menu.addAction(clear_trim)
+
+        menu.addSeparator()
+        hint = QAction("(Shift+drag on clip to select trim range)", self)
+        hint.setEnabled(False)
+        menu.addAction(hint)
+
+        qpt = QPoint(int(global_pos.x()), int(global_pos.y()))
+        menu.exec(qpt)
+
+    def _playhead_seconds(self) -> float:
+        """Where the scrub player thinks the playhead is, in seconds."""
+        return float(self._state.scrub_player.cursor_seconds)
+
+    def _set_mark_in_to_playhead(self) -> None:
+        self._checkout_track.set_mark_in(self._playhead_seconds())
+
+    def _set_mark_out_to_playhead(self) -> None:
+        self._checkout_track.set_mark_out(self._playhead_seconds())
+
+    def _export_selection(self, fmt: str) -> None:
+        cid = self._checkout_track.current_checkout_id()
+        if cid is None:
+            return
+        ext = ".wav" if fmt == "WAV" else ".flac"
+        target, _selected = QFileDialog.getSaveFileName(
+            self,
+            f"Export selection as {fmt}",
+            str(Path.home() / "Documents" / f"flashback_{cid}_trim{ext}"),
+            f"{fmt} audio (*{ext})",
+        )
+        if not target:
+            return
+        try:
+            self._state.checkout_manager.save(cid, Path(target), fmt=fmt)
+        except Exception as e:
+            QMessageBox.warning(self, "Export failed", str(e))
+            return
+        self._refresh_checkout_list()
 
     # ------------------------------------------------------------------
     # Live buffer manual selection + context menu
