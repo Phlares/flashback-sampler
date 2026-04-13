@@ -70,6 +70,12 @@ class LoopbackCapture:
         self._stop_event = threading.Event()
         self._running = False
         self._mic = None
+        # xrun counter: soundcard.rec() can return shorter chunks than
+        # requested when the kernel's buffer underflows. We don't have
+        # a direct status flag from the library, so increment every
+        # time we observe a chunk smaller than `blocksize`. Surfaced
+        # via xrun_count() for the status bar.
+        self._dropped_callbacks = 0
 
     def start(self) -> None:
         if self._running:
@@ -106,6 +112,16 @@ class LoopbackCapture:
     def __exit__(self, *_):
         self.stop()
 
+    # ------------------------------------------------------------------
+    # CaptureSource protocol
+    # ------------------------------------------------------------------
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def xrun_count(self) -> int:
+        return int(self._dropped_callbacks)
+
     def _run(self) -> None:
         if _IS_WIN:
             # S_OK (0) or S_FALSE (1) both fine; RPC_E_CHANGED_MODE (0x80010106)
@@ -119,7 +135,11 @@ class LoopbackCapture:
                 while not self._stop_event.is_set():
                     chunk = rec.record(numframes=self.blocksize)
                     if chunk is None or len(chunk) == 0:
+                        self._dropped_callbacks += 1
                         continue
+                    if len(chunk) < self.blocksize:
+                        # Short read — likely a kernel buffer underflow
+                        self._dropped_callbacks += 1
                     # soundcard returns float32 [N, channels] — buffer.write is happy
                     self.buffer.write(chunk.astype(np.float32, copy=False))
                     if self.on_level:
