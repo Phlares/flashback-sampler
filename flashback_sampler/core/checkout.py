@@ -276,10 +276,14 @@ class CheckoutManager:
         checkout_id: str,
         target_path: Path | str,
         fmt: CheckoutFormat = "WAV",
+        trimmed: bool = True,
     ) -> Path:
         """
-        Write the checkout's (trimmed) audio to `target_path` in the
-        requested format and mark the checkout as `saved`.
+        Write the checkout's audio to `target_path` in the requested
+        format and mark the checkout as `saved`. When `trimmed` is
+        True (default) the file contains just the region between
+        trim_in_samples / trim_out_samples; when False, the full
+        untrimmed snapshot is written regardless of trim state.
         """
         fmt = fmt.upper()  # type: ignore[assignment]
         if fmt not in self._VALID_FORMATS:
@@ -291,7 +295,7 @@ class CheckoutManager:
             if checkout_id not in self._checkouts:
                 raise KeyError(checkout_id)
             co = self._checkouts[checkout_id]
-            audio = co.trimmed_audio()
+            audio = co.trimmed_audio() if trimmed else co.audio
             sr = co.sample_rate
 
         target = Path(target_path)

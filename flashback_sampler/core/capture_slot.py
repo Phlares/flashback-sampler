@@ -67,6 +67,17 @@ class CaptureSlot:
     capture_spec: Any = None  # per-slot override; None = inherit global
     anchor_offset_s: float = 0.0
     duration_preset_idx: int = 4  # default 3:00 on the 8-preset cluster
+    # User intent: will this slot be part of the next CAPTURE session?
+    # Distinct from `is_capturing()` — armed = "I want it rolling when
+    # the master transport starts"; capturing = "its source is actively
+    # writing frames right now." New slots default to armed so the
+    # first-run user just presses START CAPTURE without fiddling.
+    armed: bool = True
+    # ID of the checkout the user last had focused in Track 2 for this
+    # slot. Restored when the user switches back so each source
+    # remembers its own "which clip was I looking at" state. Cleared
+    # when the referenced checkout is discarded or saved out.
+    focused_checkout_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Factories
@@ -149,6 +160,17 @@ class CaptureSlot:
         if self.capture_source is None:
             return 0
         return self.capture_source.xrun_count()
+
+    def last_error(self) -> Optional[str]:
+        if self.capture_source is None:
+            return None
+        fn = getattr(self.capture_source, "last_error", None)
+        if fn is None:
+            return None
+        try:
+            return fn()
+        except Exception:  # pragma: no cover
+            return None
 
     # ------------------------------------------------------------------
     # Queries

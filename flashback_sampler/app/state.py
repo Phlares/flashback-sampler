@@ -77,6 +77,13 @@ class AppState:
         self.active_slot_index: int = 0
         self.project_ram_budget_mb: float = DEFAULT_PROJECT_RAM_BUDGET_MB
 
+        # Master transport state. `rolling` is the global START/STOP
+        # CAPTURE toggle. While rolling, every armed slot has a live
+        # capture source writing into its ring; stopping rolls every
+        # slot down but preserves each slot's `armed` flag so the next
+        # start picks up the same set of sources.
+        self.rolling: bool = False
+
         # ── Shared, non-per-slot state ───────────────────────────────
         self.scrub_player = ScrubPlayer(
             sample_rate=int(sample_rate),
@@ -246,6 +253,55 @@ class AppState:
         current capture_spec. Raises if no spec is selected.
         """
         return self.build_capture_for_slot(self.active_slot)
+
+    # ------------------------------------------------------------------
+    # Master transport — START / STOP CAPTURE for every armed slot
+    # ------------------------------------------------------------------
+
+    def start_rolling(self) -> tuple[int, Optional[Exception]]:
+        """
+        Enter the rolling state: for every armed slot that isn't
+        already capturing, build + bind + start a capture source.
+        Returns (started_count, first_error) so the caller can surface
+        partial failures without aborting the whole operation.
+        """
+        started = 0
+        first_error: Optional[Exception] = None
+        for slot in self.slots:
+            if not slot.armed:
+                continue
+            if slot.is_capturing():
+                continue
+            try:
+                source = self.build_capture_for_slot(slot)
+                slot.bind_capture(source)
+                slot.start_capture()
+                started += 1
+            except Exception as e:  # pragma: no cover — hardware path
+                first_error = first_error or e
+        self.rolling = True
+        return started, first_error
+
+    def stop_rolling(self) -> int:
+        """
+        Leave the rolling state: stop every slot whose capture source
+        is currently running. Preserves each slot's `armed` flag so
+        the next `start_rolling()` picks up the same set. Returns the
+        number of slots actually stopped.
+        """
+        stopped = 0
+        for slot in self.slots:
+            if slot.is_capturing():
+                try:
+                    slot.stop_capture()
+                    stopped += 1
+                except Exception:  # pragma: no cover
+                    pass
+        self.rolling = False
+        return stopped
+
+    def armed_count(self) -> int:
+        return sum(1 for s in self.slots if s.armed)
 
     def build_capture_for_slot(self, slot: CaptureSlot):
         """

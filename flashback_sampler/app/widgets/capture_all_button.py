@@ -1,25 +1,27 @@
 """
-CaptureAllButton — master control for priming every CaptureSlot at once.
+CaptureAllButton — master transport for the whole session.
 
-Lives at the left edge of the SourceStrip. Doubles as a status display:
-the button face shows one concentric-ring "channel indicator" per slot,
-each filling with `rec` color when that slot is primed. A count badge
-to the right of the dot row shows `N/M`. The button is the visual
-conductor of the source strip chips.
+Lives at the left edge of the SourceStrip. Starts or stops capture on
+every armed CaptureSlot at once. Doubles as a status display: the
+button face shows one concentric-ring "channel indicator" per slot,
+each filling with `rec` when that slot is armed, going solid when
+it's actually capturing (rolling). A count badge to the right shows
+`armed / total`.
 
-Design spec from the frontend-design skill pass (2026-04-13):
-  - 180 × 104 px fixed size (2× chip height)
-  - 8 px rounded corner radius (one step larger than chip's 6 px to
-    signal hierarchy)
-  - `ridge` fill, 1 px top-inside cream hairline, bottom tell bar
-  - States:
-      none primed   -> label "CAPTURE ALL" in ember, tell bar ember
-      some primed   -> label "CAPTURE ALL" in ember, tell bar ember,
-                       indicator dots reflect live state
-      all primed    -> label "STOP ALL" in ember_hot, tell bar rec,
-                       tell bar pulses at 1.6 s period (only the bar,
-                       not the whole button)
-  - Max 8 visible dots; beyond that, truncate as "… +N"
+States driven by (armed_count, total, rolling):
+  stopped + some armed  -> label "START CAPTURE", dots are dim
+                           ember outlines for armed slots
+  stopped + 0 armed     -> label "START CAPTURE", no dots filled,
+                           button still clickable (no-op; status bar
+                           warns)
+  rolling + any armed   -> label "STOP CAPTURE" in ember_hot, bottom
+                           tell bar is `rec`, pulses at 1.6 s period;
+                           dots of armed slots are filled `rec`
+  rolling + 0 armed     -> label "STOP CAPTURE" (still clickable, just
+                           drops the rolling flag)
+
+Pulse reflects ROLLING, not "all armed." Max 8 visible dots; beyond
+that, truncate as "… +N".
 """
 
 from __future__ import annotations
@@ -49,16 +51,17 @@ class CaptureAllButton(QPushButton):
     """
 
     def __init__(self, parent=None):
-        super().__init__("CAPTURE ALL", parent)
+        super().__init__("START CAPTURE", parent)
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
         # No keyboard focus — Space is reserved for Preview; the
-        # global Ctrl+R shortcut drives CAPTURE ALL instead.
+        # global Ctrl+R shortcut drives the master transport instead.
         self.setFocusPolicy(Qt.NoFocus)
         self.setFixedSize(CAPTURE_ALL_WIDTH, CAPTURE_ALL_HEIGHT)
 
-        self._primed: int = 0
+        self._armed: int = 0
         self._total: int = 1
+        self._rolling: bool = False
         self._pulse_phase: float = 0.0  # 0.0 .. 1.0
 
         self._pulse_timer = QTimer(self)
@@ -69,32 +72,40 @@ class CaptureAllButton(QPushButton):
     # API
     # ------------------------------------------------------------------
 
-    def set_state(self, primed_count: int, total_count: int) -> None:
+    def set_state(
+        self,
+        armed_count: int,
+        total_count: int,
+        is_rolling: bool,
+    ) -> None:
         """
-        Push the current (primed, total) slot count into the button.
-        Updates the label text, starts / stops the pulse timer, and
-        schedules a repaint if anything changed.
+        Push current (armed, total, rolling) into the button. Armed
+        count is how many slots will participate when capture starts;
+        `is_rolling` is whether the master transport is currently
+        running.
         """
-        primed_count = max(0, int(primed_count))
+        armed_count = max(0, int(armed_count))
         total_count = max(1, int(total_count))
-        if primed_count > total_count:
-            primed_count = total_count
+        if armed_count > total_count:
+            armed_count = total_count
+        is_rolling = bool(is_rolling)
 
         changed = (
-            primed_count != self._primed or total_count != self._total
+            armed_count != self._armed
+            or total_count != self._total
+            or is_rolling != self._rolling
         )
-        self._primed = primed_count
+        self._armed = armed_count
         self._total = total_count
+        self._rolling = is_rolling
 
-        # Label reflects the ACTION, not the state — "click to stop all"
-        # vs "click to prime all."
-        new_text = "STOP ALL" if self.is_all_primed() else "CAPTURE ALL"
+        new_text = "STOP CAPTURE" if is_rolling else "START CAPTURE"
         if self.text() != new_text:
             self.setText(new_text)
 
-        # Pulse only when every slot is primed — that's the "now
-        # recording everything" state.
-        if self.is_all_primed():
+        # Pulse ONLY while rolling — the "recording live" cue. Arming
+        # alone is quiet intent and doesn't pulse.
+        if is_rolling:
             if not self._pulse_timer.isActive():
                 self._pulse_timer.start()
         else:
@@ -105,14 +116,16 @@ class CaptureAllButton(QPushButton):
         if changed:
             self.update()
 
-    def primed_count(self) -> int:
-        return self._primed
+    # Preserved name for compat with any tests / external callers that
+    # still ask "how many dots are lit?"
+    def armed_count(self) -> int:
+        return self._armed
 
     def total_count(self) -> int:
         return self._total
 
-    def is_all_primed(self) -> bool:
-        return self._total > 0 and self._primed >= self._total
+    def is_rolling(self) -> bool:
+        return self._rolling
 
     # ------------------------------------------------------------------
     # Pulse animation
@@ -138,7 +151,7 @@ class CaptureAllButton(QPushButton):
         is_enabled = self.isEnabled()
         is_pressed = self.isDown()
         is_hover = self.underMouse() and is_enabled
-        is_all = self.is_all_primed()
+        is_rolling = self._rolling
 
         # ── Body fill ─────────────────────────────────────────────────
         if not is_enabled:
@@ -164,13 +177,13 @@ class CaptureAllButton(QPushButton):
             p.drawLine(radius, 1, w - radius, 1)
 
         # ── Bottom tell bar ───────────────────────────────────────────
-        # Ember when the CTA is "prime more"; rec and pulsing when the
-        # state is "all primed" (the button is now a session-wide
+        # Ember when the CTA is "start capture"; rec and pulsing when
+        # the session is rolling (the button is now a session-wide
         # record indicator).
         bar_h = 2
         if not is_enabled:
             bar_color = QColor("#3a1a0e")
-        elif is_all:
+        elif is_rolling:
             base = QColor(EREBUS["rec"])
             if self._pulse_timer.isActive():
                 sin_val = 0.5 + 0.5 * math.sin(
@@ -210,7 +223,7 @@ class CaptureAllButton(QPushButton):
 
             if not is_enabled:
                 text_color = QColor(EREBUS["ash"])
-            elif is_all:
+            elif is_rolling:
                 text_color = QColor(EREBUS["ember_hot"])
             else:
                 text_color = QColor(EREBUS["ember"])
@@ -222,7 +235,7 @@ class CaptureAllButton(QPushButton):
             p.drawText(label_rect, Qt.AlignCenter, label_text)
 
         # ── Line 2: indicator dots + count badge ─────────────────────
-        self._paint_indicator_row(p, w, h, is_all, is_pressed)
+        self._paint_indicator_row(p, w, h, is_rolling, is_pressed)
 
         p.end()
 
@@ -231,7 +244,7 @@ class CaptureAllButton(QPushButton):
         p: QPainter,
         w: int,
         h: int,
-        is_all: bool,
+        is_rolling: bool,
         is_pressed: bool,
     ) -> None:
         total = self._total
@@ -255,7 +268,7 @@ class CaptureAllButton(QPushButton):
         p.setFont(badge_font)
         fm = p.fontMetrics()
 
-        count_text = f"{self._primed}/{total}"
+        count_text = f"{self._armed}/{total}"
         count_w = fm.horizontalAdvance(count_text)
 
         # Width budget
@@ -268,6 +281,9 @@ class CaptureAllButton(QPushButton):
         start_x = (w - total_w) / 2.0
 
         # ── Dots ─────────────────────────────────────────────────────
+        # Armed-and-rolling: solid rec disc (actively recording).
+        # Armed-but-stopped: ember ring (queued for next capture).
+        # Slots beyond armed_count: bone outline only.
         cx = start_x + dot_r
         for i in range(visible):
             center = QPointF(cx, y_center)
@@ -276,10 +292,18 @@ class CaptureAllButton(QPushButton):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(ring, 1))
             p.drawEllipse(center, dot_r, dot_r)
-            if i < self._primed:
-                p.setBrush(QColor(EREBUS["rec"]))
-                p.setPen(Qt.NoPen)
-                p.drawEllipse(center, dot_r - 1.5, dot_r - 1.5)
+            if i < self._armed:
+                if is_rolling:
+                    p.setBrush(QColor(EREBUS["rec"]))
+                    p.setPen(Qt.NoPen)
+                    p.drawEllipse(center, dot_r - 1.5, dot_r - 1.5)
+                else:
+                    # Queued: dim ember ring inside the bone outline
+                    ember = QColor(EREBUS["ember"])
+                    ember.setAlphaF(0.75)
+                    p.setBrush(Qt.NoBrush)
+                    p.setPen(QPen(ember, 1.4))
+                    p.drawEllipse(center, dot_r - 1.5, dot_r - 1.5)
             cx += dot_pitch
 
         # Truncation indicator "+N" in bone
@@ -298,7 +322,7 @@ class CaptureAllButton(QPushButton):
 
         # ── Count badge (N/M) to the right of the dots ───────────────
         badge_color = (
-            QColor(EREBUS["cream"]) if is_all else QColor(EREBUS["bone"])
+            QColor(EREBUS["cream"]) if is_rolling else QColor(EREBUS["bone"])
         )
         p.setPen(badge_color)
         badge_rect = QRectF(

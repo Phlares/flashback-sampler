@@ -2,6 +2,10 @@
 CaptureAllButton — state logic + signal wiring tests. Paint code is
 exercised by the main-window smoke path; this file focuses on the
 pure Python contract.
+
+The button's state is (armed_count, total_count, is_rolling). Label
+flips on `is_rolling`: START CAPTURE when stopped, STOP CAPTURE when
+rolling. Pulse timer runs only while rolling.
 """
 
 from __future__ import annotations
@@ -18,79 +22,81 @@ def qapp():
     yield app
 
 
-def test_initial_state_is_none_primed(qapp):
+def test_initial_state_is_stopped_with_start_label(qapp):
     b = CaptureAllButton()
-    assert b.primed_count() == 0
+    assert b.armed_count() == 0
     assert b.total_count() == 1
-    assert b.is_all_primed() is False
-    assert b.text() == "CAPTURE ALL"
+    assert b.is_rolling() is False
+    assert b.text() == "START CAPTURE"
 
 
-def test_set_state_none_primed_shows_capture_all_label(qapp):
+def test_stopped_with_some_armed_keeps_start_label(qapp):
     b = CaptureAllButton()
-    b.set_state(0, 4)
-    assert b.primed_count() == 0
+    b.set_state(2, 4, False)
+    assert b.armed_count() == 2
     assert b.total_count() == 4
-    assert b.is_all_primed() is False
-    assert b.text() == "CAPTURE ALL"
+    assert b.is_rolling() is False
+    assert b.text() == "START CAPTURE"
 
 
-def test_set_state_some_primed_keeps_capture_all_label(qapp):
+def test_stopped_with_all_armed_keeps_start_label(qapp):
     b = CaptureAllButton()
-    b.set_state(2, 4)
-    assert b.primed_count() == 2
-    assert b.total_count() == 4
-    assert b.is_all_primed() is False
-    assert b.text() == "CAPTURE ALL"
+    b.set_state(4, 4, False)
+    assert b.armed_count() == 4
+    assert b.is_rolling() is False
+    assert b.text() == "START CAPTURE"
 
 
-def test_set_state_all_primed_flips_label_to_stop_all(qapp):
+def test_rolling_flips_label_to_stop_capture(qapp):
     b = CaptureAllButton()
-    b.set_state(4, 4)
-    assert b.primed_count() == 4
-    assert b.total_count() == 4
-    assert b.is_all_primed() is True
-    assert b.text() == "STOP ALL"
+    b.set_state(3, 4, True)
+    assert b.is_rolling() is True
+    assert b.text() == "STOP CAPTURE"
 
 
-def test_set_state_clamps_primed_to_total(qapp):
+def test_rolling_with_zero_armed_still_shows_stop_label(qapp):
     b = CaptureAllButton()
-    b.set_state(9, 4)  # primed > total
-    assert b.primed_count() == 4
+    b.set_state(0, 4, True)
+    assert b.text() == "STOP CAPTURE"
 
 
-def test_set_state_clamps_negative_primed_to_zero(qapp):
+def test_set_state_clamps_armed_to_total(qapp):
     b = CaptureAllButton()
-    b.set_state(-3, 4)
-    assert b.primed_count() == 0
+    b.set_state(9, 4, False)
+    assert b.armed_count() == 4
+
+
+def test_set_state_clamps_negative_armed_to_zero(qapp):
+    b = CaptureAllButton()
+    b.set_state(-3, 4, False)
+    assert b.armed_count() == 0
 
 
 def test_set_state_enforces_minimum_total_of_one(qapp):
     b = CaptureAllButton()
-    b.set_state(0, 0)
+    b.set_state(0, 0, False)
     assert b.total_count() == 1
 
 
-def test_is_all_primed_false_when_total_zero_clamped_to_one(qapp):
+def test_pulse_timer_starts_when_rolling(qapp):
     b = CaptureAllButton()
-    # total clamps to 1, primed stays 0 → not all primed
-    b.set_state(0, 0)
-    assert b.is_all_primed() is False
-
-
-def test_pulse_timer_starts_when_all_primed(qapp):
-    b = CaptureAllButton()
-    b.set_state(4, 4)
+    b.set_state(4, 4, True)
     assert b._pulse_timer.isActive() is True
 
 
-def test_pulse_timer_stops_when_any_unprimed(qapp):
+def test_pulse_timer_stops_when_stopped(qapp):
     b = CaptureAllButton()
-    b.set_state(4, 4)
+    b.set_state(4, 4, True)
     assert b._pulse_timer.isActive() is True
-    b.set_state(3, 4)
+    b.set_state(4, 4, False)
     assert b._pulse_timer.isActive() is False
     assert b._pulse_phase == 0.0
+
+
+def test_pulse_does_not_run_when_stopped_even_with_all_armed(qapp):
+    b = CaptureAllButton()
+    b.set_state(4, 4, False)
+    assert b._pulse_timer.isActive() is False
 
 
 def test_clicked_signal_fires(qapp):
