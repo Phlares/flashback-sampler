@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
         self._source_strip = SourceStrip()
         self._source_strip.activeChanged.connect(self._on_source_strip_active_changed)
         self._source_strip.primeToggled.connect(self._on_source_strip_prime_toggled)
+        self._source_strip.captureAllClicked.connect(self._on_capture_all_clicked)
         self._source_strip.addSourceRequested.connect(self._open_add_source_dialog)
         self._source_strip.contextMenuRequested.connect(
             self._on_source_strip_context_menu
@@ -143,20 +144,20 @@ class MainWindow(QMainWindow):
         )
         vbox.addWidget(self._buffer_track, 2)
 
-        # --- Transport cluster row: capture | rotary | presets | ck out ─
+        # --- Transport cluster row: [active-slot utils] | rotary |
+        #     presets | check out. The global CAPTURE ALL moved to
+        #     the source strip (M10.11); per-slot priming is done via
+        #     the chip REC buttons. The left column now holds only the
+        #     active-slot FLUSH BUFFER action.
         transport_row = QHBoxLayout()
         transport_row.setSpacing(18)
 
-        # Left column: capture + flush buttons
         left_col = QVBoxLayout()
         left_col.setSpacing(8)
-        self._capture_btn = TactileButton("START CAPTURE", variant="primary")
-        self._capture_btn.clicked.connect(self._toggle_capture)
-        self._capture_btn.setMinimumHeight(48)
-        left_col.addWidget(self._capture_btn)
-
+        left_col.addStretch(1)
         self._flush_btn = TactileButton("FLUSH BUFFER", variant="secondary")
         self._flush_btn.clicked.connect(self._flush_buffer)
+        self._flush_btn.setMinimumHeight(48)
         left_col.addWidget(self._flush_btn)
         left_col.addStretch(1)
         transport_row.addLayout(left_col, 1)
@@ -407,7 +408,6 @@ class MainWindow(QMainWindow):
                     "Capture failed",
                     f"Could not switch capture source:\n\n{e}",
                 )
-                self._capture_btn.setText("START CAPTURE")
                 self._device_name = f"{device.name} (not started)".upper()
 
     def _on_output_selected(self, device: OutputDevice) -> None:
@@ -498,7 +498,6 @@ class MainWindow(QMainWindow):
                     new_cap = self._state.build_capture()
                     new_cap.start()
                     self._state.set_capture(new_cap)
-                    self._capture_btn.setText("STOP CAPTURE")
                 except Exception as e:
                     QMessageBox.warning(
                         self,
@@ -543,6 +542,13 @@ class MainWindow(QMainWindow):
         # bars, REC dots, xrun counters all update in place).
         self._source_strip.set_slots(
             self._state.slots, self._state.active_slot_index
+        )
+        # Master CAPTURE ALL button reflects the live primed count.
+        primed_count = sum(
+            1 for s in self._state.slots if s.is_capturing()
+        )
+        self._source_strip.set_master_state(
+            primed_count, len(self._state.slots)
         )
 
         # Snapshot the authoritative buffer state (total_written) and
@@ -618,38 +624,64 @@ class MainWindow(QMainWindow):
             self._preview_btn.setText("PREVIEW")
 
     # ------------------------------------------------------------------
-    # Capture control
+    # CAPTURE ALL — master prime/unprime for every slot
     # ------------------------------------------------------------------
 
-    def _toggle_capture(self) -> None:
-        if self._state.is_capturing():
-            self._state.capture.stop()
-            self._capture_btn.setText("START CAPTURE")
-            self._device_label.setText("DEV  (stopped)")
-            self._device_name = "(STOPPED, BUFFER HELD)"
-            # NOTE: do NOT disable the checkout button — buffered audio
-            # from before the stop is still valid to check out. The tick
-            # loop will re-enable it on the next pass based on buffered
-            # seconds.
+    def _on_capture_all_clicked(self) -> None:
+        """
+        Master CAPTURE ALL button pressed. If every slot is currently
+        primed, stop capture on all of them. Otherwise, prime every
+        slot that isn't already capturing.
+        """
+        slots = self._state.slots
+        if not slots:
             return
 
-        try:
-            cap = self._state.build_capture()
-            cap.start()
-            self._state.set_capture(cap)
-        except Exception as e:  # pragma: no cover — hardware path
-            QMessageBox.critical(
+        all_primed = all(s.is_capturing() for s in slots)
+
+        if all_primed:
+            # Stop every slot — buffered audio is preserved per the
+            # prime-toggle semantics.
+            for slot in slots:
+                try:
+                    slot.stop_capture()
+                except Exception:  # pragma: no cover
+                    pass
+            self._device_name = "(ALL STOPPED, BUFFERS HELD)"
+            self._device_label.setText(f"DEV  {self._device_name}")
+            return
+
+        # Prime every slot that isn't already running. Each slot builds
+        # its own capture source wired to its own ring so concurrent
+        # writes don't contend.
+        first_error: Exception | None = None
+        started = 0
+        for slot in slots:
+            if slot.is_capturing():
+                continue
+            try:
+                source = self._state.build_capture_for_slot(slot)
+                slot.bind_capture(source)
+                slot.start_capture()
+                started += 1
+            except Exception as e:  # pragma: no cover — hardware path
+                first_error = first_error or e
+
+        if first_error is not None:
+            QMessageBox.warning(
                 self,
                 "Capture failed",
-                f"Could not start capture:\n\n{e}",
+                f"Started {started} / {len(slots)} slots; first error:\n\n"
+                f"{first_error}",
             )
-            return
 
-        self._start_time = time.monotonic()
-        self._capture_btn.setText("STOP CAPTURE")
-        spec_name = self._state.capture_spec.name if self._state.capture_spec else "?"
-        self._device_label.setText(f"DEV  {spec_name.upper()}")
-        self._device_name = spec_name.upper()
+        spec_name = (
+            self._state.capture_spec.name
+            if self._state.capture_spec is not None
+            else "?"
+        )
+        self._device_name = f"CAPTURING {started} SLOTS  {spec_name.upper()}"
+        self._device_label.setText(f"DEV  {self._device_name}")
 
     # ------------------------------------------------------------------
     # Source strip handlers — slot switching, add, remove
@@ -688,14 +720,12 @@ class MainWindow(QMainWindow):
 
         # Capture button reflects the new slot's capture state
         if new_slot.is_capturing():
-            self._capture_btn.setText("STOP CAPTURE")
             cap_name = (
                 self._state.capture_spec.name if self._state.capture_spec else "?"
             )
             self._device_name = cap_name.upper()
             self._device_label.setText(f"DEV  {self._device_name}")
         else:
-            self._capture_btn.setText("START CAPTURE")
             self._device_name = f"(SLOT: {new_slot.name.upper()})"
             self._device_label.setText(f"DEV  {self._device_name}")
 
@@ -723,7 +753,6 @@ class MainWindow(QMainWindow):
                 return
             # If this was the active slot, sync the big capture button
             if slot_index == self._state.active_slot_index:
-                self._capture_btn.setText("START CAPTURE")
                 self._device_name = f"(SLOT: {slot.name.upper()})"
                 self._device_label.setText(f"DEV  {self._device_name}")
             return
@@ -746,7 +775,6 @@ class MainWindow(QMainWindow):
         # If this was the active slot, sync the big capture button and
         # the device label so the main controls reflect the state.
         if slot_index == self._state.active_slot_index:
-            self._capture_btn.setText("STOP CAPTURE")
             spec_name = (
                 self._state.capture_spec.name
                 if self._state.capture_spec is not None
@@ -881,9 +909,6 @@ class MainWindow(QMainWindow):
             self._anchor_offset_s = float(new_slot.anchor_offset_s)
             self._presets.set_active_index(int(new_slot.duration_preset_idx))
             self._rotary.setValue(self._anchor_offset_s)
-            self._capture_btn.setText(
-                "STOP CAPTURE" if new_slot.is_capturing() else "START CAPTURE"
-            )
             self._device_name = f"(SLOT: {new_slot.name.upper()})"
             self._refresh_checkout_list()
 
@@ -1262,13 +1287,11 @@ class MainWindow(QMainWindow):
         self._presets.set_active_index(int(new_slot.duration_preset_idx))
         self._rotary.setValue(self._anchor_offset_s)
 
-        # Capture button text tracks the new slot's capture state
-        if new_slot.is_capturing():
-            self._capture_btn.setText("STOP CAPTURE")
-        else:
-            self._capture_btn.setText("START CAPTURE")
-
-        # Track 1 content will repopulate on the next tick automatically.
+        # The old per-active-slot CAPTURE button is gone — the
+        # source strip's master CaptureAllButton is the global
+        # transport, and per-slot priming is done via the chip REC
+        # buttons. Track 1 content will repopulate on the next tick
+        # automatically.
 
     def _resolve_ref(self, ref):
         """

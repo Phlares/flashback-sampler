@@ -25,6 +25,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from flashback_sampler.app.widgets.capture_all_button import (
+    CAPTURE_ALL_HEIGHT,
+    CaptureAllButton,
+)
 from flashback_sampler.app.widgets.slot_chip import CHIP_HEIGHT, SlotChip
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 
@@ -33,6 +37,7 @@ class SourceStrip(QWidget):
     activeChanged = Signal(int)
     primeToggled = Signal(int)
     addSourceRequested = Signal()
+    captureAllClicked = Signal()
     contextMenuRequested = Signal(int, QPointF)
 
     def __init__(self, parent=None):
@@ -43,20 +48,23 @@ class SourceStrip(QWidget):
     def _build_ui(self) -> None:
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(8)
+        outer.setSpacing(10)
 
-        label = QLabel("SOURCES")
-        label.setProperty("role", "label")
-        outer.addWidget(label, 0)
+        # CAPTURE ALL master fader at the left edge of the row. Replaces
+        # the old "SOURCES" label — the button IS the semantic header.
+        self._master_btn = CaptureAllButton()
+        self._master_btn.clicked.connect(self.captureAllClicked.emit)
+        outer.addWidget(self._master_btn, 0)
 
         # Scrollable horizontal area for the chips so many slots still
-        # fit on a narrow window. QScrollArea around a container widget.
+        # fit on a narrow window. Taller now to match the 104 px master
+        # button height with a matching vertical gutter.
         self._scroll = QScrollArea(self)
         self._scroll.setFrameShape(QFrame.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setWidgetResizable(True)
-        self._scroll.setFixedHeight(CHIP_HEIGHT + 12)
+        self._scroll.setFixedHeight(CAPTURE_ALL_HEIGHT + 8)
 
         self._chip_container = QWidget()
         self._chip_row = QHBoxLayout(self._chip_container)
@@ -78,6 +86,13 @@ class SourceStrip(QWidget):
     # ------------------------------------------------------------------
     # State push from the host
     # ------------------------------------------------------------------
+
+    def set_master_state(self, primed_count: int, total_count: int) -> None:
+        """Push the current (primed, total) slot count into the master."""
+        self._master_btn.set_state(primed_count, total_count)
+
+    def master_button(self) -> "CaptureAllButton":
+        return self._master_btn
 
     def set_slots(
         self,
