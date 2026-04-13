@@ -89,3 +89,108 @@ def test_hot_segments_are_meter_hot():
 
 def test_top_segment_is_meter_peak():
     assert segment_color_token(N_SEGMENTS - 1) == "meter_peak"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# RotaryKnob value → angle mapping (pure function)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_rotary_value_at_min_maps_to_sweep_start():
+    from flashback_sampler.app.widgets.rotary_knob import (
+        SWEEP_START_DEG,
+        value_to_angle_deg,
+    )
+    assert value_to_angle_deg(0.0, 0.0, 900.0) == pytest.approx(SWEEP_START_DEG)
+
+
+def test_rotary_value_at_max_maps_to_sweep_end():
+    from flashback_sampler.app.widgets.rotary_knob import (
+        SWEEP_END_DEG,
+        value_to_angle_deg,
+    )
+    assert value_to_angle_deg(900.0, 0.0, 900.0) == pytest.approx(SWEEP_END_DEG)
+
+
+def test_rotary_midpoint_maps_to_midsweep():
+    from flashback_sampler.app.widgets.rotary_knob import (
+        SWEEP_END_DEG,
+        SWEEP_START_DEG,
+        value_to_angle_deg,
+    )
+    mid = (SWEEP_START_DEG + SWEEP_END_DEG) / 2
+    assert value_to_angle_deg(450.0, 0.0, 900.0) == pytest.approx(mid)
+
+
+def test_rotary_value_out_of_range_is_clamped():
+    from flashback_sampler.app.widgets.rotary_knob import (
+        SWEEP_END_DEG,
+        SWEEP_START_DEG,
+        value_to_angle_deg,
+    )
+    assert value_to_angle_deg(-10.0, 0.0, 900.0) == pytest.approx(SWEEP_START_DEG)
+    assert value_to_angle_deg(9999.0, 0.0, 900.0) == pytest.approx(SWEEP_END_DEG)
+
+
+def test_rotary_degenerate_range_returns_sweep_start():
+    from flashback_sampler.app.widgets.rotary_knob import (
+        SWEEP_START_DEG,
+        value_to_angle_deg,
+    )
+    assert value_to_angle_deg(5.0, 10.0, 10.0) == pytest.approx(SWEEP_START_DEG)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# DurationPreset — format + step logic (no Qt needed)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_format_preset_under_a_minute():
+    from flashback_sampler.app.widgets.duration_preset import format_preset
+    assert format_preset(15) == "0:15"
+    assert format_preset(30) == "0:30"
+
+
+def test_format_preset_multi_minute():
+    from flashback_sampler.app.widgets.duration_preset import format_preset
+    assert format_preset(60) == "1:00"
+    assert format_preset(180) == "3:00"
+    assert format_preset(900) == "15:00"
+
+
+def test_default_presets_cover_expected_range():
+    from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+    assert DEFAULT_PRESETS[0] == 15.0
+    assert DEFAULT_PRESETS[-1] == 900.0
+    assert 180.0 in DEFAULT_PRESETS
+    # Monotonic
+    for a, b in zip(DEFAULT_PRESETS, DEFAULT_PRESETS[1:]):
+        assert a < b
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CheckoutTrack clip-binning helper
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_compute_clip_bins_shape_and_min_max():
+    from flashback_sampler.app.widgets.checkout_track import _compute_clip_bins
+    import numpy as np
+
+    audio = np.arange(1000, dtype=np.float32).reshape(-1, 1) / 1000.0
+    bins = _compute_clip_bins(audio, n_bins=10)
+    assert bins.shape == (10, 2, 1)
+    # First bin: samples 0..99, min ≈ 0, max ≈ 0.099
+    assert bins[0, 0, 0] == pytest.approx(0.0, abs=1e-6)
+    assert bins[0, 1, 0] == pytest.approx(0.099, abs=1e-3)
+    # Last bin: samples 900..999, max ≈ 0.999
+    assert bins[-1, 1, 0] == pytest.approx(0.999, abs=1e-3)
+
+
+def test_compute_clip_bins_empty_audio_returns_zeros():
+    from flashback_sampler.app.widgets.checkout_track import _compute_clip_bins
+    import numpy as np
+
+    bins = _compute_clip_bins(np.zeros((0, 2), dtype=np.float32), n_bins=20)
+    assert bins.shape == (20, 2, 2)
+    assert np.all(bins == 0.0)

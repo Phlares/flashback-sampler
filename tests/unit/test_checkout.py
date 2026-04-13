@@ -65,6 +65,45 @@ def test_list_returns_all_active_checkouts():
     assert {c.id for c in items} == {a.id, b.id}
 
 
+def test_checkout_anchor_offset_pulls_earlier_range():
+    """
+    anchor_offset_s shifts the trailing edge of the slice earlier in time.
+    With a 2 s buffer at 1 kHz containing samples 0..1999, a 0.5 s checkout
+    ending 0.5 s ago should yield samples 1000..1499 (not the most recent).
+    """
+    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 2000, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+
+    co = mgr.create(duration_s=0.5, anchor_offset_s=0.5)
+    assert co.audio.shape == (500, 1)
+    assert co.audio[0, 0] == pytest.approx(1000.0)
+    assert co.audio[-1, 0] == pytest.approx(1499.0)
+    # Metadata: abs_sample_end should be total_written - offset_samples
+    assert co.abs_sample_end == 2000 - 500  # 2000 total - 500 offset
+    assert co.abs_sample_start == co.abs_sample_end - 500
+
+
+def test_checkout_anchor_offset_zero_matches_default_path():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 800, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+
+    a = mgr.create(duration_s=0.3, anchor_offset_s=0.0)
+    # The fast path should yield identical audio to calling with anchor_offset 0
+    assert a.audio.shape == (300, 1)
+    assert a.audio[0, 0] == pytest.approx(500.0)
+    assert a.audio[-1, 0] == pytest.approx(799.0)
+
+
+def test_checkout_anchor_offset_rejects_negative():
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 500, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+    with pytest.raises(ValueError):
+        mgr.create(duration_s=0.2, anchor_offset_s=-0.5)
+
+
 def test_checkout_duration_clamped_to_available():
     buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 200, channels=1))  # only 200 samples buffered
