@@ -14,17 +14,18 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontMetrics,
     QPainter,
     QPen,
     QRadialGradient,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.theme import EREBUS, font_family
 
 
 # Sweep runs from 7:30 (−225°) clockwise through 12 o'clock (−90°) to
@@ -207,24 +208,59 @@ class RotaryKnob(QWidget):
             QPointF(cx + math.cos(a) * ind_outer, cy + math.sin(a) * ind_outer),
         )
 
-        # ── Hub — void well with hairline ring + readout ─────────────
+        # ── Hub — void well with hairline ring ───────────────────────
         p.setBrush(QColor(EREBUS["void"]))
         p.setPen(QPen(QColor(242, 237, 223, int(0.22 * 255)), 1))
         p.drawEllipse(QPointF(cx, cy), r_hub, r_hub)
 
+        # ── Hub readout — sits INSIDE the dial face, not the hub ─────
+        # The hub circle is decorative; the text is allowed to extend
+        # beyond it as long as it stays clear of the indicator line.
+        # Available radius for text: up to ~80% of r_dial (leaves room
+        # for the indicator at 85-95%). We iteratively shrink the font
+        # until the text fits, so "-15:00" sits comfortably even on a
+        # knob where a smaller default pt size would have been fine for
+        # the 3-char "NOW" idle state.
         if self._hub_text:
+            text_w_limit = r_dial * 1.55  # diameter of the text area
+            text_h_limit = r_hub * 1.7
+
+            # Start with a generous size (~11% of the diameter) and
+            # shrink in integer steps until the widest possible value
+            # fits. Using a fixed "widest expected" probe instead of
+            # self._hub_text keeps the font size stable across
+            # rest/dragging transitions (so numbers don't jitter in
+            # size as the user turns the knob).
+            probe = "-99:99"
+            fam = font_family("display").split(",")[0].strip().strip('"')
             font: QFont = self.font()
-            font.setPointSize(max(9, int(side * 0.085)))
+            if fam:
+                font.setFamily(fam)
             font.setBold(True)
+
+            size_pt = max(9, int(side * 0.115))
+            for _ in range(12):
+                font.setPointSize(size_pt)
+                metrics = QFontMetrics(font)
+                if (
+                    metrics.horizontalAdvance(probe) <= text_w_limit
+                    and metrics.height() <= text_h_limit
+                ):
+                    break
+                size_pt -= 1
+                if size_pt <= 8:
+                    size_pt = 8
+                    font.setPointSize(size_pt)
+                    break
+
             p.setFont(font)
             p.setPen(QColor(EREBUS["cream"]))
-            p.drawText(
-                int(cx - r_hub),
-                int(cy - r_hub),
-                int(r_hub * 2),
-                int(r_hub * 2),
-                Qt.AlignCenter,
-                self._hub_text,
+            rect = QRectF(
+                cx - text_w_limit / 2.0,
+                cy - text_h_limit / 2.0,
+                text_w_limit,
+                text_h_limit,
             )
+            p.drawText(rect, Qt.AlignCenter, self._hub_text)
 
         p.end()
