@@ -103,6 +103,51 @@ class AppState:
             channels=self.channels,
         )
 
+    # ------------------------------------------------------------------
+    # Runtime settings application
+    # ------------------------------------------------------------------
+
+    def apply_checkout_caps(
+        self,
+        max_active: int | None = None,
+        max_ram_mb: float | None = None,
+    ) -> None:
+        """Update CheckoutManager's max active + RAM caps in place."""
+        if max_active is not None:
+            self.checkout_manager._max_active = int(max_active)  # noqa: SLF001
+        if max_ram_mb is not None:
+            self.checkout_manager._max_ram_bytes = int(  # noqa: SLF001
+                float(max_ram_mb) * 1024 * 1024
+            )
+
+    def rebuild_buffer(self, new_seconds: float) -> None:
+        """
+        Swap the ring buffer for one with a new duration. Stops
+        capture if it was running; the caller is responsible for
+        restarting capture after the rebuild.
+
+        Existing Checkouts are preserved — they're immutable in-RAM
+        snapshots. The CheckoutManager's _buffer reference is updated
+        so new checkouts pull from the fresh ring.
+        """
+        was_running = self.is_capturing()
+        if was_running:
+            try:
+                self._capture.stop()
+            except Exception:  # pragma: no cover
+                pass
+
+        new_buf = AudioCircularBuffer(
+            duration_seconds=float(new_seconds),
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+        )
+        self.buffer = new_buf
+        self.checkout_manager._buffer = new_buf  # noqa: SLF001
+        # Capture source, if present, is now referencing a stale buffer.
+        # Drop it so the caller rebuilds from state.build_capture().
+        self._capture = None
+
     def shutdown(self) -> None:
         """Called on window close — stop capture + playback cleanly."""
         if self._capture is not None:

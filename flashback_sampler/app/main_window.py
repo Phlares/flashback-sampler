@@ -39,6 +39,12 @@ from flashback_sampler.app.audio_devices import (
     list_output_devices,
 )
 from flashback_sampler.app.config import load_config, save_config
+from flashback_sampler.app.settings_dialog import (
+    AppSettings,
+    SettingsDialog,
+    apply_settings_to_config,
+    load_settings_from_config,
+)
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.widgets.buffer_track import (
     BufferTrack,
@@ -77,6 +83,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._restore_device_selection()
         self._refresh_device_menus()
+        self._restore_settings()
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(33)  # ~30 Hz
@@ -205,6 +212,10 @@ class MainWindow(QMainWindow):
         self._list = QListWidget()
         self._list.setMaximumHeight(110)
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(
+            self._on_checkout_list_context_menu
+        )
         vbox.addWidget(self._list, 0)
 
         action_row = QHBoxLayout()
@@ -243,6 +254,16 @@ class MainWindow(QMainWindow):
 
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("&File")
+        settings_act = QAction("Settings…", self)
+        settings_act.triggered.connect(self._open_settings_dialog)
+        file_menu.addAction(settings_act)
+        file_menu.addSeparator()
+        quit_act = QAction("Quit", self)
+        quit_act.triggered.connect(self.close)
+        file_menu.addAction(quit_act)
+
         audio_menu = menu_bar.addMenu("&Audio")
 
         self._capture_menu: QMenu = audio_menu.addMenu("Capture Source")
@@ -383,6 +404,90 @@ class MainWindow(QMainWindow):
         save_config(cfg)
 
     # ------------------------------------------------------------------
+    # Settings dialog
+    # ------------------------------------------------------------------
+
+    def _restore_settings(self) -> None:
+        """
+        On startup: read the persisted AppSettings from config.json and
+        apply the non-buffer caps (checkout count + RAM) to the running
+        AppState. Buffer duration is intentionally NOT applied at
+        startup — the CLI flag wins and rebuilding the buffer would
+        discard whatever the user has already started buffering.
+        """
+        cfg = load_config()
+        settings = load_settings_from_config(cfg)
+        self._app_settings = settings
+        self._state.apply_checkout_caps(
+            max_active=settings.max_checkouts,
+            max_ram_mb=settings.max_ram_mb,
+        )
+
+    def _open_settings_dialog(self) -> None:
+        current = getattr(self, "_app_settings", AppSettings())
+        dlg = SettingsDialog(current, parent=self)
+        if dlg.exec() != SettingsDialog.Accepted:
+            return
+        new_settings = dlg.result_settings()
+        buffer_changed = dlg.buffer_changed_from_initial(new_settings)
+
+        if buffer_changed:
+            reply = QMessageBox.question(
+                self,
+                "Rebuild ring buffer?",
+                (
+                    "Changing the buffer duration will DISCARD any currently "
+                    "buffered audio. Existing checked-out clips will be "
+                    "preserved (they're in their own RAM).\n\n"
+                    "Continue?"
+                ),
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # Apply caps immediately
+        self._state.apply_checkout_caps(
+            max_active=new_settings.max_checkouts,
+            max_ram_mb=new_settings.max_ram_mb,
+        )
+
+        # Rebuild buffer if duration changed
+        if buffer_changed:
+            was_running = self._state.is_capturing()
+            try:
+                self._state.rebuild_buffer(new_settings.buffer_minutes * 60.0)
+            except Exception as e:
+                QMessageBox.critical(self, "Buffer rebuild failed", str(e))
+                return
+            if was_running:
+                try:
+                    new_cap = self._state.build_capture()
+                    new_cap.start()
+                    self._state.set_capture(new_cap)
+                    self._capture_btn.setText("STOP CAPTURE")
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "Capture restart failed",
+                        f"Buffer was rebuilt but capture did not restart:\n\n{e}",
+                    )
+
+        # Persist the new settings
+        cfg = load_config()
+        cfg = apply_settings_to_config(cfg, new_settings)
+        save_config(cfg)
+        self._app_settings = new_settings
+
+    def _default_save_dir(self) -> Path:
+        """Used by the save dialogs — resolves to the configured folder."""
+        settings = getattr(self, "_app_settings", None)
+        if settings is not None:
+            return settings.resolved_save_directory()
+        return Path.home() / "Documents"
+
+    # ------------------------------------------------------------------
     # Tick — pulls status from the core at ~30 Hz
     # ------------------------------------------------------------------
 
@@ -493,6 +598,83 @@ class MainWindow(QMainWindow):
         self._device_name = spec_name.upper()
 
     # ------------------------------------------------------------------
+    # Checkout list context menu — right-click quick actions
+    # ------------------------------------------------------------------
+
+    def _on_checkout_list_context_menu(self, local_pos) -> None:
+        """
+        Right-click on a checkout list row. Switches the selection to
+        the clicked row first so existing methods (_save_selected,
+        _discard_selected, _toggle_preview) all operate on the right
+        checkout without extra plumbing.
+        """
+        item = self._list.itemAt(local_pos)
+        if item is None:
+            # Right-click in empty space — show just the hint
+            menu = QMenu(self)
+            hint = QAction("(No checkout here)", self)
+            hint.setEnabled(False)
+            menu.addAction(hint)
+            menu.exec(self._list.mapToGlobal(local_pos))
+            return
+
+        # Make the clicked row the active selection
+        self._list.setCurrentItem(item)
+        cid = item.data(Qt.UserRole)
+
+        menu = QMenu(self)
+
+        is_previewing_this = self._previewing_id == cid
+        preview_label = "Stop Preview" if is_previewing_this else "Preview"
+        preview_act = QAction(preview_label, self)
+        preview_act.triggered.connect(self._toggle_preview)
+        menu.addAction(preview_act)
+
+        menu.addSeparator()
+
+        save_wav_act = QAction("Save As WAV…", self)
+        save_wav_act.triggered.connect(lambda: self._save_selected_with_fmt("WAV"))
+        menu.addAction(save_wav_act)
+
+        save_flac_act = QAction("Save As FLAC…", self)
+        save_flac_act.triggered.connect(lambda: self._save_selected_with_fmt("FLAC"))
+        menu.addAction(save_flac_act)
+
+        menu.addSeparator()
+
+        discard_act = QAction("Discard", self)
+        discard_act.triggered.connect(self._discard_selected)
+        menu.addAction(discard_act)
+
+        menu.exec(self._list.mapToGlobal(local_pos))
+
+    def _save_selected_with_fmt(self, fmt: str) -> None:
+        """
+        Save the currently-selected checkout directly in the requested
+        format (WAV or FLAC). Skips the format-picker dance in the
+        standard _save_selected() path — used by the right-click menu
+        for quick exports.
+        """
+        cid = self._selected_checkout_id()
+        if cid is None:
+            return
+        ext = ".wav" if fmt == "WAV" else ".flac"
+        target, _filter = QFileDialog.getSaveFileName(
+            self,
+            f"Save As {fmt}",
+            str(self._default_save_dir() / f"flashback_{cid}{ext}"),
+            f"{fmt} audio (*{ext})",
+        )
+        if not target:
+            return
+        try:
+            self._state.checkout_manager.save(cid, Path(target), fmt=fmt)
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self._refresh_checkout_list()
+
+    # ------------------------------------------------------------------
     # Clip track context menu — trim + export actions
     # ------------------------------------------------------------------
 
@@ -558,7 +740,7 @@ class MainWindow(QMainWindow):
         target, _selected = QFileDialog.getSaveFileName(
             self,
             f"Export selection as {fmt}",
-            str(Path.home() / "Documents" / f"flashback_{cid}_trim{ext}"),
+            str(self._default_save_dir() / f"flashback_{cid}_trim{ext}"),
             f"{fmt} audio (*{ext})",
         )
         if not target:
@@ -805,7 +987,7 @@ class MainWindow(QMainWindow):
         target, selected = QFileDialog.getSaveFileName(
             self,
             "Save checkout",
-            str(Path.home() / "Documents" / f"flashback_{cid}.wav"),
+            str(self._default_save_dir() / f"flashback_{cid}.wav"),
             "WAV audio (*.wav);;FLAC audio (*.flac)",
         )
         if not target:
