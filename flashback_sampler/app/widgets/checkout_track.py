@@ -175,10 +175,14 @@ class CheckoutTrack(QWidget):
     # API
     # ------------------------------------------------------------------
 
-    def set_checkout(self, checkout) -> None:
+    def set_checkout(self, checkout, source_name: str = "") -> None:
         """
         Bind a Checkout (from flashback_sampler.core.checkout.Checkout)
         or None to clear. Called whenever the list selection changes.
+
+        `source_name` is the owning slot's user-given name. Shown in
+        the caption as "CLIP <SOURCE>  <clip_id>" so the user can tell
+        at a glance which source a clip came from.
         """
         self._checkout = checkout
         if checkout is None:
@@ -206,7 +210,11 @@ class CheckoutTrack(QWidget):
         )
         # Clip timeline: 00:00 at the left, clip duration at the right
         self._wave.set_timeline(total_seconds=self._duration_s, anchor="left")
-        self._caption.setText(f"CLIP  {checkout.id}")
+        source_label = source_name.upper() if source_name else ""
+        if source_label:
+            self._caption.setText(f"CLIP  {source_label}   {checkout.id}")
+        else:
+            self._caption.setText(f"CLIP   {checkout.id}")
         self._meta.setText(
             f"{checkout.ram_bytes / 1024 / 1024:.1f} MB   "
             f"{format_time_cs(self._duration_s)}"

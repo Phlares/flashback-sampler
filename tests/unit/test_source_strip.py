@@ -157,3 +157,50 @@ def test_source_strip_forwards_prime_toggled(qapp):
     strip._chips[0].primeToggled.emit()
     strip._chips[1].primeToggled.emit()
     assert fired == [0, 1]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# short_source_name helper
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_short_source_name_strips_loopback_suffix():
+    from flashback_sampler.app.widgets.slot_chip import short_source_name
+    assert short_source_name("Speakers (Realtek) [loopback]") == "Speakers"
+
+
+def test_short_source_name_strips_trailing_paren_qualifier():
+    from flashback_sampler.app.widgets.slot_chip import short_source_name
+    assert short_source_name("Yeti X (USB Microphone)") == "Yeti X"
+
+
+def test_short_source_name_truncates_with_ellipsis():
+    from flashback_sampler.app.widgets.slot_chip import short_source_name
+    result = short_source_name("A Very Long Device Name Indeed", max_chars=12)
+    assert result == "A Very Long…"
+    assert len(result) == 12
+
+
+def test_short_source_name_empty_returns_placeholder():
+    from flashback_sampler.app.widgets.slot_chip import short_source_name
+    assert short_source_name("") == "—"
+    assert short_source_name(None) == "—"
+
+
+def test_short_source_name_passes_through_short_names():
+    from flashback_sampler.app.widgets.slot_chip import short_source_name
+    assert short_source_name("Mic A") == "Mic A"
+    assert short_source_name("VAD\\Process_Loopback", max_chars=30) == "VAD\\Process_Loopback"
+
+
+def test_source_names_parallel_list_pushed_to_chips(qapp):
+    strip = SourceStrip()
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))
+    strip.set_slots(
+        st.slots,
+        st.active_slot_index,
+        source_names=["Speakers", "Mic A"],
+    )
+    assert strip._chips[0]._source_short == "Speakers"
+    assert strip._chips[1]._source_short == "Mic A"

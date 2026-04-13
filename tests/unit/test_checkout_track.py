@@ -121,6 +121,23 @@ def test_setting_none_checkout_clears_overlay(bound_checkout_track):
     assert track.trim_range_seconds() is None
 
 
+def test_set_checkout_caption_includes_source_name(bound_checkout_track):
+    track, co = bound_checkout_track
+    track.set_checkout(co, source_name="Discord")
+    caption = track._caption.text()
+    assert "DISCORD" in caption
+    assert co.id in caption
+    assert caption.startswith("CLIP")
+
+
+def test_set_checkout_caption_without_source_name_omits_it(bound_checkout_track):
+    track, co = bound_checkout_track
+    track.set_checkout(co)
+    caption = track._caption.text()
+    assert "DISCORD" not in caption
+    assert co.id in caption
+
+
 def test_set_cursor_without_trimmed_preview_is_absolute(bound_checkout_track):
     track, co = bound_checkout_track
     # With no preview_trimmed, set_cursor(seconds) uses seconds as

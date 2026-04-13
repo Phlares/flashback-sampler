@@ -52,6 +52,9 @@ class CaptureAllButton(QPushButton):
         super().__init__("CAPTURE ALL", parent)
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
+        # No keyboard focus — Space is reserved for Preview; the
+        # global Ctrl+R shortcut drives CAPTURE ALL instead.
+        self.setFocusPolicy(Qt.NoFocus)
         self.setFixedSize(CAPTURE_ALL_WIDTH, CAPTURE_ALL_HEIGHT)
 
         self._primed: int = 0
