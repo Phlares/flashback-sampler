@@ -8,6 +8,7 @@ that owns the buffer, checkout manager, and scrub player.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from flashback_sampler.app.state import AppState
 from flashback_sampler.core.buffer import AudioCircularBuffer
@@ -26,6 +27,160 @@ def test_appstate_wires_core_objects_with_matching_sample_rate_and_channels():
     assert st.buffer.channels == 2
     assert st.scrub_player.sample_rate == 16_000
     assert st.scrub_player.channels == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Multi-slot AppState (M10.4)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_appstate_starts_with_exactly_one_slot():
+    st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
+    assert len(st.slots) == 1
+    assert st.active_slot_index == 0
+    assert st.active_slot is st.slots[0]
+
+
+def test_initial_slot_uses_constructor_args():
+    st = AppState(buffer_seconds=7.5, sample_rate=22_050, channels=1)
+    slot = st.active_slot
+    assert slot.sample_rate == 22_050
+    assert slot.channels == 1
+    assert slot.buffer_seconds == 7.5
+    assert slot.quality_preset == "CUSTOM"
+    assert slot.name == "Main"
+
+
+def test_backward_compat_properties_delegate_to_active_slot():
+    st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
+    assert st.buffer is st.active_slot.buffer
+    assert st.checkout_manager is st.active_slot.checkout_manager
+    assert st.sample_rate == st.active_slot.sample_rate
+    assert st.channels == st.active_slot.channels
+
+
+def test_add_slot_appends_and_does_not_change_active():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
+    new_slot = st.add_slot(preset_by_name("SCRATCH"), name="Discord")
+    assert len(st.slots) == 2
+    assert st.slots[1] is new_slot
+    assert new_slot.name == "Discord"
+    # Active slot unchanged
+    assert st.active_slot_index == 0
+
+
+def test_set_active_slot_index_rotates_backward_compat_properties():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
+    slot_b = st.add_slot(preset_by_name("SCRATCH"), name="Discord")
+
+    # Before switch: properties point at slot 0 (rate 16_000)
+    assert st.sample_rate == 16_000
+    assert st.buffer is st.slots[0].buffer
+
+    st.set_active_slot_index(1)
+    assert st.active_slot is slot_b
+    assert st.sample_rate == 16_000  # SCRATCH is also 16k
+    # But the underlying buffer is a different instance now
+    assert st.buffer is slot_b.buffer
+    assert st.checkout_manager is slot_b.checkout_manager
+
+
+def test_set_active_slot_out_of_range_raises():
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    with pytest.raises(IndexError):
+        st.set_active_slot_index(5)
+    with pytest.raises(IndexError):
+        st.set_active_slot_index(-1)
+
+
+def test_remove_slot_adjusts_active_index():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(preset_by_name("CHAT"))
+    assert len(st.slots) == 3
+
+    st.set_active_slot_index(2)
+    st.remove_slot(0)  # removing a slot before the active index
+    assert len(st.slots) == 2
+    assert st.active_slot_index == 1  # shifted down
+
+
+def test_remove_last_slot_raises():
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    with pytest.raises(RuntimeError, match="cannot remove the last slot"):
+        st.remove_slot(0)
+
+
+def test_remove_slot_stops_capture():
+    from flashback_sampler.core.quality_presets import preset_by_name
+    from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    new_slot = st.add_slot(preset_by_name("SCRATCH"))
+    src = FakeCaptureSourceNoThread(
+        new_slot.buffer,
+        sample_rate=new_slot.sample_rate,
+        channels=new_slot.channels,
+    )
+    new_slot.bind_capture(src)
+    new_slot.start_capture()
+    assert new_slot.is_capturing() is True
+
+    st.remove_slot(1)
+    assert src.is_running() is False
+    assert len(st.slots) == 1
+
+
+def test_rebuild_buffer_scoped_to_active_slot():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))  # slot 1
+    assert len(st.slots) == 2
+
+    # Active is still slot 0
+    orig_slot1_buf = st.slots[1].buffer
+    st.rebuild_buffer(3.0)
+    assert st.slots[0].buffer.duration == 3.0
+    # Slot 1 untouched
+    assert st.slots[1].buffer is orig_slot1_buf
+
+
+def test_apply_checkout_caps_scoped_to_active_slot():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))
+
+    st.apply_checkout_caps(max_active=3, max_ram_mb=64)
+    # Active slot (0) updated
+    assert st.slots[0].checkout_manager._max_active == 3
+    # Slot 1 left at the default 16
+    assert st.slots[1].checkout_manager._max_active == 16
+
+
+def test_shutdown_stops_all_slots():
+    from flashback_sampler.core.quality_presets import preset_by_name
+    from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))
+    for slot in st.slots:
+        src = FakeCaptureSourceNoThread(
+            slot.buffer, sample_rate=slot.sample_rate, channels=slot.channels
+        )
+        slot.bind_capture(src)
+        slot.start_capture()
+
+    st.shutdown()
+    for slot in st.slots:
+        assert slot.is_capturing() is False
 
 
 def test_appstate_is_not_capturing_initially():
