@@ -111,10 +111,15 @@ class AppState:
         name: str = "",
         max_active_checkouts: int = 16,
         max_total_ram_mb: float = 1024.0,
+        capture_spec: Optional[CaptureDevice] = None,
     ) -> CaptureSlot:
         """
         Append a new CaptureSlot built from `preset`. Does NOT change
         the active slot index — the caller decides whether to switch.
+
+        `capture_spec` is an optional per-slot device override. If None
+        (the default), the slot inherits whichever device is currently
+        set at the AppState level when it goes to build a source.
 
         Raises RuntimeError if adding the new slot's ring buffer would
         push the total project RAM footprint past
@@ -140,8 +145,17 @@ class AppState:
             max_active_checkouts=max_active_checkouts,
             max_total_ram_mb=max_total_ram_mb,
         )
+        slot.capture_spec = capture_spec
         self.slots.append(slot)
         return slot
+
+    def effective_capture_spec_for_slot(self, slot: CaptureSlot) -> Optional[CaptureDevice]:
+        """
+        Return the capture device that should actually be used to open
+        a source for `slot`. Slot-level override wins; falls back to
+        the AppState global.
+        """
+        return slot.capture_spec if slot.capture_spec is not None else self.capture_spec
 
     # ------------------------------------------------------------------
     # Project-wide RAM accounting
@@ -235,16 +249,21 @@ class AppState:
 
     def build_capture_for_slot(self, slot: CaptureSlot):
         """
-        Instantiate a capture source wired to `slot`'s buffer. Every
-        slot shares the same global capture_spec for now — per-slot
-        device routing lands in a later milestone.
+        Instantiate a capture source wired to `slot`'s buffer.
+
+        Per-slot device routing: if `slot.capture_spec` is set, it
+        overrides the AppState global `capture_spec` for that one
+        slot only. Otherwise the slot inherits the global. Either way,
+        raises if no spec can be resolved.
         """
-        if self.capture_spec is None:
+        device = self.effective_capture_spec_for_slot(slot)
+        if device is None:
             raise RuntimeError(
-                "No capture device selected. Pick one from the Audio menu."
+                "No capture device selected. Pick one from the Audio menu "
+                "or from the slot's right-click menu."
             )
         return build_capture_source(
-            device=self.capture_spec,
+            device=device,
             buffer=slot.buffer,
             sample_rate=slot.sample_rate,
             channels=slot.channels,

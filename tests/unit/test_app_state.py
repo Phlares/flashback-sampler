@@ -222,6 +222,78 @@ def test_set_project_ram_budget_enforces_minimum():
     assert st.project_ram_budget_mb == 64.0
 
 
+def test_effective_capture_spec_prefers_slot_override():
+    from flashback_sampler.app.audio_devices import CaptureDevice
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    slot_a = st.slots[0]
+    slot_b = st.add_slot(preset_by_name("SCRATCH"))
+
+    global_dev = CaptureDevice(kind="loopback", name="GlobalSpeaker", id="gs")
+    override_dev = CaptureDevice(kind="input", name="MicA", id="7")
+    st.capture_spec = global_dev
+    slot_b.capture_spec = override_dev
+
+    # slot_a inherits from the global
+    assert st.effective_capture_spec_for_slot(slot_a) is global_dev
+    # slot_b uses its own override
+    assert st.effective_capture_spec_for_slot(slot_b) is override_dev
+
+
+def test_effective_capture_spec_falls_through_when_slot_has_none():
+    from flashback_sampler.app.audio_devices import CaptureDevice
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    slot = st.slots[0]
+    assert slot.capture_spec is None
+    global_dev = CaptureDevice(kind="loopback", name="X", id="x")
+    st.capture_spec = global_dev
+    assert st.effective_capture_spec_for_slot(slot) is global_dev
+
+
+def test_add_slot_carries_capture_spec_override():
+    from flashback_sampler.app.audio_devices import CaptureDevice
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    dev = CaptureDevice(kind="input", name="MicB", id="9")
+    slot = st.add_slot(preset_by_name("SCRATCH"), capture_spec=dev)
+    assert slot.capture_spec is dev
+
+
+def test_build_capture_for_slot_uses_override_path():
+    """
+    Verify the delegation without touching real hardware: swap out
+    build_capture_source with a stub that records which spec it saw.
+    """
+    from flashback_sampler.app.audio_devices import CaptureDevice
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    import flashback_sampler.app.state as state_mod
+    captured_device = {}
+    def fake_build(device, buffer, sample_rate, channels):
+        captured_device["d"] = device
+        return object()
+    real = state_mod.build_capture_source
+    state_mod.build_capture_source = fake_build
+    try:
+        st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+        global_dev = CaptureDevice(kind="loopback", name="G", id="g")
+        override_dev = CaptureDevice(kind="input", name="O", id="11")
+        st.capture_spec = global_dev
+        slot = st.add_slot(preset_by_name("SCRATCH"), capture_spec=override_dev)
+        st.build_capture_for_slot(slot)
+        assert captured_device["d"] is override_dev
+
+        # Remove override and check the global takes over
+        slot.capture_spec = None
+        st.build_capture_for_slot(slot)
+        assert captured_device["d"] is global_dev
+    finally:
+        state_mod.build_capture_source = real
+
+
 def test_shutdown_stops_all_slots():
     from flashback_sampler.core.quality_presets import preset_by_name
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
