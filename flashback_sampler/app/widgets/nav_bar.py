@@ -62,14 +62,14 @@ class SourceIndicator(QWidget):
 class NavBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(24)
+        self.setFixedHeight(27)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(2)
 
         self.arm_all_btn = QPushButton("ARM ALL")
-        self.arm_all_btn.setFixedHeight(18)
+        self.arm_all_btn.setFixedHeight(20)
         self.arm_all_btn.setStyleSheet(
             f"QPushButton {{ background: {EREBUS['rec']}; color: {EREBUS['cream']};"
             f" border: none; font-size: 7pt; padding: 0 6px; }}"
@@ -86,7 +86,7 @@ class NavBar(QWidget):
             layout.addWidget(slot)
 
         self.add_source_btn = QPushButton("ADD SOURCE+")
-        self.add_source_btn.setFixedHeight(18)
+        self.add_source_btn.setFixedHeight(20)
         self.add_source_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {EREBUS['bone']};"
             f" border: 1px solid {EREBUS['ash']}; font-size: 7pt; padding: 0 4px; }}"
@@ -116,7 +116,7 @@ class NavBar(QWidget):
     def _add_separator(self, layout: QHBoxLayout) -> None:
         sep = QWidget()
         sep.setFixedWidth(1)
-        sep.setFixedHeight(14)
+        sep.setFixedHeight(16)
         sep.setStyleSheet(f"background: {EREBUS['ash']};")
         layout.addWidget(sep)
 
