@@ -62,9 +62,16 @@ class TurntableWindow(QMainWindow):
 
         self.out_btn = TactileButton("OUT →", variant="primary")
         self.out_btn.setFixedWidth(56)
-        self.out_btn.setMinimumHeight(60)
         self.out_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        waveform_row.addWidget(self.out_btn)
+
+        # Align OUT→ vertically with the container, not the full panel height.
+        # Top spacing ≈ header row height (8pt label + panel top margin + spacing).
+        out_col = QVBoxLayout()
+        out_col.setContentsMargins(0, 0, 0, 0)
+        out_col.setSpacing(0)
+        out_col.addSpacing(20)
+        out_col.addWidget(self.out_btn, stretch=1)
+        waveform_row.addLayout(out_col)
 
         self.clip_panel = WaveformPanel(side="clip")
         waveform_row.addWidget(self.clip_panel, stretch=1)

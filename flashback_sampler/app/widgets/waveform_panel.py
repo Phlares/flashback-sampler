@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
 from flashback_sampler.app.theme import EREBUS, font_family
 from flashback_sampler.app.widgets.waveform_view import WaveformView
@@ -17,7 +17,7 @@ class WaveformPanel(QWidget):
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
 
-        # Header row
+        # Header row (stays OUTSIDE the container)
         header = QHBoxLayout()
         header.setSpacing(8)
 
@@ -50,10 +50,21 @@ class WaveformPanel(QWidget):
 
         layout.addLayout(header)
 
+        # Container: visible bordered box holding waveform + time readouts
+        self.container = QFrame(self)
+        self.container.setFrameShape(QFrame.NoFrame)
+        self.container.setStyleSheet(
+            f"QFrame {{ background-color: {EREBUS['plate']}; border: 1px solid {EREBUS['hairline_strong']}; }}"
+        )
+
+        inner = QVBoxLayout(self.container)
+        inner.setContentsMargins(4, 4, 4, 4)
+        inner.setSpacing(2)
+
         # Waveform view
         self.waveform = WaveformView()
         self.waveform.setMinimumHeight(40)
-        layout.addWidget(self.waveform, stretch=1)
+        inner.addWidget(self.waveform, stretch=1)
 
         # Time readouts
         time_row = QHBoxLayout()
@@ -68,7 +79,9 @@ class WaveformPanel(QWidget):
             f"color: {EREBUS['ash']}; font-size: 7pt;"
         )
         time_row.addWidget(self.time_right_label)
-        layout.addLayout(time_row)
+        inner.addLayout(time_row)
+
+        layout.addWidget(self.container, stretch=1)
 
     def set_source_name(self, name: str) -> None:
         self.source_label.setText(name)
