@@ -92,6 +92,19 @@ def test_chip_click_selects_track(qapp):
     assert tt.selected_track() == target_idx
 
 
+def test_chip_click_selects_track_clip(qapp):
+    """Clip rail reverses chip ordering — innermost track = chip closest to rim (rightmost on left rail)."""
+    tt = TurntableWidget(side="clip")
+    tt.resize(300, 300)
+    g = tt.geometry()
+    target_idx = 2
+    chip_cx, chip_cy = g.chip_center("clip", target_idx, tt.track_count())
+    pos = QPointF(chip_cx, chip_cy)
+    ev = QMouseEvent(QEvent.MouseButtonPress, pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    tt.mousePressEvent(ev)
+    assert tt.selected_track() == target_idx
+
+
 def test_paint_event_no_exceptions(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(300, 300)
