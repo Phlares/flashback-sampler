@@ -16,7 +16,7 @@ def qapp():
 def test_nav_bar_instantiates(qapp):
     bar = NavBar()
     assert bar is not None
-    assert bar.minimumHeight() >= 16
+    assert bar.minimumHeight() >= 26
 
 
 def test_nav_bar_has_arm_all_button(qapp):
