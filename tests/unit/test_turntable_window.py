@@ -150,3 +150,28 @@ def test_arm_all_arms_every_slot(qapp, state):
     win = TurntableWindow(state)
     win.nav_bar.arm_all_btn.clicked.emit()
     assert all(s.armed for s in state.slots)
+
+
+def test_initial_buffer_panel_shows_active_slot_name(qapp, state):
+    # Initial slot is named "Main"
+    win = TurntableWindow(state)
+    assert win.buffer_panel.source_label.text() == "MAIN"
+
+
+def test_navbar_chip_reflects_slot_name(qapp, state):
+    win = TurntableWindow(state)
+    assert win.nav_bar.source_slots[0]._name == "MAIN"
+
+
+def test_track_selected_updates_buffer_panel_label(qapp, state):
+    from flashback_sampler.core.quality_presets import QualityPreset
+    preset = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2,
+        buffer_seconds=30.0, description="test"
+    )
+    state.add_slot(preset, name="Game")
+    win = TurntableWindow(state)
+    win.buffer_turntable.set_track_count(len(state.slots))
+    win.clip_turntable.set_track_count(len(state.slots))
+    win.buffer_turntable.track_selected.emit(1)
+    assert win.buffer_panel.source_label.text() == "GAME"

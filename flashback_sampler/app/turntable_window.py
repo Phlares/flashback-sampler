@@ -132,6 +132,10 @@ class TurntableWindow(QMainWindow):
 
         self._wire_selection_sync()
         self._wire_controls()
+        # TEMP: synthetic waveform placeholder. Real audio polling lands in
+        # Phase 2 along with OUT→, PLAY, and buffer playhead wiring.
+        self._populate_demo_data()
+        self._refresh_source_names()
 
     def _wire_selection_sync(self) -> None:
         """When user drags a selection on a waveform, paint the matching arc
@@ -200,6 +204,7 @@ class TurntableWindow(QMainWindow):
         other = self.clip_turntable if sender is self.buffer_turntable else self.buffer_turntable
         if other.selected_track() != index:
             other.select_track(index)
+        self._refresh_source_names()
 
     def _on_arm_all(self) -> None:
         for slot in self._state.slots:
@@ -219,10 +224,11 @@ class TurntableWindow(QMainWindow):
         active = self._state.active_slot
         default_name = f"Source {len(self._state.slots) + 1}"
         default_buffer_s = active.buffer_seconds
+        max_buffer_s = max(3600.0, default_buffer_s * 4)
         dlg = AddSourceDialog(
             default_name=default_name,
             default_buffer_seconds=default_buffer_s,
-            max_buffer_seconds=default_buffer_s,
+            max_buffer_seconds=max_buffer_s,
             default_sample_rate=active.sample_rate,
             default_channels=active.channels,
             parent=self,
@@ -243,6 +249,7 @@ class TurntableWindow(QMainWindow):
         self.buffer_turntable.set_track_count(n)
         self.clip_turntable.set_track_count(n)
         self._refresh_source_indicators()
+        self._refresh_source_names()
 
     def _refresh_source_indicators(self) -> None:
         """Update the NavBar source chips to reflect current slot armed/capturing state."""
@@ -257,6 +264,19 @@ class TurntableWindow(QMainWindow):
                 chip.set_status("paused")   # armed but not rolling yet
             else:
                 chip.set_status("inactive")
+
+    def _refresh_source_names(self) -> None:
+        """Propagate slot names from state into NavBar chips and the active
+        waveform panel's source label."""
+        names = [slot.name for slot in self._state.slots]
+        self.nav_bar.set_source_names(names)
+        # Buffer panel shows the currently-active slot's name
+        active_name = (
+            self._state.active_slot.name if self._state.slots else "SOURCE 1"
+        )
+        self.buffer_panel.set_source_name(active_name.upper())
+        # Clip panel's source label stays "CLIP" for now (clip-side names
+        # belong to checkouts which come in a later phase)
 
     def _populate_demo_data(self) -> None:
         rng = np.random.default_rng(seed=42)

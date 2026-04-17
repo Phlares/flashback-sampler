@@ -40,3 +40,20 @@ def test_nav_bar_has_config_labels(qapp):
     assert bar.clip_length_label.text() == "3:00"
     assert bar.buffer_length_label.text() == "15:00"
     assert bar.project_size_label.text() == "~4.31 GB"
+
+
+def test_set_source_names_updates_chips(qapp):
+    bar = NavBar()
+    bar.set_source_names(["Main", "Game"])
+    assert bar.source_slots[0]._name == "MAIN"
+    assert bar.source_slots[1]._name == "GAME"
+    # Chip 2 falls back to default label
+    assert bar.source_slots[2]._name == "SOURCE 3"
+
+
+def test_set_source_names_empty_uses_defaults(qapp):
+    bar = NavBar()
+    bar.set_source_names([])
+    assert bar.source_slots[0]._name == "SOURCE 1"
+    assert bar.source_slots[1]._name == "SOURCE 2"
+    assert bar.source_slots[2]._name == "SOURCE 3"
