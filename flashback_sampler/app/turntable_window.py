@@ -95,7 +95,7 @@ class TurntableWindow(QMainWindow):
 
         self.loop_btn = TactileButton("LOOP", variant="primary")
         self.loop_btn.setCheckable(True)
-        self.loop_btn.setMinimumWidth(40)
+        self.loop_btn.setFixedWidth(56)          # matches OUT→ for column alignment
         self.loop_btn.setMinimumHeight(36)
         controls_row.addWidget(self.loop_btn)
 

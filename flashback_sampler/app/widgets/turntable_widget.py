@@ -1,8 +1,8 @@
 """TurntableWidget — custom QPainter widget rendering the record turntable.
 
 Wireframe phase: empty concentric rings, colored track headers with status
-lights, center spindle with colored selector chips, needle rail + chips,
-and a swing-arm needle anchored at the upper-inner corner of the disc.
+lights, center spindle with colored selector chips, needle head below the
+selected rim header, and an arm line to the bottom-inner corner of the widget.
 """
 from __future__ import annotations
 
@@ -29,26 +29,10 @@ class TurntableGeometry:
     spindle_r: float
     ring_gap: float
     ring_width: float
-    rail_x: float       # top-left x of rail rect
-    rail_y: float       # top-left y of rail rect
-    rail_w: float
-    rail_h: float
-    chip_w: float
-    chip_h: float
-    anchor_x: float     # upper-inner corner x
-    anchor_y: float     # upper-inner corner y
     size: float         # min(widget_w, widget_h)
 
     def ring_radius(self, i: int) -> float:
         return self.spindle_r + self.ring_gap * (i + 1) + self.ring_width * (i + 0.5)
-
-    def chip_center(self, side: str, i: int, n: int) -> tuple[float, float]:
-        if side == "buffer":
-            cx = self.rail_x + (i + 0.5) * self.rail_w / max(n, 1)
-        else:  # clip — reverse so innermost track is closest to rim
-            cx = self.rail_x + (n - 1 - i + 0.5) * self.rail_w / max(n, 1)
-        cy = self.rail_y + self.rail_h / 2
-        return cx, cy
 
     @property
     def spindle_chip_r(self) -> float:
@@ -58,6 +42,32 @@ class TurntableGeometry:
         angle = 2 * math.pi * i / max(n, 1) - math.pi / 2
         orbit = self.spindle_r * 0.6
         return self.cx + orbit * math.cos(angle), self.cy + orbit * math.sin(angle)
+
+    def rim_header_center(self, side: str, i: int) -> tuple[float, float]:
+        """Return (x, y) of rim track header for track i at the play angle.
+        Buffer: 3 o'clock; Clip: 9 o'clock."""
+        r = self.ring_radius(i)
+        if side == "buffer":
+            return (self.cx + r, self.cy)
+        else:  # clip
+            return (self.cx - r, self.cy)
+
+    def needle_head_rect(self, side: str, i: int) -> QRectF:
+        """Return a small rect just below the rim header for track i.
+        Same width as the rim header, 4px tall, positioned 2px below the header."""
+        header_cx, header_cy = self.rim_header_center(side, i)
+        header_w = max(self.ring_width * 0.8, 6)
+        header_h = max(12, self.size * 0.04)
+        x = header_cx - header_w / 2
+        y = header_cy + header_h / 2 + 2
+        return QRectF(x, y, header_w, 4)
+
+    def arm_target(self, side: str, widget_w: float, widget_h: float) -> tuple[float, float]:
+        """Return the arm destination within the widget (bottom-inner corner)."""
+        if side == "buffer":
+            return (widget_w - 2, widget_h - 2)
+        else:  # clip
+            return (2, widget_h - 2)
 
 
 class TurntableWidget(QWidget):
@@ -122,24 +132,9 @@ class TurntableWidget(QWidget):
         track_area = disc_r - spindle_r - ring_gap * (self._track_count + 1)
         ring_width = track_area / max(self._track_count, 1)
 
-        rail_w = disc_r * 0.45
-        rail_h = max(12.0, disc_r * 0.10)
-        if self._side == "buffer":
-            rail_x = cx + disc_r + 4
-            anchor_x = cx + disc_r
-        else:  # clip
-            rail_x = cx - disc_r - 4 - rail_w
-            anchor_x = cx - disc_r
-        rail_y = cy - rail_h / 2
-        anchor_y = cy - disc_r
-
-        chip_w = chip_h = rail_h * 0.7
         return TurntableGeometry(
             cx=cx, cy=cy, disc_r=disc_r, spindle_r=spindle_r,
             ring_gap=ring_gap, ring_width=ring_width,
-            rail_x=rail_x, rail_y=rail_y, rail_w=rail_w, rail_h=rail_h,
-            chip_w=chip_w, chip_h=chip_h,
-            anchor_x=anchor_x, anchor_y=anchor_y,
             size=size,
         )
 
@@ -228,36 +223,18 @@ class TurntableWidget(QWidget):
             p.setPen(Qt.NoPen)
             p.drawEllipse(QPointF(chip_x, chip_y), g.spindle_chip_r, g.spindle_chip_r)
 
-        # ── Selector rail ─────────────────────────────────────────────────
-        rail_rect = QRectF(g.rail_x, g.rail_y, g.rail_w, g.rail_h)
-        p.setBrush(QColor(EREBUS["void"]))
-        p.setPen(QPen(QColor(EREBUS["hairline_strong"]), 1))
-        p.drawRect(rail_rect)
-
-        # ── Chips on rail ────────────────────────────────────────────────
-        for i in range(self._track_count):
-            chip_cx, chip_cy = g.chip_center(self._side, i, self._track_count)
-            chip_rect = QRectF(chip_cx - g.chip_w / 2, chip_cy - g.chip_h / 2, g.chip_w, g.chip_h)
-            color = QColor(colors[i])
-            if i == self._selected_track:
-                color.setAlpha(255)
-            else:
-                color.setAlpha(100)
-            p.setBrush(color)
-            p.setPen(Qt.NoPen)
-            p.drawRect(chip_rect)
-            # Status indicator above chip
-            status = self._track_statuses[i] if i < len(self._track_statuses) else "inactive"
-            p.setBrush(QColor(STATUS_COLORS.get(status, "#B3ACAC")))
-            p.drawEllipse(QPointF(chip_cx, chip_cy - g.chip_h), 2, 2)
-
-        # ── Arm (needle) ─────────────────────────────────────────────────
-        sel_chip_cx, sel_chip_cy = g.chip_center(self._side, self._selected_track, self._track_count)
-        p.setPen(QPen(QColor(EREBUS["cream"]), 2))
-        p.drawLine(QPointF(g.anchor_x, g.anchor_y), QPointF(sel_chip_cx, sel_chip_cy))
-        p.setBrush(QColor(EREBUS["ember"]))
+        # ── Needle head (directly below selected rim header) ────────────
+        needle_rect = g.needle_head_rect(self._side, self._selected_track)
+        p.setBrush(QColor(EREBUS["cream"]))
         p.setPen(Qt.NoPen)
-        p.drawEllipse(QPointF(sel_chip_cx, sel_chip_cy), 4, 4)
+        p.drawRect(needle_rect)
+
+        # ── Arm line from needle head to bottom-inner corner ────────────
+        arm_start_x = needle_rect.center().x()
+        arm_start_y = needle_rect.bottom()
+        arm_end_x, arm_end_y = g.arm_target(self._side, float(self.width()), float(self.height()))
+        p.setPen(QPen(QColor(EREBUS["cream"]), 2))
+        p.drawLine(QPointF(arm_start_x, arm_start_y), QPointF(arm_end_x, arm_end_y))
 
         p.end()
 
@@ -284,13 +261,5 @@ class TurntableWidget(QWidget):
         # Click on a track ring
         for i in range(self._track_count):
             if abs(dist - g.ring_radius(i)) < g.ring_width / 2:
-                self.select_track(i)
-                return
-
-        # Click on rail chips
-        for i in range(self._track_count):
-            chip_cx, chip_cy = g.chip_center(self._side, i, self._track_count)
-            chip_rect = QRectF(chip_cx - g.chip_w / 2, chip_cy - g.chip_h / 2, g.chip_w, g.chip_h)
-            if chip_rect.contains(QPointF(mx, my)):
                 self.select_track(i)
                 return
