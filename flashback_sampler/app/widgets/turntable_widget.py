@@ -231,14 +231,24 @@ class TurntableWidget(QWidget):
 
         # ── Selection arc on each track with a stored selection ─────────
         # Body is 25% opacity; inner/outer edges are 1px fully-opaque strokes.
+        # The arc spans a proportional chunk of the FILLED portion of the
+        # ring (not the full ring), so a "30s of 3min" selection looks
+        # visually proportional on both the linear panel and the disc.
         for track_idx, (start_f, end_f, color_hex) in self._track_selections.items():
             if track_idx >= self._track_count:
                 continue
             r = g.ring_radius(track_idx)
+            # How much of the ring represents buffered/visible audio.
+            entry = self._track_waveforms.get(track_idx)
+            fill_frac = entry[1] if entry is not None else 1.0
+            if fill_frac <= 1e-4:
+                continue
             play_angle_deg = self.header_angle_deg()
-            # Newer edge (end_f) sits at play_angle. Sweep CW (negative) to older edge.
-            start_angle = play_angle_deg - (1.0 - end_f) * 360.0
-            span = -(end_f - start_f) * 360.0
+            # Newer edge (end_f) sits at play_angle (no CW offset). Map
+            # linear fraction [0..1] → position within the filled arc so
+            # the selection stays within the filled portion of the ring.
+            start_angle = play_angle_deg - (1.0 - end_f) * fill_frac * 360.0
+            span = -(end_f - start_f) * fill_frac * 360.0
             band_w = max(g.ring_width * 0.8, 3)
             p.setBrush(Qt.NoBrush)
 
