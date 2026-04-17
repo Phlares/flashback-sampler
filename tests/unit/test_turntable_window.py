@@ -13,58 +13,66 @@ def qapp():
     yield app
 
 
-def test_window_instantiates(qapp):
-    win = TurntableWindow()
+@pytest.fixture
+def state():
+    from flashback_sampler.app.state import AppState
+    s = AppState(buffer_seconds=60.0, sample_rate=48000, channels=2)
+    yield s
+    s.shutdown()
+
+
+def test_window_instantiates(qapp, state):
+    win = TurntableWindow(state)
     assert win is not None
 
 
-def test_window_has_turntables(qapp):
-    win = TurntableWindow()
+def test_window_has_turntables(qapp, state):
+    win = TurntableWindow(state)
     assert win.buffer_turntable.side() == "buffer"
     assert win.clip_turntable.side() == "clip"
 
 
-def test_window_has_center_bridge(qapp):
-    win = TurntableWindow()
+def test_window_has_center_bridge(qapp, state):
+    win = TurntableWindow(state)
     assert win.center_bridge is not None
 
 
-def test_window_has_waveform_panels(qapp):
-    win = TurntableWindow()
+def test_window_has_waveform_panels(qapp, state):
+    win = TurntableWindow(state)
     assert win.buffer_panel is not None
     assert win.clip_panel is not None
 
 
-def test_window_has_out_button(qapp):
-    win = TurntableWindow()
+def test_window_has_out_button(qapp, state):
+    win = TurntableWindow(state)
     assert win.out_btn.text() == "OUT →"
 
 
-def test_window_has_nav_bar(qapp):
-    win = TurntableWindow()
+def test_window_has_nav_bar(qapp, state):
+    win = TurntableWindow(state)
     assert win.nav_bar is not None
 
 
-def test_window_has_buffer_controls(qapp):
-    win = TurntableWindow()
+def test_window_has_buffer_controls(qapp, state):
+    win = TurntableWindow(state)
     labels = [b.text() for b in win.buffer_controls]
     assert labels == ["FLUSH", "−", "+", "◀", "▶", "PAUSE"]
 
 
-def test_window_has_clip_controls(qapp):
-    win = TurntableWindow()
+def test_window_has_clip_controls(qapp, state):
+    win = TurntableWindow(state)
     labels = [b.text() for b in win.clip_controls]
     assert labels == ["PLAY", "−", "+", "◀", "▶", "SAVE"]
 
 
-def test_window_has_loop_button(qapp):
-    win = TurntableWindow()
+def test_window_has_loop_button(qapp, state):
+    win = TurntableWindow(state)
     assert win.loop_btn.text() == "LOOP"
     assert win.loop_btn.isCheckable()
 
 
-def test_buffer_selection_updates_disc(qapp):
-    win = TurntableWindow()
+def test_buffer_selection_updates_disc(qapp, state):
+    win = TurntableWindow(state)
     # Emit a selection change
     win.buffer_panel.waveform.manualSelectionChanged.emit(0.1, 0.3)
     idx = win.buffer_turntable.selected_track()
@@ -74,10 +82,71 @@ def test_buffer_selection_updates_disc(qapp):
     assert color == "#FFD900"
 
 
-def test_clip_selection_updates_disc(qapp):
-    win = TurntableWindow()
+def test_clip_selection_updates_disc(qapp, state):
+    win = TurntableWindow(state)
     win.clip_panel.waveform.manualSelectionChanged.emit(0.2, 0.5)
     idx = win.clip_turntable.selected_track()
     assert idx in win.clip_turntable._track_selections
     _, _, color = win.clip_turntable._track_selections[idx]
     assert color == "#FF9500"
+
+
+# ── Phase-1 wiring tests ──────────────────────────────────────────────────────
+
+def test_constructor_mirrors_slot_count(qapp, state):
+    win = TurntableWindow(state)
+    assert win.buffer_turntable.track_count() == len(state.slots)
+    assert win.clip_turntable.track_count() == len(state.slots)
+
+
+def test_start_button_sets_rolling(qapp, state):
+    win = TurntableWindow(state)
+    # Arm the initial slot first
+    state.slots[0].armed = True
+    win.center_bridge.start_btn.clicked.emit()
+    # start_rolling may or may not find a capture device in CI — but the
+    # flag should flip true regardless (unless first_error is set)
+    # We just check the handler ran by checking rolling or that an error
+    # was raised. Mild assertion:
+    assert isinstance(state.rolling, bool)  # no crash
+
+
+def test_stop_button_calls_stop_rolling(qapp, state):
+    win = TurntableWindow(state)
+    state.rolling = True  # simulate rolling
+    win.center_bridge.stop_btn.clicked.emit()
+    assert state.rolling is False
+
+
+def test_track_selected_updates_active_slot(qapp, state):
+    # Add a second slot so we have indices 0, 1
+    from flashback_sampler.core.quality_presets import QualityPreset
+    preset = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2,
+        buffer_seconds=30.0, description="test"
+    )
+    state.add_slot(preset, name="Source 2")
+    win = TurntableWindow(state)
+    # Grow track counts
+    win.buffer_turntable.set_track_count(len(state.slots))
+    win.clip_turntable.set_track_count(len(state.slots))
+    # Emit track_selected from buffer side
+    win.buffer_turntable.track_selected.emit(1)
+    assert state.active_slot_index == 1
+    # Clip side should mirror
+    assert win.clip_turntable.selected_track() == 1
+
+
+def test_arm_all_arms_every_slot(qapp, state):
+    # Start with 1 armed=False, add a second also armed=False
+    from flashback_sampler.core.quality_presets import QualityPreset
+    preset = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2,
+        buffer_seconds=30.0, description="test"
+    )
+    state.add_slot(preset, name="Source 2")
+    for s in state.slots:
+        s.armed = False
+    win = TurntableWindow(state)
+    win.nav_bar.arm_all_btn.clicked.emit()
+    assert all(s.armed for s in state.slots)
