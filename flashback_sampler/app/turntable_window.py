@@ -136,6 +136,19 @@ class TurntableWindow(QMainWindow):
         self.buffer_turntable.set_track_count(n)
         self.clip_turntable.set_track_count(n)
 
+        # Selection state for drift-with-audio.
+        # abs_samples: (start, end) in total_written-space. Stays fixed; we
+        # compute current fractions each tick based on the buffer's current
+        # write position so the selection keeps pointing at the same audio
+        # content as the buffer advances.
+        # mode: "default" (anchored to "now" — re-computed every tick from
+        # slot.duration_preset_idx/anchor_offset_s) or "user" (fixed abs
+        # samples captured when the user drags).
+        self._buffer_sel_abs: tuple[int, int] | None = None
+        self._buffer_sel_mode: str = "default"  # "default" | "user"
+        self._clip_sel_abs: tuple[int, int] | None = None
+        self._clip_sel_mode: str = "default"
+
         self._wire_selection_sync()
         self._wire_controls()
 
@@ -146,29 +159,60 @@ class TurntableWindow(QMainWindow):
         self._tick_timer.start()
 
         self._refresh_source_names()
-        self._apply_default_buffer_selection()
+        # Paint the initial default selection immediately rather than waiting
+        # for the first tick (33ms).
+        self._update_selection_display()
 
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
 
     def _wire_selection_sync(self) -> None:
-        """When user drags a selection on a waveform, paint the matching arc
-        on the currently-selected track of that side's record."""
+        """When the user drags a selection on a waveform, snapshot the
+        buffer's absolute sample indices so the selection rides the audio.
+        Each tick, _update_selection_display converts those absolute
+        positions back into display fractions for both the linear panel
+        and the disc ring."""
         def on_buffer_sel(start: float, end: float) -> None:
-            idx = self.buffer_turntable.selected_track()
-            self.buffer_turntable.set_track_selection(idx, start, end, SELECTION_COLOR_BUFFER)
+            if not self._state.slots:
+                return
+            slot = self._state.active_slot
+            buf = slot.buffer
+            buffered_s = float(buf.buffered_seconds)
+            if buffered_s <= 0 or end <= start:
+                return
+            total = int(buf.total_written)
+            sr = int(buf.sample_rate)
+            samples_visible = int(buffered_s * sr)
+            oldest_visible = total - samples_visible
+            abs_start = oldest_visible + int(start * samples_visible)
+            abs_end = oldest_visible + int(end * samples_visible)
+            self._buffer_sel_abs = (abs_start, abs_end)
+            self._buffer_sel_mode = "user"
 
         def on_buffer_clear() -> None:
-            idx = self.buffer_turntable.selected_track()
-            self.buffer_turntable.set_track_selection(idx, None, None, SELECTION_COLOR_BUFFER)
+            self._buffer_sel_abs = None
+            self._buffer_sel_mode = "default"
 
         def on_clip_sel(start: float, end: float) -> None:
-            idx = self.clip_turntable.selected_track()
-            self.clip_turntable.set_track_selection(idx, start, end, SELECTION_COLOR_CLIP)
+            if not self._state.slots:
+                return
+            slot = self._state.active_slot
+            buf = slot.buffer
+            buffered_s = float(buf.buffered_seconds)
+            if buffered_s <= 0 or end <= start:
+                return
+            total = int(buf.total_written)
+            sr = int(buf.sample_rate)
+            samples_visible = int(buffered_s * sr)
+            oldest_visible = total - samples_visible
+            abs_start = oldest_visible + int(start * samples_visible)
+            abs_end = oldest_visible + int(end * samples_visible)
+            self._clip_sel_abs = (abs_start, abs_end)
+            self._clip_sel_mode = "user"
 
         def on_clip_clear() -> None:
-            idx = self.clip_turntable.selected_track()
-            self.clip_turntable.set_track_selection(idx, None, None, SELECTION_COLOR_CLIP)
+            self._clip_sel_abs = None
+            self._clip_sel_mode = "default"
 
         self.buffer_panel.waveform.manualSelectionChanged.connect(on_buffer_sel)
         self.buffer_panel.waveform.manualSelectionCleared.connect(on_buffer_clear)
@@ -223,7 +267,13 @@ class TurntableWindow(QMainWindow):
         if other.selected_track() != index:
             other.select_track(index)
         self._refresh_source_names()
-        self._apply_default_buffer_selection()
+        # Reset selection state for the new active slot so it shows its own
+        # default; abs-sample snapshots belong to the prior slot.
+        self._buffer_sel_mode = "default"
+        self._buffer_sel_abs = None
+        self._clip_sel_mode = "default"
+        self._clip_sel_abs = None
+        self._update_selection_display()
 
     def _on_arm_all(self) -> None:
         for slot in self._state.slots:
@@ -284,32 +334,82 @@ class TurntableWindow(QMainWindow):
             else:
                 chip.set_status("inactive")
 
-    def _apply_default_buffer_selection(self) -> None:
-        """Paint the default checkout-range selection (3:00 back from now)
-        on the buffer waveform + the active track's disc ring."""
+    def _update_selection_display(self) -> None:
+        """Convert stored absolute sample positions (or default anchor /
+        duration when in "default" mode) into current display fractions
+        and apply them to both the linear WaveformPanel and the matching
+        disc ring. Called every tick so user selections ride the audio as
+        the buffer advances."""
         from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
         slot = self._state.active_slot
-        capacity_s = slot.buffer.duration
-        if capacity_s <= 0:
+        buf = slot.buffer
+        buffered_s = float(buf.buffered_seconds)
+        if buffered_s <= 0:
+            # Nothing to show yet
             return
-        preset_idx = max(0, min(len(DEFAULT_PRESETS) - 1, slot.duration_preset_idx))
-        duration_s = DEFAULT_PRESETS[preset_idx]
-        anchor_s = max(0.0, slot.anchor_offset_s)
-        end_frac = max(0.0, min(1.0, 1.0 - anchor_s / capacity_s))
-        start_frac = max(0.0, min(1.0, 1.0 - (anchor_s + duration_s) / capacity_s))
-        if end_frac <= start_frac:
-            return
-        # Linear waveform (block the signal so it doesn't re-fire into set_track_selection)
-        self.buffer_panel.waveform.blockSignals(True)
-        self.buffer_panel.waveform.set_manual_selection(start_frac, end_frac)
-        self.buffer_panel.waveform.blockSignals(False)
-        # Disc selection arc
-        idx = self._state.active_slot_index
-        self.buffer_turntable.set_track_selection(
-            idx, start_frac, end_frac, SELECTION_COLOR_BUFFER
-        )
+        sr = int(buf.sample_rate)
+        total = int(buf.total_written)
+
+        def compute_fracs_buffer_side() -> tuple[float, float] | None:
+            if self._buffer_sel_mode == "default":
+                preset_idx = max(
+                    0, min(len(DEFAULT_PRESETS) - 1, slot.duration_preset_idx)
+                )
+                duration_s = DEFAULT_PRESETS[preset_idx]
+                anchor_s = max(0.0, slot.anchor_offset_s)
+                end_ago = anchor_s
+                start_ago = anchor_s + duration_s
+            else:  # user
+                if self._buffer_sel_abs is None:
+                    return None
+                abs_start, abs_end = self._buffer_sel_abs
+                start_ago = (total - abs_start) / sr
+                end_ago = (total - abs_end) / sr
+            end_frac = 1.0 - end_ago / buffered_s
+            start_frac = 1.0 - start_ago / buffered_s
+            # Clamp to visible range
+            end_frac = max(0.0, min(1.0, end_frac))
+            start_frac = max(0.0, min(1.0, start_frac))
+            if end_frac <= start_frac:
+                return None
+            return (start_frac, end_frac)
+
+        def compute_fracs_clip_side() -> tuple[float, float] | None:
+            if self._clip_sel_mode == "default":
+                # No default for clip side — clip selection waits for user input
+                return None
+            if self._clip_sel_abs is None:
+                return None
+            abs_start, abs_end = self._clip_sel_abs
+            start_ago = (total - abs_start) / sr
+            end_ago = (total - abs_end) / sr
+            end_frac = max(0.0, min(1.0, 1.0 - end_ago / buffered_s))
+            start_frac = max(0.0, min(1.0, 1.0 - start_ago / buffered_s))
+            if end_frac <= start_frac:
+                return None
+            return (start_frac, end_frac)
+
+        def apply(fracs: tuple[float, float] | None, color: str,
+                  panel, turntable) -> None:
+            idx = self._state.active_slot_index
+            if fracs is None:
+                panel.waveform.blockSignals(True)
+                panel.waveform.clear_manual_selection()
+                panel.waveform.blockSignals(False)
+                turntable.set_track_selection(idx, None, None, color)
+                return
+            s, e = fracs
+            panel.waveform.blockSignals(True)
+            panel.waveform.set_manual_selection(s, e)
+            panel.waveform.blockSignals(False)
+            turntable.set_track_selection(idx, s, e, color)
+
+        apply(compute_fracs_buffer_side(), SELECTION_COLOR_BUFFER,
+              self.buffer_panel, self.buffer_turntable)
+        apply(compute_fracs_clip_side(), SELECTION_COLOR_CLIP,
+              self.clip_panel, self.clip_turntable)
 
     def _refresh_source_names(self) -> None:
         """Propagate slot names from state into NavBar chips and the active
@@ -383,6 +483,11 @@ class TurntableWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Recompute selection fractions from stored abs samples (or defaults)
+        # so user selections drift with audio and the radial arc updates to
+        # the current fill fraction.
+        self._update_selection_display()
+
     def closeEvent(self, event) -> None:
         self._tick_timer.stop()
         self._state.shutdown()
@@ -405,7 +510,12 @@ class TurntableWindow(QMainWindow):
         if slot_index < self.clip_turntable.track_count():
             self.clip_turntable.select_track(slot_index)
         self._refresh_source_names()
-        self._apply_default_buffer_selection()
+        # Reset selection state for the new active slot.
+        self._buffer_sel_mode = "default"
+        self._buffer_sel_abs = None
+        self._clip_sel_mode = "default"
+        self._clip_sel_abs = None
+        self._update_selection_display()
         self._refresh_source_indicators()
 
     def _on_source_chip_context_menu(
