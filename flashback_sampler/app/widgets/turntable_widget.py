@@ -1,11 +1,13 @@
 """TurntableWidget — custom QPainter widget rendering the record turntable.
 
 Wireframe phase: empty concentric rings, colored track headers with status
-lights, center spindle with colored selector chips, and a needle arm line.
+lights, center spindle with colored selector chips, needle rail + chips,
+and a swing-arm needle anchored at the upper-inner corner of the disc.
 """
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QMouseEvent
@@ -16,6 +18,35 @@ from flashback_sampler.app.theme import EREBUS
 BUFFER_TRACK_COLORS = ["#EDF9B8", "#FABCBC", "#E3B9FF"]
 CLIP_TRACK_COLORS = ["#8123BF", "#48C2FF", "#FD35CB"]
 STATUS_COLORS = {"armed": "#FF0000", "paused": "#FF9500", "inactive": "#B3ACAC"}
+
+
+@dataclass(frozen=True)
+class TurntableGeometry:
+    cx: float
+    cy: float
+    disc_r: float
+    spindle_r: float
+    ring_gap: float
+    ring_width: float
+    rail_x: float       # top-left x of rail rect
+    rail_y: float       # top-left y of rail rect
+    rail_w: float
+    rail_h: float
+    chip_w: float
+    chip_h: float
+    anchor_x: float     # upper-inner corner x
+    anchor_y: float     # upper-inner corner y
+
+    def ring_radius(self, i: int) -> float:
+        return self.spindle_r + self.ring_gap * (i + 1) + self.ring_width * (i + 0.5)
+
+    def chip_center(self, side: str, i: int, n: int) -> tuple[float, float]:
+        if side == "buffer":
+            cx = self.rail_x + (i + 0.5) * self.rail_w / max(n, 1)
+        else:  # clip — reverse so innermost track is closest to rim
+            cx = self.rail_x + (n - 1 - i + 0.5) * self.rail_w / max(n, 1)
+        cy = self.rail_y + self.rail_h / 2
+        return cx, cy
 
 
 class TurntableWidget(QWidget):
@@ -63,30 +94,56 @@ class TurntableWidget(QWidget):
             colors.append(base[i % len(base)])
         return colors
 
-    def paintEvent(self, ev) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-
+    def _compute_geometry(self) -> TurntableGeometry:
         w, h = self.width(), self.height()
         size = min(w, h)
         cx, cy = w / 2, h / 2
-        colors = self._track_colors()
-
-        # Outer disc background
         disc_r = size * 0.46
-        p.setBrush(QColor(EREBUS["plate"]))
-        p.setPen(QPen(QColor(EREBUS["hairline_strong"]), 1))
-        p.drawEllipse(QPointF(cx, cy), disc_r, disc_r)
-
-        # Concentric track rings (innermost = track 0, outermost = last)
         spindle_r = size * 0.12
         ring_gap = 3
         track_area = disc_r - spindle_r - ring_gap * (self._track_count + 1)
         ring_width = track_area / max(self._track_count, 1)
 
+        rail_w = disc_r * 0.45
+        rail_h = max(12.0, disc_r * 0.10)
+        if self._side == "buffer":
+            rail_x = cx + disc_r + 4
+            anchor_x = cx + disc_r
+        else:  # clip
+            rail_x = cx - disc_r - 4 - rail_w
+            anchor_x = cx - disc_r
+        rail_y = cy - rail_h / 2
+        anchor_y = cy - disc_r
+
+        chip_w = chip_h = rail_h * 0.7
+        return TurntableGeometry(
+            cx=cx, cy=cy, disc_r=disc_r, spindle_r=spindle_r,
+            ring_gap=ring_gap, ring_width=ring_width,
+            rail_x=rail_x, rail_y=rail_y, rail_w=rail_w, rail_h=rail_h,
+            chip_w=chip_w, chip_h=chip_h,
+            anchor_x=anchor_x, anchor_y=anchor_y,
+        )
+
+    def geometry(self) -> TurntableGeometry:
+        """Public accessor for layout geometry — used by tests."""
+        return self._compute_geometry()
+
+    def paintEvent(self, ev) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        g = self._compute_geometry()
+        colors = self._track_colors()
+
+        # Outer disc background
+        p.setBrush(QColor(EREBUS["plate"]))
+        p.setPen(QPen(QColor(EREBUS["hairline_strong"]), 1))
+        p.drawEllipse(QPointF(g.cx, g.cy), g.disc_r, g.disc_r)
+
+        # Concentric track rings (innermost = track 0, outermost = last)
         for i in range(self._track_count):
-            r = spindle_r + ring_gap * (i + 1) + ring_width * (i + 0.5)
-            pen_width = max(ring_width * 0.6, 2)
+            r = g.ring_radius(i)
+            pen_width = max(g.ring_width * 0.6, 2)
             color = QColor(colors[i])
             if i == self._selected_track:
                 color.setAlpha(200)
@@ -96,16 +153,19 @@ class TurntableWidget(QWidget):
                 pen_w = pen_width
             p.setPen(QPen(color, pen_w))
             p.setBrush(Qt.NoBrush)
-            p.drawEllipse(QPointF(cx, cy), r, r)
+            p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
         # Track headers at play position (3 o'clock for buffer, 9 o'clock for clip)
         header_angle_rad = math.radians(self.header_angle_deg())
-        header_w = max(ring_width * 0.8, 6)
+        header_w = max(g.ring_width * 0.8, 6)
+        header_h = max(12, min(g.width() if hasattr(g, 'width') else g.disc_r * 2, g.disc_r * 2) * 0.04)
+        # Recompute header_h from size (disc_r / 0.46 = size)
+        size = g.disc_r / 0.46
         header_h = max(12, size * 0.04)
         for i in range(self._track_count):
-            r = spindle_r + ring_gap * (i + 1) + ring_width * (i + 0.5)
-            hx = cx + r * math.cos(header_angle_rad)
-            hy = cy - r * math.sin(header_angle_rad)
+            r = g.ring_radius(i)
+            hx = g.cx + r * math.cos(header_angle_rad)
+            hy = g.cy - r * math.sin(header_angle_rad)
             rect = QRectF(hx - header_w / 2, hy - header_h / 2, header_w, header_h)
             p.setBrush(QColor(colors[i]))
             p.setPen(Qt.NoPen)
@@ -119,15 +179,15 @@ class TurntableWidget(QWidget):
         # Center spindle
         p.setBrush(QColor(EREBUS["void"]))
         p.setPen(QPen(QColor(EREBUS["hairline_strong"]), 1))
-        p.drawEllipse(QPointF(cx, cy), spindle_r, spindle_r)
+        p.drawEllipse(QPointF(g.cx, g.cy), g.spindle_r, g.spindle_r)
 
         # Selector chips in center spindle (radial arrangement)
-        chip_r = max(4, spindle_r * 0.15)
-        chip_orbit = spindle_r * 0.6
+        chip_r = max(4, g.spindle_r * 0.15)
+        chip_orbit = g.spindle_r * 0.6
         for i in range(self._track_count):
             angle = 2 * math.pi * i / max(self._track_count, 1) - math.pi / 2
-            chip_x = cx + chip_orbit * math.cos(angle)
-            chip_y = cy + chip_orbit * math.sin(angle)
+            chip_x = g.cx + chip_orbit * math.cos(angle)
+            chip_y = g.cy + chip_orbit * math.sin(angle)
             color = QColor(colors[i])
             if i == self._selected_track:
                 color.setAlpha(255)
@@ -137,35 +197,16 @@ class TurntableWidget(QWidget):
             p.setPen(Qt.NoPen)
             p.drawEllipse(QPointF(chip_x, chip_y), chip_r, chip_r)
 
-        # Needle arm — line from outside disc to selected track ring
-        selected_r = spindle_r + ring_gap * (self._selected_track + 1) + ring_width * (self._selected_track + 0.5)
-        needle_start_r = disc_r + 8
-        # Needle enters from the side facing the center bridge:
-        # buffer = right side (0°), clip = left side (180°)
-        needle_angle = math.radians(self.header_angle_deg())
-        # Offset the needle slightly from the header so they don't overlap
-        needle_offset = math.radians(15 if self._side == "buffer" else -15)
-        nx_start = cx + needle_start_r * math.cos(needle_angle + needle_offset)
-        ny_start = cy - needle_start_r * math.sin(needle_angle + needle_offset)
-        nx_end = cx + selected_r * math.cos(needle_angle + needle_offset)
-        ny_end = cy - selected_r * math.sin(needle_angle + needle_offset)
-        p.setPen(QPen(QColor(EREBUS["cream"]), 2))
-        p.drawLine(QPointF(nx_start, ny_start), QPointF(nx_end, ny_end))
-        # Needle head (small circle at the track)
-        p.setBrush(QColor(EREBUS["ember"]))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(QPointF(nx_end, ny_end), 4, 4)
+        # ── Selector rail ─────────────────────────────────────────────────
+        rail_rect = QRectF(g.rail_x, g.rail_y, g.rail_w, g.rail_h)
+        p.setBrush(QColor(EREBUS["void"]))
+        p.setPen(QPen(QColor(EREBUS["hairline_strong"]), 1))
+        p.drawRect(rail_rect)
 
-        # Track selection tabs (stacked bars on the bridge-facing side)
-        tab_side = 1 if self._side == "buffer" else -1  # right or left
-        tab_x_base = cx + (disc_r + 14) * tab_side
-        tab_width = max(8, size * 0.03)
-        tab_height = max(ring_width * 0.7, 6)
-        total_tabs_h = self._track_count * (tab_height + 2)
-        tab_y_start = cy - total_tabs_h / 2
+        # ── Chips on rail ────────────────────────────────────────────────
         for i in range(self._track_count):
-            tx = tab_x_base - (tab_width if tab_side < 0 else 0)
-            ty = tab_y_start + i * (tab_height + 2)
+            chip_cx, chip_cy = g.chip_center(self._side, i, self._track_count)
+            chip_rect = QRectF(chip_cx - g.chip_w / 2, chip_cy - g.chip_h / 2, g.chip_w, g.chip_h)
             color = QColor(colors[i])
             if i == self._selected_track:
                 color.setAlpha(255)
@@ -173,33 +214,37 @@ class TurntableWidget(QWidget):
                 color.setAlpha(100)
             p.setBrush(color)
             p.setPen(Qt.NoPen)
-            p.drawRect(QRectF(tx, ty, tab_width, tab_height))
+            p.drawRect(chip_rect)
+            # Status indicator above chip
+            status = self._track_statuses[i] if i < len(self._track_statuses) else "inactive"
+            p.setBrush(QColor(STATUS_COLORS.get(status, "#B3ACAC")))
+            p.drawEllipse(QPointF(chip_cx, chip_cy - g.chip_h), 2, 2)
+
+        # ── Arm (needle) ─────────────────────────────────────────────────
+        sel_chip_cx, sel_chip_cy = g.chip_center(self._side, self._selected_track, self._track_count)
+        p.setPen(QPen(QColor(EREBUS["cream"]), 2))
+        p.drawLine(QPointF(g.anchor_x, g.anchor_y), QPointF(sel_chip_cx, sel_chip_cy))
+        p.setBrush(QColor(EREBUS["ember"]))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(sel_chip_cx, sel_chip_cy), 4, 4)
 
         p.end()
 
     def mousePressEvent(self, ev: QMouseEvent) -> None:
-        w, h = self.width(), self.height()
-        size = min(w, h)
-        cx, cy = w / 2, h / 2
+        g = self._compute_geometry()
         mx, my = ev.position().x(), ev.position().y()
 
-        spindle_r = size * 0.12
-        disc_r = size * 0.46
-        ring_gap = 3
-        track_area = disc_r - spindle_r - ring_gap * (self._track_count + 1)
-        ring_width = track_area / max(self._track_count, 1)
-
-        dist = math.hypot(mx - cx, my - cy)
+        dist = math.hypot(mx - g.cx, my - g.cy)
 
         # Click on spindle chips
-        if dist < spindle_r:
-            chip_orbit = spindle_r * 0.6
+        if dist < g.spindle_r:
+            chip_orbit = g.spindle_r * 0.6
             best = -1
             best_d = float("inf")
             for i in range(self._track_count):
                 angle = 2 * math.pi * i / max(self._track_count, 1) - math.pi / 2
-                chip_x = cx + chip_orbit * math.cos(angle)
-                chip_y = cy + chip_orbit * math.sin(angle)
+                chip_x = g.cx + chip_orbit * math.cos(angle)
+                chip_y = g.cy + chip_orbit * math.sin(angle)
                 d = math.hypot(mx - chip_x, my - chip_y)
                 if d < best_d:
                     best_d = d
@@ -210,21 +255,14 @@ class TurntableWidget(QWidget):
 
         # Click on a track ring
         for i in range(self._track_count):
-            r = spindle_r + ring_gap * (i + 1) + ring_width * (i + 0.5)
-            if abs(dist - r) < ring_width / 2:
+            if abs(dist - g.ring_radius(i)) < g.ring_width / 2:
                 self.select_track(i)
                 return
 
-        # Click on track tabs
-        tab_side = 1 if self._side == "buffer" else -1
-        tab_x_base = cx + (disc_r + 14) * tab_side
-        tab_width = max(8, size * 0.03)
-        tab_height = max(ring_width * 0.7, 6)
-        total_tabs_h = self._track_count * (tab_height + 2)
-        tab_y_start = cy - total_tabs_h / 2
+        # Click on rail chips
         for i in range(self._track_count):
-            tx = tab_x_base - (tab_width if tab_side < 0 else 0)
-            ty = tab_y_start + i * (tab_height + 2)
-            if tx <= mx <= tx + tab_width and ty <= my <= ty + tab_height:
+            chip_cx, chip_cy = g.chip_center(self._side, i, self._track_count)
+            chip_rect = QRectF(chip_cx - g.chip_w / 2, chip_cy - g.chip_h / 2, g.chip_w, g.chip_h)
+            if chip_rect.contains(QPointF(mx, my)):
                 self.select_track(i)
                 return
