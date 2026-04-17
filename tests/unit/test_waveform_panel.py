@@ -63,3 +63,9 @@ def test_container_holds_waveform_view(qapp):
     panel = WaveformPanel(side="buffer")
     # waveform should be a child (descendant) of container, not of the panel directly
     assert panel.waveform.parent() is panel.container
+
+
+def test_set_demo_waveform_runs(qapp):
+    panel = WaveformPanel(side="buffer")
+    panel.set_demo_waveform()
+    assert panel.waveform._bins is not None

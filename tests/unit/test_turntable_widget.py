@@ -1,6 +1,7 @@
 """Tests for TurntableWidget."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from PySide6.QtCore import QPointF, Qt, QEvent
 from PySide6.QtGui import QMouseEvent
@@ -112,3 +113,11 @@ def test_paint_event_no_exceptions(qapp):
     tt2 = TurntableWidget(side="clip")
     tt2.resize(300, 300)
     tt2.repaint()
+
+
+def test_set_track_waveform_stores_data(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    samples = np.zeros(100, dtype=np.float32)
+    tt.set_track_waveform(0, samples)
+    tt.repaint()  # must not raise

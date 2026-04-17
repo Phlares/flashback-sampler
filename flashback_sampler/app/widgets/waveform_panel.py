@@ -1,6 +1,7 @@
 """WaveformPanel — header labels + linear WaveformView + time readouts."""
 from __future__ import annotations
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
@@ -95,3 +96,17 @@ class WaveformPanel(QWidget):
     def set_times(self, left: str, right: str) -> None:
         self.time_left_label.setText(left)
         self.time_right_label.setText(right)
+
+    def set_demo_waveform(self) -> None:
+        """Populate the WaveformView with synthetic min/max bins for visual placeholder."""
+        n_bins = 200
+        channels = 2
+        rng = np.random.default_rng(seed=hash(self._side) & 0xFFFF)
+        t = np.linspace(0, 6 * np.pi, n_bins)
+        base = 0.6 * np.sin(t) + 0.2 * rng.standard_normal(n_bins)
+        # Shape (n_bins, 2, channels): first inner index is min, second is max
+        bins = np.zeros((n_bins, 2, channels), dtype=np.float32)
+        for ch in range(channels):
+            bins[:, 0, ch] = (base - 0.1 - 0.05 * rng.standard_normal(n_bins)).astype(np.float32)
+            bins[:, 1, ch] = (base + 0.1 + 0.05 * rng.standard_normal(n_bins)).astype(np.float32)
+        self.waveform.set_data(bins)
