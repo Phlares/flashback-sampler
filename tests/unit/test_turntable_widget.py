@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import QPointF, Qt, QEvent
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
@@ -60,3 +62,40 @@ def test_header_position_buffer(qapp):
 def test_header_position_clip(qapp):
     tt = TurntableWidget(side="clip")
     assert tt.header_angle_deg() == 180  # 9 o'clock
+
+
+def test_anchor_is_upper_inner_corner_buffer(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    g = tt.geometry()
+    assert abs(g.anchor_x - (g.cx + g.disc_r)) < 0.5
+    assert abs(g.anchor_y - (g.cy - g.disc_r)) < 0.5
+
+
+def test_anchor_is_upper_inner_corner_clip(qapp):
+    tt = TurntableWidget(side="clip")
+    tt.resize(300, 300)
+    g = tt.geometry()
+    assert abs(g.anchor_x - (g.cx - g.disc_r)) < 0.5
+    assert abs(g.anchor_y - (g.cy - g.disc_r)) < 0.5
+
+
+def test_chip_click_selects_track(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    g = tt.geometry()
+    target_idx = 1
+    chip_cx, chip_cy = g.chip_center("buffer", target_idx, tt.track_count())
+    pos = QPointF(chip_cx, chip_cy)
+    ev = QMouseEvent(QEvent.MouseButtonPress, pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    tt.mousePressEvent(ev)
+    assert tt.selected_track() == target_idx
+
+
+def test_paint_event_no_exceptions(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    tt.repaint()  # must not raise
+    tt2 = TurntableWidget(side="clip")
+    tt2.resize(300, 300)
+    tt2.repaint()
