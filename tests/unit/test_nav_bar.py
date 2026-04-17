@@ -57,3 +57,35 @@ def test_set_source_names_empty_uses_defaults(qapp):
     assert bar.source_slots[0]._name == "SOURCE 1"
     assert bar.source_slots[1]._name == "SOURCE 2"
     assert bar.source_slots[2]._name == "SOURCE 3"
+
+
+def test_source_indicator_right_click_emits_context_menu(qapp):
+    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtGui import QMouseEvent
+    from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+    ind = SourceIndicator(0, "SOURCE 1")
+    captured = []
+    ind.contextMenuRequested.connect(lambda p: captured.append(p))
+    ev = QMouseEvent(
+        QEvent.MouseButtonPress, QPoint(5, 5),
+        Qt.RightButton, Qt.RightButton, Qt.NoModifier,
+    )
+    ind.mousePressEvent(ev)
+    assert len(captured) == 1
+
+
+def test_source_indicator_left_click_only_emits_clicked(qapp):
+    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtGui import QMouseEvent
+    from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+    ind = SourceIndicator(0, "SOURCE 1")
+    clicks = []
+    ctx = []
+    ind.clicked.connect(lambda: clicks.append(1))
+    ind.contextMenuRequested.connect(lambda p: ctx.append(p))
+    ev = QMouseEvent(
+        QEvent.MouseButtonPress, QPoint(5, 5),
+        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier,
+    )
+    ind.mousePressEvent(ev)
+    assert len(clicks) == 1 and len(ctx) == 0
