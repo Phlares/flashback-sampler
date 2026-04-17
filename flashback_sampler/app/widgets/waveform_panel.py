@@ -1,8 +1,9 @@
 """WaveformPanel — header labels + linear WaveformView + time readouts."""
 from __future__ import annotations
 
+import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
 from flashback_sampler.app.theme import EREBUS, font_family
 from flashback_sampler.app.widgets.waveform_view import WaveformView
@@ -17,7 +18,7 @@ class WaveformPanel(QWidget):
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
 
-        # Header row
+        # Header row (stays OUTSIDE the container)
         header = QHBoxLayout()
         header.setSpacing(8)
 
@@ -50,10 +51,21 @@ class WaveformPanel(QWidget):
 
         layout.addLayout(header)
 
+        # Container: visible bordered box holding waveform + time readouts
+        self.container = QFrame(self)
+        self.container.setFrameShape(QFrame.NoFrame)
+        self.container.setStyleSheet(
+            f"QFrame {{ background-color: {EREBUS['plate']}; border: 1px solid {EREBUS['hairline_strong']}; }}"
+        )
+
+        inner = QVBoxLayout(self.container)
+        inner.setContentsMargins(4, 4, 4, 4)
+        inner.setSpacing(2)
+
         # Waveform view
         self.waveform = WaveformView()
         self.waveform.setMinimumHeight(40)
-        layout.addWidget(self.waveform, stretch=1)
+        inner.addWidget(self.waveform, stretch=1)
 
         # Time readouts
         time_row = QHBoxLayout()
@@ -68,7 +80,9 @@ class WaveformPanel(QWidget):
             f"color: {EREBUS['ash']}; font-size: 7pt;"
         )
         time_row.addWidget(self.time_right_label)
-        layout.addLayout(time_row)
+        inner.addLayout(time_row)
+
+        layout.addWidget(self.container, stretch=1)
 
     def set_source_name(self, name: str) -> None:
         self.source_label.setText(name)
@@ -82,3 +96,17 @@ class WaveformPanel(QWidget):
     def set_times(self, left: str, right: str) -> None:
         self.time_left_label.setText(left)
         self.time_right_label.setText(right)
+
+    def set_demo_waveform(self) -> None:
+        """Populate the WaveformView with synthetic min/max bins for visual placeholder."""
+        n_bins = 200
+        channels = 2
+        rng = np.random.default_rng(seed=hash(self._side) & 0xFFFF)
+        t = np.linspace(0, 6 * np.pi, n_bins)
+        base = 0.6 * np.sin(t) + 0.2 * rng.standard_normal(n_bins)
+        # Shape (n_bins, 2, channels): first inner index is min, second is max
+        bins = np.zeros((n_bins, 2, channels), dtype=np.float32)
+        for ch in range(channels):
+            bins[:, 0, ch] = (base - 0.1 - 0.05 * rng.standard_normal(n_bins)).astype(np.float32)
+            bins[:, 1, ch] = (base + 0.1 + 0.05 * rng.standard_normal(n_bins)).astype(np.float32)
+        self.waveform.set_data(bins)

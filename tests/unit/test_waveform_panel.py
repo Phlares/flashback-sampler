@@ -51,3 +51,21 @@ def test_set_duration_text(qapp):
     panel = WaveformPanel(side="buffer")
     panel.set_duration_text("3:00")
     assert panel.duration_label.text() == "3:00"
+
+
+def test_panel_has_container(qapp):
+    panel = WaveformPanel(side="buffer")
+    assert panel.container is not None
+    assert panel.container.parent() is panel
+
+
+def test_container_holds_waveform_view(qapp):
+    panel = WaveformPanel(side="buffer")
+    # waveform should be a child (descendant) of container, not of the panel directly
+    assert panel.waveform.parent() is panel.container
+
+
+def test_set_demo_waveform_runs(qapp):
+    panel = WaveformPanel(side="buffer")
+    panel.set_demo_waveform()
+    assert panel.waveform._bins is not None

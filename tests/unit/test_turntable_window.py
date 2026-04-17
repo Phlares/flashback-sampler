@@ -48,13 +48,16 @@ def test_window_has_nav_bar(qapp):
 def test_window_has_buffer_controls(qapp):
     win = TurntableWindow()
     labels = [b.text() for b in win.buffer_controls]
-    assert "FLUSH" in labels
-    assert "PAUSE" in labels
+    assert labels == ["FLUSH", "−", "+", "◀", "▶", "PAUSE"]
 
 
 def test_window_has_clip_controls(qapp):
     win = TurntableWindow()
     labels = [b.text() for b in win.clip_controls]
-    assert "LOOP" in labels
-    assert "PLAY" in labels
-    assert "SAVE" in labels
+    assert labels == ["PLAY", "−", "+", "◀", "▶", "SAVE"]
+
+
+def test_window_has_loop_button(qapp):
+    win = TurntableWindow()
+    assert win.loop_btn.text() == "LOOP"
+    assert win.loop_btn.isCheckable()
