@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QMouseEvent
+from PySide6.QtGui import QColor, QPainter, QPen, QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.theme import EREBUS
@@ -36,6 +36,7 @@ class TurntableGeometry:
     chip_h: float
     anchor_x: float     # upper-inner corner x
     anchor_y: float     # upper-inner corner y
+    size: float         # min(widget_w, widget_h)
 
     def ring_radius(self, i: int) -> float:
         return self.spindle_r + self.ring_gap * (i + 1) + self.ring_width * (i + 0.5)
@@ -47,6 +48,15 @@ class TurntableGeometry:
             cx = self.rail_x + (n - 1 - i + 0.5) * self.rail_w / max(n, 1)
         cy = self.rail_y + self.rail_h / 2
         return cx, cy
+
+    @property
+    def spindle_chip_r(self) -> float:
+        return max(4.0, self.spindle_r * 0.15)
+
+    def spindle_chip_center(self, i: int, n: int) -> tuple[float, float]:
+        angle = 2 * math.pi * i / max(n, 1) - math.pi / 2
+        orbit = self.spindle_r * 0.6
+        return self.cx + orbit * math.cos(angle), self.cy + orbit * math.sin(angle)
 
 
 class TurntableWidget(QWidget):
@@ -122,6 +132,7 @@ class TurntableWidget(QWidget):
             rail_x=rail_x, rail_y=rail_y, rail_w=rail_w, rail_h=rail_h,
             chip_w=chip_w, chip_h=chip_h,
             anchor_x=anchor_x, anchor_y=anchor_y,
+            size=size,
         )
 
     def geometry(self) -> TurntableGeometry:
@@ -158,10 +169,7 @@ class TurntableWidget(QWidget):
         # Track headers at play position (3 o'clock for buffer, 9 o'clock for clip)
         header_angle_rad = math.radians(self.header_angle_deg())
         header_w = max(g.ring_width * 0.8, 6)
-        header_h = max(12, min(g.width() if hasattr(g, 'width') else g.disc_r * 2, g.disc_r * 2) * 0.04)
-        # Recompute header_h from size (disc_r / 0.46 = size)
-        size = g.disc_r / 0.46
-        header_h = max(12, size * 0.04)
+        header_h = max(12, g.size * 0.04)
         for i in range(self._track_count):
             r = g.ring_radius(i)
             hx = g.cx + r * math.cos(header_angle_rad)
@@ -182,12 +190,8 @@ class TurntableWidget(QWidget):
         p.drawEllipse(QPointF(g.cx, g.cy), g.spindle_r, g.spindle_r)
 
         # Selector chips in center spindle (radial arrangement)
-        chip_r = max(4, g.spindle_r * 0.15)
-        chip_orbit = g.spindle_r * 0.6
         for i in range(self._track_count):
-            angle = 2 * math.pi * i / max(self._track_count, 1) - math.pi / 2
-            chip_x = g.cx + chip_orbit * math.cos(angle)
-            chip_y = g.cy + chip_orbit * math.sin(angle)
+            chip_x, chip_y = g.spindle_chip_center(i, self._track_count)
             color = QColor(colors[i])
             if i == self._selected_track:
                 color.setAlpha(255)
@@ -195,7 +199,7 @@ class TurntableWidget(QWidget):
                 color.setAlpha(120)
             p.setBrush(color)
             p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(chip_x, chip_y), chip_r, chip_r)
+            p.drawEllipse(QPointF(chip_x, chip_y), g.spindle_chip_r, g.spindle_chip_r)
 
         # ── Selector rail ─────────────────────────────────────────────────
         rail_rect = QRectF(g.rail_x, g.rail_y, g.rail_w, g.rail_h)
@@ -238,13 +242,10 @@ class TurntableWidget(QWidget):
 
         # Click on spindle chips
         if dist < g.spindle_r:
-            chip_orbit = g.spindle_r * 0.6
             best = -1
             best_d = float("inf")
             for i in range(self._track_count):
-                angle = 2 * math.pi * i / max(self._track_count, 1) - math.pi / 2
-                chip_x = g.cx + chip_orbit * math.cos(angle)
-                chip_y = g.cy + chip_orbit * math.sin(angle)
+                chip_x, chip_y = g.spindle_chip_center(i, self._track_count)
                 d = math.hypot(mx - chip_x, my - chip_y)
                 if d < best_d:
                     best_d = d
