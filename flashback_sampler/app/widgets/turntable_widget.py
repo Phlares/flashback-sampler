@@ -199,22 +199,34 @@ class TurntableWidget(QWidget):
                 p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
         # ── Selection arc on each track with a stored selection ─────────
+        # Body is 25% opacity; inner/outer edges are 1px fully-opaque strokes.
         for track_idx, (start_f, end_f, color_hex) in self._track_selections.items():
             if track_idx >= self._track_count:
                 continue
             r = g.ring_radius(track_idx)
-            # Map fraction 0 → play angle; fraction 1 → one full revolution counterclockwise
-            # back to play angle. play_angle_deg is 0 (buffer 3 o'clock) or 180 (clip 9 o'clock).
             play_angle_deg = self.header_angle_deg()
-            # Qt's drawArc uses 16ths of a degree; positive angles counterclockwise.
             start_angle = play_angle_deg - start_f * 360.0
-            span = -(end_f - start_f) * 360.0  # negative because sweep goes clockwise (with time)
-            rect = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
-            pen = QPen(QColor(color_hex), max(g.ring_width * 0.8, 3))
-            pen.setCapStyle(Qt.FlatCap)
-            p.setPen(pen)
+            span = -(end_f - start_f) * 360.0
+            band_w = max(g.ring_width * 0.8, 3)
             p.setBrush(Qt.NoBrush)
-            p.drawArc(rect, int(start_angle * 16), int(span * 16))
+
+            body = QColor(color_hex)
+            body.setAlphaF(0.25)
+            body_pen = QPen(body, band_w)
+            body_pen.setCapStyle(Qt.FlatCap)
+            p.setPen(body_pen)
+            rect_body = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
+            p.drawArc(rect_body, int(start_angle * 16), int(span * 16))
+
+            edge_pen = QPen(QColor(color_hex), 1)
+            edge_pen.setCapStyle(Qt.FlatCap)
+            p.setPen(edge_pen)
+            r_outer = r + band_w / 2
+            r_inner = r - band_w / 2
+            rect_outer = QRectF(g.cx - r_outer, g.cy - r_outer, 2 * r_outer, 2 * r_outer)
+            rect_inner = QRectF(g.cx - r_inner, g.cy - r_inner, 2 * r_inner, 2 * r_inner)
+            p.drawArc(rect_outer, int(start_angle * 16), int(span * 16))
+            p.drawArc(rect_inner, int(start_angle * 16), int(span * 16))
 
         # Track headers at play position (3 o'clock for buffer, 9 o'clock for clip)
         header_angle_rad = math.radians(self.header_angle_deg())
