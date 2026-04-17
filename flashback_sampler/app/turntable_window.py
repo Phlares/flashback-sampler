@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
+from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
@@ -334,7 +335,7 @@ class TurntableWindow(QMainWindow):
         slots = self._state.slots
         active_idx = self._state.active_slot_index
 
-        # Active slot → buffer panel's linear waveform view
+        # Active slot → buffer panel's linear waveform view + timestamps
         if 0 <= active_idx < len(slots):
             active_buf = slots[active_idx].buffer
             try:
@@ -344,6 +345,14 @@ class TurntableWindow(QMainWindow):
                 self.buffer_panel.waveform.set_data(bins)
             except Exception:
                 pass  # capture may not be running yet
+            # Update buffer panel time labels from real buffered_seconds
+            try:
+                buffered_s = float(active_buf.buffered_seconds)
+                left = format_time_signed_cs(-buffered_s)
+                right = "0:00.00"
+                self.buffer_panel.set_times(left, right)
+            except Exception:
+                pass
 
         # Each slot → its ring on the buffer turntable as a radial plot
         for i, slot in enumerate(slots):
@@ -367,9 +376,9 @@ class TurntableWindow(QMainWindow):
                 amp = (
                     (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
                 ).astype(np.float32)
-                peak = float(amp.max()) if amp.size else 0.0
-                if peak > 1e-6:
-                    amp = amp * (0.9 / peak)
+                # Bins are already in [-1, 1] from float audio; peak-to-peak/2 is in [0, 1].
+                # Clip defensively; no renormalization.
+                amp = np.clip(amp, 0.0, 1.0)
                 self.buffer_turntable.set_track_waveform(i, amp, fill_fraction=fill_frac)
             except Exception:
                 pass
