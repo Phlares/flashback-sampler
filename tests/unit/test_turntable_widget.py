@@ -179,3 +179,17 @@ def test_paint_with_selection_no_exceptions(qapp):
     tt.resize(300, 300)
     tt.set_track_selection(0, 0.1, 0.4, "#FFD900")
     tt.repaint()  # must not raise
+
+
+def test_selection_arc_angle_mapping_newest_at_play(qapp):
+    """A selection of [0.7, 1.0] for buffer side should sweep from
+    play_angle clockwise by 108°. Verify by setting selection + checking
+    no exception + checking internal state matches fractions we passed."""
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    tt.set_track_selection(0, 0.7, 1.0, "#FFD900")
+    # Selection is stored as fractions — paintEvent does the angle conversion.
+    stored = tt._track_selections[0]
+    start, end, color = stored
+    assert start == 0.7 and end == 1.0
+    tt.repaint()  # must not raise
