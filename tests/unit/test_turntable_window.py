@@ -61,3 +61,23 @@ def test_window_has_loop_button(qapp):
     win = TurntableWindow()
     assert win.loop_btn.text() == "LOOP"
     assert win.loop_btn.isCheckable()
+
+
+def test_buffer_selection_updates_disc(qapp):
+    win = TurntableWindow()
+    # Emit a selection change
+    win.buffer_panel.waveform.manualSelectionChanged.emit(0.1, 0.3)
+    idx = win.buffer_turntable.selected_track()
+    assert idx in win.buffer_turntable._track_selections
+    start, end, color = win.buffer_turntable._track_selections[idx]
+    assert abs(start - 0.1) < 1e-6 and abs(end - 0.3) < 1e-6
+    assert color == "#FFD900"
+
+
+def test_clip_selection_updates_disc(qapp):
+    win = TurntableWindow()
+    win.clip_panel.waveform.manualSelectionChanged.emit(0.2, 0.5)
+    idx = win.clip_turntable.selected_track()
+    assert idx in win.clip_turntable._track_selections
+    _, _, color = win.clip_turntable._track_selections[idx]
+    assert color == "#FF9500"

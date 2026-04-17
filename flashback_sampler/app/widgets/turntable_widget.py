@@ -80,6 +80,7 @@ class TurntableWidget(QWidget):
         self._selected_track = 0
         self._track_statuses: list[str] = ["armed", "armed", "paused"]
         self._track_waveforms: dict[int, "np.ndarray"] = {}
+        self._track_selections: dict[int, tuple[float, float, str]] = {}
         self.setMinimumSize(200, 200)
 
     def side(self) -> str:
@@ -113,6 +114,15 @@ class TurntableWidget(QWidget):
         """Store a 1D float32 ndarray of normalized amplitudes [-1.0, 1.0]
         to be plotted radially around the given track's ring. Triggers repaint."""
         self._track_waveforms[track_idx] = np.asarray(samples, dtype=np.float32)
+        self.update()
+
+    def set_track_selection(self, track_idx: int, start_frac: float | None, end_frac: float | None, color: str) -> None:
+        """Store or clear a selection range on a track's ring.
+        Passing None for either bound clears the selection for that track."""
+        if start_frac is None or end_frac is None or end_frac <= start_frac:
+            self._track_selections.pop(track_idx, None)
+        else:
+            self._track_selections[track_idx] = (float(start_frac), float(end_frac), color)
         self.update()
 
     def _track_colors(self) -> list[str]:
@@ -187,6 +197,24 @@ class TurntableWidget(QWidget):
                     p.drawEllipse(QPointF(g.cx, g.cy), r, r)
             else:
                 p.drawEllipse(QPointF(g.cx, g.cy), r, r)
+
+        # ── Selection arc on each track with a stored selection ─────────
+        for track_idx, (start_f, end_f, color_hex) in self._track_selections.items():
+            if track_idx >= self._track_count:
+                continue
+            r = g.ring_radius(track_idx)
+            # Map fraction 0 → play angle; fraction 1 → one full revolution counterclockwise
+            # back to play angle. play_angle_deg is 0 (buffer 3 o'clock) or 180 (clip 9 o'clock).
+            play_angle_deg = self.header_angle_deg()
+            # Qt's drawArc uses 16ths of a degree; positive angles counterclockwise.
+            start_angle = play_angle_deg - start_f * 360.0
+            span = -(end_f - start_f) * 360.0  # negative because sweep goes clockwise (with time)
+            rect = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
+            pen = QPen(QColor(color_hex), max(g.ring_width * 0.8, 3))
+            pen.setCapStyle(Qt.FlatCap)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(rect, int(start_angle * 16), int(span * 16))
 
         # Track headers at play position (3 o'clock for buffer, 9 o'clock for clip)
         header_angle_rad = math.radians(self.header_angle_deg())
