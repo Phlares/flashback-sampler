@@ -174,27 +174,39 @@ class TurntableWidget(QWidget):
         # Concentric track rings (innermost = track 0, outermost = last)
         for i in range(self._track_count):
             r = g.ring_radius(i)
-            # Always draw the clean ring outline as the base layer
-            ring_color = QColor(colors[i])
+            # Dark neutral ring — waveform bars stand out against it
+            ring_outline_color = QColor(EREBUS["plate"])
             if i == self._selected_track:
-                ring_color.setAlpha(180)
-                ring_pen_w = max(g.ring_width * 0.5, 2) * 1.3
-            else:
-                ring_color.setAlpha(60)
-                ring_pen_w = max(g.ring_width * 0.5, 2)
-            p.setPen(QPen(ring_color, ring_pen_w))
+                ring_outline_color = QColor(EREBUS["ash"])  # slightly lighter to indicate selection
+            ring_outline_color.setAlpha(180)
+            ring_pen_w = max(g.ring_width * 0.5, 2)
+            p.setPen(QPen(ring_outline_color, ring_pen_w))
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
-            # Draw waveform bars only within the filled portion
+            # Fill-indicator arc: always visible even during silence
             entry = self._track_waveforms.get(i)
+            if entry is not None:
+                samples, fill_frac = entry
+                if fill_frac > 1e-4:
+                    fill_color = QColor(colors[i])
+                    fill_color.setAlpha(90 if i == self._selected_track else 45)
+                    fill_pen = QPen(fill_color, max(g.ring_width * 0.35, 2))
+                    fill_pen.setCapStyle(Qt.FlatCap)
+                    p.setPen(fill_pen)
+                    fill_start_deg = self.header_angle_deg()  # newest edge at play angle
+                    fill_span_deg = -fill_frac * 360.0        # clockwise
+                    rect = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
+                    p.drawArc(rect, int(fill_start_deg * 16), int(fill_span_deg * 16))
+
+            # Draw waveform bars on top of fill arc
             if entry is None:
                 continue
             samples, fill_frac = entry
             if fill_frac < 1e-4 or samples.size == 0:
                 continue
             bar_color = QColor(colors[i])
-            bar_color.setAlpha(255 if i == self._selected_track else 140)
+            bar_color.setAlpha(255 if i == self._selected_track else 180)
             bar_pen = QPen(bar_color, 1)
             bar_pen.setCapStyle(Qt.FlatCap)
             p.setPen(bar_pen)
@@ -202,11 +214,11 @@ class TurntableWidget(QWidget):
             play_angle_rad = math.radians(self.header_angle_deg())
             n = int(samples.size)
             for j in range(n):
-                t = j / n if n > 0 else 0.0
-                theta = play_angle_rad - t * arc_span_rad
+                t = (j / (n - 1)) if n > 1 else 1.0  # t=0 at oldest, t=1 at newest
+                theta = play_angle_rad - (1.0 - t) * arc_span_rad
+                # At t=1 (newest): theta = play_angle (correct)
+                # At t=0 (oldest): theta = play_angle - arc_span (clockwise behind)
                 a = max(0.0, min(1.0, float(samples[j])))
-                if a < 0.02:
-                    continue  # skip near-zero bars for clarity
                 r_inner = r - g.ring_width * 0.35 * a
                 r_outer = r + g.ring_width * 0.35 * a
                 ct = math.cos(theta)
@@ -224,7 +236,8 @@ class TurntableWidget(QWidget):
                 continue
             r = g.ring_radius(track_idx)
             play_angle_deg = self.header_angle_deg()
-            start_angle = play_angle_deg - start_f * 360.0
+            # Newer edge (end_f) sits at play_angle. Sweep CW (negative) to older edge.
+            start_angle = play_angle_deg - (1.0 - end_f) * 360.0
             span = -(end_f - start_f) * 360.0
             band_w = max(g.ring_width * 0.8, 3)
             p.setBrush(Qt.NoBrush)
