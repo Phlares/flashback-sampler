@@ -145,6 +145,7 @@ class TurntableWindow(QMainWindow):
         self._tick_timer.start()
 
         self._refresh_source_names()
+        self._apply_default_buffer_selection()
 
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
@@ -221,6 +222,7 @@ class TurntableWindow(QMainWindow):
         if other.selected_track() != index:
             other.select_track(index)
         self._refresh_source_names()
+        self._apply_default_buffer_selection()
 
     def _on_arm_all(self) -> None:
         for slot in self._state.slots:
@@ -281,6 +283,33 @@ class TurntableWindow(QMainWindow):
             else:
                 chip.set_status("inactive")
 
+    def _apply_default_buffer_selection(self) -> None:
+        """Paint the default checkout-range selection (3:00 back from now)
+        on the buffer waveform + the active track's disc ring."""
+        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+        capacity_s = slot.buffer.duration
+        if capacity_s <= 0:
+            return
+        preset_idx = max(0, min(len(DEFAULT_PRESETS) - 1, slot.duration_preset_idx))
+        duration_s = DEFAULT_PRESETS[preset_idx]
+        anchor_s = max(0.0, slot.anchor_offset_s)
+        end_frac = max(0.0, min(1.0, 1.0 - anchor_s / capacity_s))
+        start_frac = max(0.0, min(1.0, 1.0 - (anchor_s + duration_s) / capacity_s))
+        if end_frac <= start_frac:
+            return
+        # Linear waveform (block the signal so it doesn't re-fire into set_track_selection)
+        self.buffer_panel.waveform.blockSignals(True)
+        self.buffer_panel.waveform.set_manual_selection(start_frac, end_frac)
+        self.buffer_panel.waveform.blockSignals(False)
+        # Disc selection arc
+        idx = self._state.active_slot_index
+        self.buffer_turntable.set_track_selection(
+            idx, start_frac, end_frac, SELECTION_COLOR_BUFFER
+        )
+
     def _refresh_source_names(self) -> None:
         """Propagate slot names from state into NavBar chips and the active
         waveform panel's source label."""
@@ -321,19 +350,27 @@ class TurntableWindow(QMainWindow):
             if i >= self.buffer_turntable.track_count():
                 break
             try:
-                bins = slot.buffer.get_peak_bins(
-                    seconds=slot.buffer.duration, n_bins=540
-                )
-                # Reduce (n_bins, 2, channels) → 1-D amplitude [-1, 1].
-                # Use max across channels of the high side (max), then
-                # convert to a symmetric amp around 0 by taking (max-min)/2.
-                amp = ((bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0)
-                amp = amp.astype(np.float32)
-                # Normalize so strongest bin across entire array hits ~0.9
+                buffered_s = slot.buffered_seconds()
+                capacity_s = slot.buffer.duration
+                fill_frac = 0.0
+                if capacity_s > 0:
+                    fill_frac = max(0.0, min(1.0, buffered_s / capacity_s))
+                if fill_frac < 1e-4:
+                    # No data yet — clear the ring waveform
+                    self.buffer_turntable.set_track_waveform(
+                        i, np.zeros(0, dtype=np.float32), fill_fraction=0.0
+                    )
+                    continue
+                n_bins = max(16, int(360 * fill_frac))
+                bins = slot.buffer.get_peak_bins(seconds=buffered_s, n_bins=n_bins)
+                # Peak amplitude per bin: half the peak-to-peak over channels
+                amp = (
+                    (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
+                ).astype(np.float32)
                 peak = float(amp.max()) if amp.size else 0.0
                 if peak > 1e-6:
                     amp = amp * (0.9 / peak)
-                self.buffer_turntable.set_track_waveform(i, amp)
+                self.buffer_turntable.set_track_waveform(i, amp, fill_fraction=fill_frac)
             except Exception:
                 pass
 
@@ -359,6 +396,7 @@ class TurntableWindow(QMainWindow):
         if slot_index < self.clip_turntable.track_count():
             self.clip_turntable.select_track(slot_index)
         self._refresh_source_names()
+        self._apply_default_buffer_selection()
         self._refresh_source_indicators()
 
     def _on_source_chip_context_menu(
