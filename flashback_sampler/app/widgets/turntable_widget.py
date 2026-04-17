@@ -9,8 +9,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPen, QMouseEvent
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.theme import EREBUS
@@ -68,6 +69,7 @@ class TurntableWidget(QWidget):
         self._track_count = 3
         self._selected_track = 0
         self._track_statuses: list[str] = ["armed", "armed", "paused"]
+        self._track_waveforms: dict[int, "np.ndarray"] = {}
         self.setMinimumSize(200, 200)
 
     def side(self) -> str:
@@ -96,6 +98,12 @@ class TurntableWidget(QWidget):
 
     def header_angle_deg(self) -> int:
         return 0 if self._side == "buffer" else 180
+
+    def set_track_waveform(self, track_idx: int, samples: np.ndarray) -> None:
+        """Store a 1D float32 ndarray of normalized amplitudes [-1.0, 1.0]
+        to be plotted radially around the given track's ring. Triggers repaint."""
+        self._track_waveforms[track_idx] = np.asarray(samples, dtype=np.float32)
+        self.update()
 
     def _track_colors(self) -> list[str]:
         base = BUFFER_TRACK_COLORS if self._side == "buffer" else CLIP_TRACK_COLORS
@@ -154,17 +162,36 @@ class TurntableWidget(QWidget):
         # Concentric track rings (innermost = track 0, outermost = last)
         for i in range(self._track_count):
             r = g.ring_radius(i)
-            pen_width = max(g.ring_width * 0.6, 2)
             color = QColor(colors[i])
             if i == self._selected_track:
-                color.setAlpha(200)
-                pen_w = pen_width * 1.3
+                color.setAlpha(255)
+                pen_w = max(g.ring_width * 0.5, 2) * 1.3
             else:
                 color.setAlpha(80)
-                pen_w = pen_width
+                pen_w = max(g.ring_width * 0.5, 2)
             p.setPen(QPen(color, pen_w))
             p.setBrush(Qt.NoBrush)
-            p.drawEllipse(QPointF(g.cx, g.cy), r, r)
+
+            if i in self._track_waveforms:
+                samples = self._track_waveforms[i]
+                n = len(samples)
+                if n > 0:
+                    path = QPainterPath()
+                    for j in range(n):
+                        theta = 2 * math.pi * j / n
+                        r_j = r + float(samples[j]) * (g.ring_width * 0.4)
+                        x = g.cx + r_j * math.cos(theta)
+                        y = g.cy - r_j * math.sin(theta)
+                        if j == 0:
+                            path.moveTo(x, y)
+                        else:
+                            path.lineTo(x, y)
+                    path.closeSubpath()
+                    p.drawPath(path)
+                else:
+                    p.drawEllipse(QPointF(g.cx, g.cy), r, r)
+            else:
+                p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
         # Track headers at play position (3 o'clock for buffer, 9 o'clock for clip)
         header_angle_rad = math.radians(self.header_angle_deg())

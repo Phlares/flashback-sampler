@@ -4,6 +4,7 @@ Parallel to MainWindow. Launch with --ui turntable.
 """
 from __future__ import annotations
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -113,3 +114,16 @@ class TurntableWindow(QMainWindow):
         # ── Row 4: Nav Bar ───────────────────────────────────────────
         self.nav_bar = NavBar()
         root.addWidget(self.nav_bar)
+
+        self._populate_demo_data()
+
+    def _populate_demo_data(self) -> None:
+        rng = np.random.default_rng(seed=42)
+        for tt in (self.buffer_turntable, self.clip_turntable):
+            for i in range(tt.track_count()):
+                n = 540
+                t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+                amp = 0.4 * np.sin(t * (2 + i)) + 0.15 * rng.standard_normal(n)
+                tt.set_track_waveform(i, amp.astype(np.float32))
+        self.buffer_panel.set_demo_waveform()
+        self.clip_panel.set_demo_waveform()
