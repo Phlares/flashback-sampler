@@ -76,7 +76,7 @@ class TurntableWindow(QMainWindow):
         controls_row.setSpacing(4)
 
         self.buffer_controls: list[TactileButton] = []
-        for label in ["FLUSH", "−", "◀", "▶", "+", "PAUSE"]:
+        for label in ["FLUSH", "−", "+", "◀", "▶", "PAUSE"]:
             btn = TactileButton(label, variant="secondary")
             btn.setMinimumWidth(40)
             btn.setMinimumHeight(36)
@@ -85,8 +85,16 @@ class TurntableWindow(QMainWindow):
 
         controls_row.addStretch()
 
+        self.loop_btn = TactileButton("LOOP", variant="primary")
+        self.loop_btn.setCheckable(True)
+        self.loop_btn.setMinimumWidth(40)
+        self.loop_btn.setMinimumHeight(36)
+        controls_row.addWidget(self.loop_btn)
+
+        controls_row.addStretch()
+
         self.clip_controls: list[TactileButton] = []
-        for label in ["LOOP", "PLAY", "◀", "−", "+", "▶", "SAVE"]:
+        for label in ["PLAY", "−", "+", "◀", "▶", "SAVE"]:
             btn = TactileButton(label, variant="secondary")
             btn.setMinimumWidth(40)
             btn.setMinimumHeight(36)
