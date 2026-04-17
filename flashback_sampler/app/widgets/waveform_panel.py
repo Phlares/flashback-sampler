@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
 from flashback_sampler.app.theme import EREBUS, font_family
-from flashback_sampler.app.widgets.waveform_view import WaveformView
+from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
 
 
 class WaveformPanel(QWidget):
@@ -63,7 +63,7 @@ class WaveformPanel(QWidget):
         inner.setSpacing(2)
 
         # Waveform view
-        self.waveform = WaveformView()
+        self.waveform = SelectableWaveform()
         self.waveform.setMinimumHeight(40)
         inner.addWidget(self.waveform, stretch=1)
 

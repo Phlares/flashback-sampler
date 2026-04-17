@@ -124,3 +124,31 @@ def test_set_track_waveform_stores_data(qapp):
     samples = np.zeros(100, dtype=np.float32)
     tt.set_track_waveform(0, samples)
     tt.repaint()  # must not raise
+
+
+def test_set_track_selection_stores_range(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.set_track_selection(1, 0.2, 0.4, "#FFD900")
+    assert 1 in tt._track_selections
+    start, end, color = tt._track_selections[1]
+    assert start == 0.2 and end == 0.4 and color == "#FFD900"
+
+
+def test_set_track_selection_clears_on_none(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.set_track_selection(1, 0.2, 0.4, "#FFD900")
+    tt.set_track_selection(1, None, None, "#FFD900")
+    assert 1 not in tt._track_selections
+
+
+def test_set_track_selection_clears_on_zero_span(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.set_track_selection(1, 0.5, 0.5, "#FFD900")
+    assert 1 not in tt._track_selections
+
+
+def test_paint_with_selection_no_exceptions(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    tt.set_track_selection(0, 0.1, 0.4, "#FFD900")
+    tt.repaint()  # must not raise

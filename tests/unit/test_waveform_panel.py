@@ -69,3 +69,9 @@ def test_set_demo_waveform_runs(qapp):
     panel = WaveformPanel(side="buffer")
     panel.set_demo_waveform()
     assert panel.waveform._bins is not None
+
+
+def test_panel_uses_selectable_waveform(qapp):
+    from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
+    panel = WaveformPanel(side="buffer")
+    assert isinstance(panel.waveform, SelectableWaveform)
