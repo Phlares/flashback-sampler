@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (
 )
 
 from flashback_sampler.app.theme import EREBUS
+
+SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
+SELECTION_COLOR_CLIP = "#FF9500"     # orange
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
 from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
@@ -83,31 +86,36 @@ class TurntableWindow(QMainWindow):
         controls_row = QHBoxLayout()
         controls_row.setSpacing(4)
 
+        # Left column: buffer controls packed tight, then stretch to push right
+        buffer_col = QHBoxLayout()
+        buffer_col.setSpacing(4)
         self.buffer_controls: list[TactileButton] = []
         for label in ["FLUSH", "−", "+", "◀", "▶", "PAUSE"]:
             btn = TactileButton(label, variant="secondary")
-            btn.setMinimumWidth(40)
-            btn.setMinimumHeight(36)
+            btn.setMinimumWidth(40); btn.setMinimumHeight(36)
             self.buffer_controls.append(btn)
-            controls_row.addWidget(btn)
+            buffer_col.addWidget(btn)
+        buffer_col.addStretch()
+        controls_row.addLayout(buffer_col, stretch=1)
 
-        controls_row.addStretch()
-
+        # Center column: LOOP, exact column width, no flanking stretches in THIS layout
         self.loop_btn = TactileButton("LOOP", variant="primary")
         self.loop_btn.setCheckable(True)
-        self.loop_btn.setFixedWidth(56)          # matches OUT→ for column alignment
+        self.loop_btn.setFixedWidth(56)
         self.loop_btn.setMinimumHeight(36)
         controls_row.addWidget(self.loop_btn)
 
-        controls_row.addStretch()
-
+        # Right column: stretch first, then clip controls
+        clip_col = QHBoxLayout()
+        clip_col.setSpacing(4)
+        clip_col.addStretch()
         self.clip_controls: list[TactileButton] = []
         for label in ["PLAY", "−", "+", "◀", "▶", "SAVE"]:
             btn = TactileButton(label, variant="secondary")
-            btn.setMinimumWidth(40)
-            btn.setMinimumHeight(36)
+            btn.setMinimumWidth(40); btn.setMinimumHeight(36)
             self.clip_controls.append(btn)
-            controls_row.addWidget(btn)
+            clip_col.addWidget(btn)
+        controls_row.addLayout(clip_col, stretch=1)
 
         root.addLayout(controls_row, stretch=1)
 
@@ -116,6 +124,42 @@ class TurntableWindow(QMainWindow):
         root.addWidget(self.nav_bar)
 
         self._populate_demo_data()
+
+        # Seed a visible default selection so the user can see the feature
+        self.buffer_panel.waveform.set_manual_selection(0.3, 0.55)
+        self.buffer_turntable.set_track_selection(
+            self.buffer_turntable.selected_track(), 0.3, 0.55, SELECTION_COLOR_BUFFER
+        )
+        self.clip_panel.waveform.set_manual_selection(0.15, 0.75)
+        self.clip_turntable.set_track_selection(
+            self.clip_turntable.selected_track(), 0.15, 0.75, SELECTION_COLOR_CLIP
+        )
+
+        self._wire_selection_sync()
+
+    def _wire_selection_sync(self) -> None:
+        """When user drags a selection on a waveform, paint the matching arc
+        on the currently-selected track of that side's record."""
+        def on_buffer_sel(start: float, end: float) -> None:
+            idx = self.buffer_turntable.selected_track()
+            self.buffer_turntable.set_track_selection(idx, start, end, SELECTION_COLOR_BUFFER)
+
+        def on_buffer_clear() -> None:
+            idx = self.buffer_turntable.selected_track()
+            self.buffer_turntable.set_track_selection(idx, None, None, SELECTION_COLOR_BUFFER)
+
+        def on_clip_sel(start: float, end: float) -> None:
+            idx = self.clip_turntable.selected_track()
+            self.clip_turntable.set_track_selection(idx, start, end, SELECTION_COLOR_CLIP)
+
+        def on_clip_clear() -> None:
+            idx = self.clip_turntable.selected_track()
+            self.clip_turntable.set_track_selection(idx, None, None, SELECTION_COLOR_CLIP)
+
+        self.buffer_panel.waveform.manualSelectionChanged.connect(on_buffer_sel)
+        self.buffer_panel.waveform.manualSelectionCleared.connect(on_buffer_clear)
+        self.clip_panel.waveform.manualSelectionChanged.connect(on_clip_sel)
+        self.clip_panel.waveform.manualSelectionCleared.connect(on_clip_clear)
 
     def _populate_demo_data(self) -> None:
         rng = np.random.default_rng(seed=42)
