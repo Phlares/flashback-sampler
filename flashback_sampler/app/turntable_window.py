@@ -5,15 +5,20 @@ Parallel to MainWindow. Launch with --ui turntable.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
+from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
 
@@ -132,10 +137,17 @@ class TurntableWindow(QMainWindow):
 
         self._wire_selection_sync()
         self._wire_controls()
-        # TEMP: synthetic waveform placeholder. Real audio polling lands in
-        # Phase 2 along with OUT→, PLAY, and buffer playhead wiring.
-        self._populate_demo_data()
+
+        # Live audio polling @ ~30 Hz
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(33)
+        self._tick_timer.timeout.connect(self._tick)
+        self._tick_timer.start()
+
         self._refresh_source_names()
+
+        # Lazy-create status bar for surfacing non-modal messages.
+        self.statusBar().showMessage("Ready", 0)
 
     def _wire_selection_sync(self) -> None:
         """When user drags a selection on a waveform, paint the matching arc
@@ -176,9 +188,13 @@ class TurntableWindow(QMainWindow):
         # NavBar actions
         self.nav_bar.arm_all_btn.clicked.connect(self._on_arm_all)
         self.nav_bar.add_source_btn.clicked.connect(self._on_add_source)
-        # Per-source chips in the NavBar — clicking toggles armed state
+        # Per-source chips in the NavBar — left-click toggles armed state,
+        # right-click opens the per-source context menu.
         for i, slot_chip in enumerate(self.nav_bar.source_slots):
             slot_chip.clicked.connect(lambda _=None, idx=i: self._on_source_chip_clicked(idx))
+            slot_chip.contextMenuRequested.connect(
+                lambda pos, idx=i: self._on_source_chip_context_menu(idx, pos)
+            )
         self._refresh_source_indicators()
 
     def _on_start_clicked(self) -> None:
@@ -277,6 +293,275 @@ class TurntableWindow(QMainWindow):
         self.buffer_panel.set_source_name(active_name.upper())
         # Clip panel's source label stays "CLIP" for now (clip-side names
         # belong to checkouts which come in a later phase)
+
+    # ------------------------------------------------------------------
+    # Live audio polling
+    # ------------------------------------------------------------------
+
+    def _tick(self) -> None:
+        """Pull peak-bin data from each slot's buffer and push into UI.
+        Active slot drives the buffer WaveformPanel; each slot's bins
+        also go to its corresponding track ring as a radial plot."""
+        slots = self._state.slots
+        active_idx = self._state.active_slot_index
+
+        # Active slot → buffer panel's linear waveform view
+        if 0 <= active_idx < len(slots):
+            active_buf = slots[active_idx].buffer
+            try:
+                bins = active_buf.get_peak_bins(
+                    seconds=active_buf.duration, n_bins=360
+                )
+                self.buffer_panel.waveform.set_data(bins)
+            except Exception:
+                pass  # capture may not be running yet
+
+        # Each slot → its ring on the buffer turntable as a radial plot
+        for i, slot in enumerate(slots):
+            if i >= self.buffer_turntable.track_count():
+                break
+            try:
+                bins = slot.buffer.get_peak_bins(
+                    seconds=slot.buffer.duration, n_bins=540
+                )
+                # Reduce (n_bins, 2, channels) → 1-D amplitude [-1, 1].
+                # Use max across channels of the high side (max), then
+                # convert to a symmetric amp around 0 by taking (max-min)/2.
+                amp = ((bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0)
+                amp = amp.astype(np.float32)
+                # Normalize so strongest bin across entire array hits ~0.9
+                peak = float(amp.max()) if amp.size else 0.0
+                if peak > 1e-6:
+                    amp = amp * (0.9 / peak)
+                self.buffer_turntable.set_track_waveform(i, amp)
+            except Exception:
+                pass
+
+    def closeEvent(self, event) -> None:
+        self._tick_timer.stop()
+        self._state.shutdown()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Per-source context menu
+    # ------------------------------------------------------------------
+
+    def _switch_to_slot(self, slot_index: int) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        try:
+            self._state.set_active_slot_index(slot_index)
+        except IndexError:
+            return
+        # Mirror on both turntables
+        if slot_index < self.buffer_turntable.track_count():
+            self.buffer_turntable.select_track(slot_index)
+        if slot_index < self.clip_turntable.track_count():
+            self.clip_turntable.select_track(slot_index)
+        self._refresh_source_names()
+        self._refresh_source_indicators()
+
+    def _on_source_chip_context_menu(
+        self, slot_index: int, global_pos: QPoint
+    ) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        can_remove = len(self._state.slots) > 1
+        has_buffered = slot.buffered_seconds() > 0.1
+
+        menu = QMenu(self)
+
+        switch_act = QAction(f"Switch to {slot.name}", self)
+        switch_act.setEnabled(slot_index != self._state.active_slot_index)
+        switch_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._switch_to_slot(i)
+        )
+        menu.addAction(switch_act)
+
+        prime_label = "Stop Recording" if slot.is_capturing() else "Start Recording"
+        prime_act = QAction(prime_label, self)
+        prime_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._on_source_chip_clicked(i)
+        )
+        menu.addAction(prime_act)
+
+        menu.addSeparator()
+
+        # Capture Source submenu — per-slot device routing. "Use
+        # Default (global)" at the top sets slot.capture_spec = None so
+        # the slot follows whatever the Audio menu has selected.
+        cap_menu = menu.addMenu("Capture Source")
+        self._populate_slot_capture_source_menu(cap_menu, slot_index)
+
+        menu.addSeparator()
+
+        flush_act = QAction("Flush Buffer…", self)
+        flush_act.setEnabled(has_buffered)
+        flush_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._flush_slot_buffer(i)
+        )
+        menu.addAction(flush_act)
+
+        menu.addSeparator()
+
+        remove_act = QAction("Remove Source…", self)
+        remove_act.setEnabled(can_remove)
+        remove_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._remove_slot_with_confirmation(i)
+        )
+        menu.addAction(remove_act)
+
+        qpt = QPoint(int(global_pos.x()), int(global_pos.y()))
+        menu.exec(qpt)
+
+    def _populate_slot_capture_source_menu(
+        self, cap_menu: QMenu, slot_index: int
+    ) -> None:
+        """Build (or rebuild) the per-slot Capture Source submenu."""
+        slot = self._state.slots[slot_index]
+        current_spec = self._state.effective_capture_spec_for_slot(slot)
+        using_override = slot.capture_spec is not None
+
+        group = QActionGroup(cap_menu)
+        group.setExclusive(True)
+
+        global_default = QAction("Use Default (global)", cap_menu)
+        global_default.setCheckable(True)
+        global_default.setChecked(not using_override)
+        global_default.triggered.connect(
+            lambda _c=False, i=slot_index: self._set_slot_capture_spec(i, None)
+        )
+        group.addAction(global_default)
+        cap_menu.addAction(global_default)
+
+        cap_menu.addSeparator()
+
+        # Capture from Process... — opens the Windows-only process
+        # picker, returns a CaptureDevice with kind="process_loopback"
+        proc_act = QAction("Capture from Process…", cap_menu)
+        proc_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._pick_process_for_slot(i)
+        )
+        cap_menu.addAction(proc_act)
+
+        cap_menu.addSeparator()
+
+        devices = list_capture_devices()
+        if not devices:
+            hint = QAction("(no capture devices)", cap_menu)
+            hint.setEnabled(False)
+            cap_menu.addAction(hint)
+            return
+
+        for dev in devices:
+            label = dev.name + ("   [default]" if dev.is_default else "")
+            act = QAction(label, cap_menu)
+            act.setCheckable(True)
+            if (
+                using_override
+                and current_spec is not None
+                and current_spec.kind == dev.kind
+                and current_spec.id == dev.id
+            ):
+                act.setChecked(True)
+            group.addAction(act)
+            cap_menu.addAction(act)
+            act.triggered.connect(
+                lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(i, d)
+            )
+
+    def _pick_process_for_slot(self, slot_index: int) -> None:
+        """Open the ProcessPickerDialog and, on accept, set the slot's
+        capture_spec to a per-process CaptureDevice."""
+        dlg = ProcessPickerDialog(parent=self)
+        if dlg.exec() != ProcessPickerDialog.Accepted:
+            return
+        device = dlg.result_device()
+        if device is None:
+            return
+        self._set_slot_capture_spec(slot_index, device)
+
+    def _set_slot_capture_spec(
+        self, slot_index: int, device: CaptureDevice | None
+    ) -> None:
+        """Set a slot's per-slot capture override (or clear it to follow
+        the global default). If the slot is currently capturing, stop
+        and restart with the new device so the change takes effect
+        immediately."""
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        slot.capture_spec = device
+
+        if not slot.is_capturing():
+            return
+
+        # Restart on the new source
+        try:
+            slot.stop_capture()
+            new_source = self._state.build_capture_for_slot(slot)
+            slot.bind_capture(new_source)
+            slot.start_capture()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Capture restart failed",
+                f"Could not switch capture source on "
+                f"{slot.name!r}:\n\n{e}",
+            )
+
+    def _flush_slot_buffer(self, slot_index: int) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        buffered = slot.buffered_seconds()
+        reply = QMessageBox.question(
+            self,
+            "Flush buffer?",
+            f"Discard {buffered:.1f}s of buffered audio on {slot.name!r}?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        slot.buffer.flush()
+
+    def _remove_slot_with_confirmation(self, slot_index: int) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        reply = QMessageBox.question(
+            self,
+            "Remove source?",
+            (
+                f"This will stop capture on {slot.name!r} and discard its "
+                f"{slot.buffered_seconds():.1f} s of buffered audio.\n\n"
+                "Existing checkouts on this slot will also be lost — "
+                "they live in the slot's CheckoutManager."
+            ),
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self._state.remove_slot(slot_index)
+        except Exception as e:
+            QMessageBox.warning(self, "Remove failed", str(e))
+            return
+        # Adjust track counts on both turntables to match the new slot count
+        n = len(self._state.slots)
+        self.buffer_turntable.set_track_count(max(n, 1))
+        self.clip_turntable.set_track_count(max(n, 1))
+        # Mirror selection on the (now-current) active slot
+        active_idx = self._state.active_slot_index
+        if 0 <= active_idx < self.buffer_turntable.track_count():
+            self.buffer_turntable.select_track(active_idx)
+        if 0 <= active_idx < self.clip_turntable.track_count():
+            self.clip_turntable.select_track(active_idx)
+        self._refresh_source_names()
+        self._refresh_source_indicators()
 
     def _populate_demo_data(self) -> None:
         rng = np.random.default_rng(seed=42)

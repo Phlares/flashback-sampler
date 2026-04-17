@@ -175,3 +175,42 @@ def test_track_selected_updates_buffer_panel_label(qapp, state):
     win.clip_turntable.set_track_count(len(state.slots))
     win.buffer_turntable.track_selected.emit(1)
     assert win.buffer_panel.source_label.text() == "GAME"
+
+
+def test_tick_timer_runs_without_crash(qapp, state):
+    win = TurntableWindow(state)
+    # Simulate a tick manually to make sure it doesn't raise on empty buffer
+    win._tick()  # should handle empty/not-started capture gracefully
+
+
+def test_right_click_chip_emits_context_menu_request(qapp, state):
+    """Right-click on a source chip should emit contextMenuRequested."""
+    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtGui import QMouseEvent
+    win = TurntableWindow(state)
+    chip = win.nav_bar.source_slots[0]
+    captured = []
+    chip.contextMenuRequested.connect(lambda p: captured.append(p))
+    ev = QMouseEvent(
+        QEvent.MouseButtonPress,
+        chip.rect().center().toPointF() if hasattr(chip.rect().center(), "toPointF") else QPoint(5, 5),
+        Qt.RightButton, Qt.RightButton, Qt.NoModifier,
+    )
+    chip.mousePressEvent(ev)
+    assert len(captured) == 1
+
+
+def test_switch_to_slot_updates_active_and_mirrors(qapp, state):
+    from flashback_sampler.core.quality_presets import QualityPreset
+    preset = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2,
+        buffer_seconds=30.0, description="test",
+    )
+    state.add_slot(preset, name="Game")
+    win = TurntableWindow(state)
+    win.buffer_turntable.set_track_count(len(state.slots))
+    win.clip_turntable.set_track_count(len(state.slots))
+    win._switch_to_slot(1)
+    assert state.active_slot_index == 1
+    assert win.buffer_turntable.selected_track() == 1
+    assert win.clip_turntable.selected_track() == 1
