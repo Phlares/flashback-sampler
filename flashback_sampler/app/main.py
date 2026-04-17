@@ -83,7 +83,7 @@ def main() -> int:
     )
     if args.ui == "turntable":
         from flashback_sampler.app.turntable_window import TurntableWindow
-        window = TurntableWindow()
+        window = TurntableWindow(state)
     else:
         window = MainWindow(state)
     window.show()
