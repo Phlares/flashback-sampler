@@ -65,45 +65,48 @@ def test_header_position_clip(qapp):
     assert tt.header_angle_deg() == 180  # 9 o'clock
 
 
-def test_anchor_is_upper_inner_corner_buffer(qapp):
+def test_needle_head_centered_below_selected_rim_header_buffer(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(300, 300)
+    tt.select_track(1)
     g = tt.geometry()
-    assert abs(g.anchor_x - (g.cx + g.disc_r)) < 0.5
-    assert abs(g.anchor_y - (g.cy - g.disc_r)) < 0.5
+    header_cx, header_cy = g.rim_header_center("buffer", 1)
+    needle = g.needle_head_rect("buffer", 1)
+    # Needle centered on header's x
+    assert abs(needle.center().x() - header_cx) < 0.5
+    # Needle sits below header (higher y)
+    assert needle.top() > header_cy
 
 
-def test_anchor_is_upper_inner_corner_clip(qapp):
+def test_needle_head_centered_below_selected_rim_header_clip(qapp):
     tt = TurntableWidget(side="clip")
     tt.resize(300, 300)
+    tt.select_track(2)
     g = tt.geometry()
-    assert abs(g.anchor_x - (g.cx - g.disc_r)) < 0.5
-    assert abs(g.anchor_y - (g.cy - g.disc_r)) < 0.5
+    header_cx, header_cy = g.rim_header_center("clip", 2)
+    needle = g.needle_head_rect("clip", 2)
+    assert abs(needle.center().x() - header_cx) < 0.5
+    assert needle.top() > header_cy
 
 
-def test_chip_click_selects_track(qapp):
+def test_arm_target_is_bottom_inner_corner_buffer(qapp):
     tt = TurntableWidget(side="buffer")
-    tt.resize(300, 300)
+    tt.resize(400, 300)
     g = tt.geometry()
-    target_idx = 1
-    chip_cx, chip_cy = g.chip_center("buffer", target_idx, tt.track_count())
-    pos = QPointF(chip_cx, chip_cy)
-    ev = QMouseEvent(QEvent.MouseButtonPress, pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
-    tt.mousePressEvent(ev)
-    assert tt.selected_track() == target_idx
+    x, y = g.arm_target("buffer", 400.0, 300.0)
+    # Bottom-right-ish (buffer arm points right-inward toward OUT→ column)
+    assert abs(x - 398) < 5    # near right edge
+    assert abs(y - 298) < 5    # near bottom edge
 
 
-def test_chip_click_selects_track_clip(qapp):
-    """Clip rail reverses chip ordering — innermost track = chip closest to rim (rightmost on left rail)."""
+def test_arm_target_is_bottom_inner_corner_clip(qapp):
     tt = TurntableWidget(side="clip")
-    tt.resize(300, 300)
+    tt.resize(400, 300)
     g = tt.geometry()
-    target_idx = 2
-    chip_cx, chip_cy = g.chip_center("clip", target_idx, tt.track_count())
-    pos = QPointF(chip_cx, chip_cy)
-    ev = QMouseEvent(QEvent.MouseButtonPress, pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
-    tt.mousePressEvent(ev)
-    assert tt.selected_track() == target_idx
+    x, y = g.arm_target("clip", 400.0, 300.0)
+    # Bottom-left-ish (clip arm points left-inward toward OUT→ column)
+    assert abs(x - 2) < 5
+    assert abs(y - 298) < 5
 
 
 def test_paint_event_no_exceptions(qapp):
