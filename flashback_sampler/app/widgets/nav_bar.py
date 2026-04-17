@@ -1,7 +1,7 @@
 """NavBar — bottom strip with ARM ALL, source indicators, and config readouts."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 
@@ -22,6 +22,7 @@ STATUS_COLORS = {
 
 class SourceIndicator(QWidget):
     clicked = Signal()
+    contextMenuRequested = Signal(QPoint)
 
     def __init__(self, index: int, name: str, parent=None):
         super().__init__(parent)
@@ -42,7 +43,10 @@ class SourceIndicator(QWidget):
         self.update()
 
     def mousePressEvent(self, ev):
-        self.clicked.emit()
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit()
+        elif ev.button() == Qt.RightButton:
+            self.contextMenuRequested.emit(ev.globalPosition().toPoint())
 
     def paintEvent(self, ev):
         p = QPainter(self)
