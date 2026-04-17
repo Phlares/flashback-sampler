@@ -1,0 +1,100 @@
+"""TurntableWindow — dual-turntable wireframe layout.
+
+Parallel to MainWindow. Launch with --ui turntable.
+"""
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QMainWindow,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.widgets.center_bridge import CenterBridge
+from flashback_sampler.app.widgets.nav_bar import NavBar
+from flashback_sampler.app.widgets.tactile_button import TactileButton
+from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
+from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+
+
+class TurntableWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Flashback — Turntable UI")
+        self.setMinimumSize(960, 700)
+        self.resize(1120, 800)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        central.setStyleSheet(f"background-color: {EREBUS['chassis']};")
+
+        root = QVBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 0)
+        root.setSpacing(4)
+
+        # ── Row 1: Turntables + Center Bridge ────────────────────────
+        turntable_row = QHBoxLayout()
+        turntable_row.setSpacing(0)
+
+        self.buffer_turntable = TurntableWidget(side="buffer")
+        self.buffer_turntable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        turntable_row.addWidget(self.buffer_turntable, stretch=1)
+
+        self.center_bridge = CenterBridge()
+        turntable_row.addWidget(self.center_bridge)
+
+        self.clip_turntable = TurntableWidget(side="clip")
+        self.clip_turntable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        turntable_row.addWidget(self.clip_turntable, stretch=1)
+
+        root.addLayout(turntable_row, stretch=6)
+
+        # ── Row 2: Waveform Panels + OUT Button ──────────────────────
+        waveform_row = QHBoxLayout()
+        waveform_row.setSpacing(4)
+
+        self.buffer_panel = WaveformPanel(side="buffer")
+        waveform_row.addWidget(self.buffer_panel, stretch=1)
+
+        self.out_btn = TactileButton("OUT →", variant="primary")
+        self.out_btn.setFixedWidth(56)
+        self.out_btn.setMinimumHeight(60)
+        self.out_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        waveform_row.addWidget(self.out_btn)
+
+        self.clip_panel = WaveformPanel(side="clip")
+        waveform_row.addWidget(self.clip_panel, stretch=1)
+
+        root.addLayout(waveform_row, stretch=2)
+
+        # ── Row 3: Controls ──────────────────────────────────────────
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(4)
+
+        self.buffer_controls: list[TactileButton] = []
+        for label in ["FLUSH", "−", "◀", "▶", "+", "PAUSE"]:
+            btn = TactileButton(label, variant="secondary")
+            btn.setMinimumWidth(40)
+            btn.setMinimumHeight(36)
+            self.buffer_controls.append(btn)
+            controls_row.addWidget(btn)
+
+        controls_row.addStretch()
+
+        self.clip_controls: list[TactileButton] = []
+        for label in ["LOOP", "PLAY", "◀", "−", "+", "▶", "SAVE"]:
+            btn = TactileButton(label, variant="secondary")
+            btn.setMinimumWidth(40)
+            btn.setMinimumHeight(36)
+            self.clip_controls.append(btn)
+            controls_row.addWidget(btn)
+
+        root.addLayout(controls_row, stretch=1)
+
+        # ── Row 4: Nav Bar ───────────────────────────────────────────
+        self.nav_bar = NavBar()
+        root.addWidget(self.nav_bar)
