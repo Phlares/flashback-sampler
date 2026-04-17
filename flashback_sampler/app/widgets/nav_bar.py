@@ -37,6 +37,10 @@ class SourceIndicator(QWidget):
         self._status = status
         self.update()
 
+    def set_name(self, name: str) -> None:
+        self._name = name
+        self.update()
+
     def mousePressEvent(self, ev):
         self.clicked.emit()
 
@@ -112,6 +116,16 @@ class NavBar(QWidget):
         self.project_size_label = QLabel("~4.31 GB")
         self.project_size_label.setStyleSheet(f"color: {EREBUS['bone']}; font-size: 8pt;")
         layout.addWidget(self.project_size_label)
+
+    def set_source_names(self, names: list[str]) -> None:
+        """Update chip labels. `names` is typically state.slots' names.
+        Chips beyond the list length fall back to 'SOURCE N' to keep the
+        hardcoded slots visually consistent."""
+        for i, chip in enumerate(self.source_slots):
+            if i < len(names):
+                chip.set_name(names[i].upper())  # NavBar chips use uppercase
+            else:
+                chip.set_name(f"SOURCE {i + 1}")
 
     def _add_separator(self, layout: QHBoxLayout) -> None:
         sep = QWidget()
