@@ -35,6 +35,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--sample-rate", type=int, default=48_000)
     p.add_argument("--channels", type=int, default=2, choices=(1, 2))
+    p.add_argument(
+        "--ui",
+        choices=("classic", "turntable"),
+        default="classic",
+        help="UI layout: 'classic' (current) or 'turntable' (dual-turntable wireframe)",
+    )
     # Parse known args only — leave sys.argv[1:] extras untouched for Qt
     args, _ = p.parse_known_args(argv)
     return args
@@ -75,7 +81,11 @@ def main() -> int:
         sample_rate=args.sample_rate,
         channels=args.channels,
     )
-    window = MainWindow(state)
+    if args.ui == "turntable":
+        from flashback_sampler.app.turntable_window import TurntableWindow
+        window = TurntableWindow()
+    else:
+        window = MainWindow(state)
     window.show()
 
     return app.exec()
