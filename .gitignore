@@ -60,3 +60,6 @@ captures/
 # Local env
 .env
 .env.local
+
+# Git worktrees
+.worktrees/
