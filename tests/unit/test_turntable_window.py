@@ -214,3 +214,31 @@ def test_switch_to_slot_updates_active_and_mirrors(qapp, state):
     assert state.active_slot_index == 1
     assert win.buffer_turntable.selected_track() == 1
     assert win.clip_turntable.selected_track() == 1
+
+
+def test_default_buffer_selection_applied_at_init(qapp, state):
+    win = TurntableWindow(state)
+    # Default slot has duration_preset_idx=4 (180s) and anchor_offset_s=0.
+    # With capacity=buffer_seconds and 180s selection, the waveform should
+    # have a manual selection and the active track should have a disc selection.
+    sel = win.buffer_panel.waveform.manual_selection()
+    assert sel is not None
+    start, end = sel
+    assert 0.0 <= start < end <= 1.0
+    idx = state.active_slot_index
+    assert idx in win.buffer_turntable._track_selections
+
+
+def test_default_buffer_selection_skipped_if_buffer_too_small(qapp):
+    """If the buffer is shorter than the preset duration, start_frac clamps to 0."""
+    from flashback_sampler.app.state import AppState
+    s = AppState(buffer_seconds=10.0, sample_rate=48000, channels=2)  # only 10s
+    try:
+        win = TurntableWindow(s)
+        sel = win.buffer_panel.waveform.manual_selection()
+        # 3:00 (180s) default on 10s buffer → end_frac=1, start_frac=0
+        assert sel is not None
+        start, end = sel
+        assert start == 0.0 and end == 1.0
+    finally:
+        s.shutdown()

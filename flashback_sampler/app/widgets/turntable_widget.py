@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QMouseEvent
+from PySide6.QtGui import QColor, QPainter, QPen, QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.theme import EREBUS
@@ -79,7 +79,7 @@ class TurntableWidget(QWidget):
         self._track_count = 3
         self._selected_track = 0
         self._track_statuses: list[str] = ["armed", "armed", "paused"]
-        self._track_waveforms: dict[int, "np.ndarray"] = {}
+        self._track_waveforms: dict[int, tuple["np.ndarray", float]] = {}
         self._track_selections: dict[int, tuple[float, float, str]] = {}
         self.setMinimumSize(200, 200)
 
@@ -110,10 +110,17 @@ class TurntableWidget(QWidget):
     def header_angle_deg(self) -> int:
         return 0 if self._side == "buffer" else 180
 
-    def set_track_waveform(self, track_idx: int, samples: np.ndarray) -> None:
-        """Store a 1D float32 ndarray of normalized amplitudes [-1.0, 1.0]
-        to be plotted radially around the given track's ring. Triggers repaint."""
-        self._track_waveforms[track_idx] = np.asarray(samples, dtype=np.float32)
+    def set_track_waveform(
+        self, track_idx: int, samples: "np.ndarray", fill_fraction: float = 1.0
+    ) -> None:
+        """Store normalized amplitudes [0, 1] to plot as perpendicular bars
+        along the track's ring arc. fill_fraction in [0, 1] = what portion
+        of the ring (starting at play angle, sweeping clockwise) is filled.
+        The remainder of the ring shows only the clean ring outline."""
+        import numpy as np
+        arr = np.asarray(samples, dtype=np.float32)
+        ff = max(0.0, min(1.0, float(fill_fraction)))
+        self._track_waveforms[track_idx] = (arr, ff)
         self.update()
 
     def set_track_selection(self, track_idx: int, start_frac: float | None, end_frac: float | None, color: str) -> None:
@@ -167,36 +174,48 @@ class TurntableWidget(QWidget):
         # Concentric track rings (innermost = track 0, outermost = last)
         for i in range(self._track_count):
             r = g.ring_radius(i)
-            color = QColor(colors[i])
+            # Always draw the clean ring outline as the base layer
+            ring_color = QColor(colors[i])
             if i == self._selected_track:
-                color.setAlpha(255)
-                pen_w = max(g.ring_width * 0.5, 2) * 1.3
+                ring_color.setAlpha(180)
+                ring_pen_w = max(g.ring_width * 0.5, 2) * 1.3
             else:
-                color.setAlpha(80)
-                pen_w = max(g.ring_width * 0.5, 2)
-            p.setPen(QPen(color, pen_w))
+                ring_color.setAlpha(60)
+                ring_pen_w = max(g.ring_width * 0.5, 2)
+            p.setPen(QPen(ring_color, ring_pen_w))
             p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
-            if i in self._track_waveforms:
-                samples = self._track_waveforms[i]
-                n = len(samples)
-                if n > 0:
-                    path = QPainterPath()
-                    for j in range(n):
-                        theta = 2 * math.pi * j / n
-                        r_j = r + float(samples[j]) * (g.ring_width * 0.4)
-                        x = g.cx + r_j * math.cos(theta)
-                        y = g.cy - r_j * math.sin(theta)
-                        if j == 0:
-                            path.moveTo(x, y)
-                        else:
-                            path.lineTo(x, y)
-                    path.closeSubpath()
-                    p.drawPath(path)
-                else:
-                    p.drawEllipse(QPointF(g.cx, g.cy), r, r)
-            else:
-                p.drawEllipse(QPointF(g.cx, g.cy), r, r)
+            # Draw waveform bars only within the filled portion
+            entry = self._track_waveforms.get(i)
+            if entry is None:
+                continue
+            samples, fill_frac = entry
+            if fill_frac < 1e-4 or samples.size == 0:
+                continue
+            bar_color = QColor(colors[i])
+            bar_color.setAlpha(255 if i == self._selected_track else 140)
+            bar_pen = QPen(bar_color, 1)
+            bar_pen.setCapStyle(Qt.FlatCap)
+            p.setPen(bar_pen)
+            arc_span_rad = fill_frac * 2 * math.pi
+            play_angle_rad = math.radians(self.header_angle_deg())
+            n = int(samples.size)
+            for j in range(n):
+                t = j / n if n > 0 else 0.0
+                theta = play_angle_rad - t * arc_span_rad
+                a = max(0.0, min(1.0, float(samples[j])))
+                if a < 0.02:
+                    continue  # skip near-zero bars for clarity
+                r_inner = r - g.ring_width * 0.35 * a
+                r_outer = r + g.ring_width * 0.35 * a
+                ct = math.cos(theta)
+                st_v = math.sin(theta)
+                xi = g.cx + r_inner * ct
+                yi = g.cy - r_inner * st_v
+                xo = g.cx + r_outer * ct
+                yo = g.cy - r_outer * st_v
+                p.drawLine(QPointF(xi, yi), QPointF(xo, yo))
 
         # ── Selection arc on each track with a stored selection ─────────
         # Body is 25% opacity; inner/outer edges are 1px fully-opaque strokes.

@@ -123,7 +123,34 @@ def test_set_track_waveform_stores_data(qapp):
     tt.resize(300, 300)
     samples = np.zeros(100, dtype=np.float32)
     tt.set_track_waveform(0, samples)
+    assert 0 in tt._track_waveforms
     tt.repaint()  # must not raise
+
+
+def test_set_track_waveform_stores_tuple(qapp):
+    tt = TurntableWidget(side="buffer")
+    samples = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    tt.set_track_waveform(0, samples, fill_fraction=0.5)
+    stored = tt._track_waveforms[0]
+    assert isinstance(stored, tuple)
+    stored_samples, stored_ff = stored
+    assert np.allclose(stored_samples, samples)
+    assert stored_ff == 0.5
+
+
+def test_set_track_waveform_clamps_fill_fraction(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.set_track_waveform(0, np.zeros(10, dtype=np.float32), fill_fraction=1.5)
+    assert tt._track_waveforms[0][1] == 1.0
+    tt.set_track_waveform(0, np.zeros(10, dtype=np.float32), fill_fraction=-0.2)
+    assert tt._track_waveforms[0][1] == 0.0
+
+
+def test_paint_with_partial_fill_no_exceptions(qapp):
+    tt = TurntableWidget(side="buffer")
+    tt.resize(300, 300)
+    tt.set_track_waveform(0, np.array([0.5, 0.7, 0.3], dtype=np.float32), fill_fraction=0.25)
+    tt.repaint()
 
 
 def test_set_track_selection_stores_range(qapp):
