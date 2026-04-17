@@ -242,3 +242,14 @@ def test_default_buffer_selection_skipped_if_buffer_too_small(qapp):
         assert start == 0.0 and end == 1.0
     finally:
         s.shutdown()
+
+
+def test_tick_updates_time_labels(qapp, state):
+    win = TurntableWindow(state)
+    # Manually run one tick — fresh buffer has 0.0 buffered seconds
+    win._tick()
+    left = win.buffer_panel.time_left_label.text()
+    right = win.buffer_panel.time_right_label.text()
+    # Left label should be "-0:00.00" or similar negative-zero form; right is "0:00.00"
+    assert left.startswith("-") or left == "0:00.00"
+    assert right == "0:00.00"
