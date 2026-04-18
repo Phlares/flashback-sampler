@@ -68,6 +68,9 @@ class SourceIndicator(QWidget):
 
 
 class NavBar(QWidget):
+    chipClicked = Signal(int)
+    chipContextMenuRequested = Signal(int, QPoint)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(27)
@@ -75,6 +78,7 @@ class NavBar(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(2)
+        self._layout = layout
 
         self.arm_all_btn = QPushButton("ARM ALL")
         self.arm_all_btn.setFixedHeight(20)
@@ -86,12 +90,14 @@ class NavBar(QWidget):
 
         self._add_separator(layout)
 
+        # Chips are created dynamically by set_source_names; 3 are
+        # pre-created so existing tests and the initial paint behave
+        # the same. ADD SOURCE+ sits immediately after the last chip
+        # and new chips are inserted at its layout index so the button
+        # always stays to the right of all visible sources.
         self.source_slots: list[SourceIndicator] = []
-        default_sources = ["SOURCE 1", "SOURCE 2", "SOURCE 3"]
-        for i, name in enumerate(default_sources):
-            slot = SourceIndicator(i, name)
-            self.source_slots.append(slot)
-            layout.addWidget(slot)
+        for _ in range(3):
+            self._create_chip()
 
         self.add_source_btn = QPushButton("ADD SOURCE+")
         self.add_source_btn.setFixedHeight(20)
@@ -122,14 +128,40 @@ class NavBar(QWidget):
         layout.addWidget(self.project_size_label)
 
     def set_source_names(self, names: list[str]) -> None:
-        """Update chip labels. `names` is typically state.slots' names.
-        Chips beyond the list length fall back to 'SOURCE N' to keep the
-        hardcoded slots visually consistent."""
+        """Update chip labels and visibility, creating more chips as
+        needed to match the slot count. Chips beyond the current slot
+        count are hidden so SOURCE 2 / SOURCE 3 / … only appear after
+        the user adds them via ADD SOURCE+."""
+        while len(self.source_slots) < len(names):
+            self._create_chip()
         for i, chip in enumerate(self.source_slots):
             if i < len(names):
                 chip.set_name(names[i].upper())  # NavBar chips use uppercase
+                chip.setVisible(True)
             else:
-                chip.set_name(f"SOURCE {i + 1}")
+                chip.setVisible(False)
+
+    def _create_chip(self) -> SourceIndicator:
+        """Create and wire one more source chip, inserted into the
+        layout immediately before ADD SOURCE+ (or at the end if the
+        button hasn't been built yet)."""
+        i = len(self.source_slots)
+        chip = SourceIndicator(i, f"SOURCE {i + 1}")
+        # Forward the per-chip signals through the NavBar so callers
+        # wire up once, regardless of how many chips appear later.
+        chip.clicked.connect(
+            lambda _=None, idx=i: self.chipClicked.emit(idx)
+        )
+        chip.contextMenuRequested.connect(
+            lambda pos, idx=i: self.chipContextMenuRequested.emit(idx, pos)
+        )
+        self.source_slots.append(chip)
+        btn = getattr(self, "add_source_btn", None)
+        if btn is not None:
+            self._layout.insertWidget(self._layout.indexOf(btn), chip)
+        else:
+            self._layout.addWidget(chip)
+        return chip
 
     def _add_separator(self, layout: QHBoxLayout) -> None:
         sep = QWidget()

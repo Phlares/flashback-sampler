@@ -170,8 +170,11 @@ class TurntableWindow(QMainWindow):
         # samples captured when the user drags).
         self._buffer_sel_abs: tuple[int, int] | None = None
         self._buffer_sel_mode: str = "default"  # "default" | "user"
-        self._clip_sel_abs: tuple[int, int] | None = None
-        self._clip_sel_mode: str = "default"
+        # Clip selection is stored as FRACTIONS of the currently displayed
+        # clip's audio — the clip is an immutable snapshot, so this never
+        # drifts with the live buffer's advancing write head. Keyed by
+        # checkout id so switching clips preserves each one's trim.
+        self._clip_trim_fracs: dict[str, tuple[float, float]] = {}
 
         self._wire_selection_sync()
         self._wire_controls()
@@ -220,25 +223,26 @@ class TurntableWindow(QMainWindow):
             self._buffer_sel_mode = "default"
 
         def on_clip_sel(start: float, end: float) -> None:
-            if not self._state.slots:
+            # The clip panel shows a fixed snapshot of a checkout's audio,
+            # not the live buffer — so the drag fractions are already the
+            # correct trim bounds for that clip. Store them against the
+            # checkout id and write them back to the Checkout's trim
+            # samples so save/export pick them up automatically.
+            co = self._currently_displayed_checkout()
+            if co is None or end <= start:
                 return
-            slot = self._state.active_slot
-            buf = slot.buffer
-            buffered_s = float(buf.buffered_seconds)
-            if buffered_s <= 0 or end <= start:
-                return
-            total = int(buf.total_written)
-            sr = int(buf.sample_rate)
-            samples_visible = int(buffered_s * sr)
-            oldest_visible = total - samples_visible
-            abs_start = oldest_visible + int(start * samples_visible)
-            abs_end = oldest_visible + int(end * samples_visible)
-            self._clip_sel_abs = (abs_start, abs_end)
-            self._clip_sel_mode = "user"
+            self._clip_trim_fracs[co.id] = (float(start), float(end))
+            n = int(co.audio.shape[0])
+            co.trim_in_samples = max(0, int(start * n))
+            co.trim_out_samples = max(co.trim_in_samples, int(end * n))
 
         def on_clip_clear() -> None:
-            self._clip_sel_abs = None
-            self._clip_sel_mode = "default"
+            co = self._currently_displayed_checkout()
+            if co is None:
+                return
+            self._clip_trim_fracs.pop(co.id, None)
+            co.trim_in_samples = 0
+            co.trim_out_samples = 0
 
         self.buffer_panel.waveform.manualSelectionChanged.connect(on_buffer_sel)
         self.buffer_panel.waveform.manualSelectionCleared.connect(on_buffer_clear)
@@ -260,16 +264,25 @@ class TurntableWindow(QMainWindow):
         # OUT → check out current buffer selection as a new clip
         self.out_btn.clicked.connect(self._on_checkout_clicked)
 
+        # SAVE (clip side, last button in clip_controls) → save current clip
+        save_btn = self.clip_controls[-1]
+        save_btn.clicked.connect(lambda: self._save_current_clip())
+
+        # Right-click on clip waveform → save/discard context menu
+        self.clip_panel.waveform.contextMenuRequested.connect(
+            self._on_clip_panel_context_menu
+        )
+
         # NavBar actions
         self.nav_bar.arm_all_btn.clicked.connect(self._on_arm_all)
-        self.nav_bar.add_source_btn.clicked.connect(self._on_add_source)
-        # Per-source chips in the NavBar — left-click toggles armed state,
-        # right-click opens the per-source context menu.
-        for i, slot_chip in enumerate(self.nav_bar.source_slots):
-            slot_chip.clicked.connect(lambda _=None, idx=i: self._on_source_chip_clicked(idx))
-            slot_chip.contextMenuRequested.connect(
-                lambda pos, idx=i: self._on_source_chip_context_menu(idx, pos)
-            )
+        self.nav_bar.add_source_btn.clicked.connect(self._on_add_source_menu)
+        # Per-source chips in the NavBar — NavBar forwards per-chip
+        # signals so the wiring stays valid even as chips are created
+        # dynamically when the user adds more sources.
+        self.nav_bar.chipClicked.connect(self._on_source_chip_clicked)
+        self.nav_bar.chipContextMenuRequested.connect(
+            self._on_source_chip_context_menu
+        )
         self._refresh_source_indicators()
 
     def _on_start_clicked(self) -> None:
@@ -305,11 +318,11 @@ class TurntableWindow(QMainWindow):
         self._refresh_source_names()
         self._refresh_source_indicators()
         # Reset selection state for the new active slot so it shows its own
-        # default; abs-sample snapshots belong to the prior slot.
+        # default; abs-sample snapshots belong to the prior slot. Clip
+        # trim fractions are keyed by checkout id so they survive the
+        # switch and don't need clearing.
         self._buffer_sel_mode = "default"
         self._buffer_sel_abs = None
-        self._clip_sel_mode = "default"
-        self._clip_sel_abs = None
         self._update_selection_display()
         # Refresh clip side to show the new slot's checkouts
         self._refresh_clip_side()
@@ -410,6 +423,12 @@ class TurntableWindow(QMainWindow):
         """Render a single checkout's full audio into the clip WaveformPanel."""
         bins = _peak_bins_from_audio(co.audio, n_bins=360)
         self.clip_panel.waveform.set_data(bins)
+        # Clip timeline = fixed clip duration; lets the selection band
+        # render its duration label on top.
+        if co.duration_seconds > 0:
+            self.clip_panel.waveform.set_timeline(
+                float(co.duration_seconds), anchor="left"
+            )
         slot_name = (
             self._state.active_slot.name if self._state.slots else "?"
         )
@@ -419,10 +438,144 @@ class TurntableWindow(QMainWindow):
         self.clip_panel.set_duration_text(f"{co.duration_seconds:.1f}s")
         self.clip_panel.set_clip_id(co.id[:6].upper())
         self.clip_panel.set_times("0:00.00", f"{co.duration_seconds:.2f}s")
+        # Restore any saved trim selection for this clip so the band stays
+        # anchored to the audio when switching clips or reopening the app.
+        fracs = self._clip_trim_fracs.get(co.id)
+        self.clip_panel.waveform.blockSignals(True)
+        if fracs is None:
+            self.clip_panel.waveform.clear_manual_selection()
+        else:
+            self.clip_panel.waveform.set_manual_selection(*fracs)
+        self.clip_panel.waveform.blockSignals(False)
+
+    def _currently_displayed_checkout(self):
+        """Return the Checkout object whose audio the clip panel is
+        currently showing, or None if there are no checkouts yet."""
+        if not self._state.slots:
+            return None
+        checkouts = list(self._state.active_slot.checkout_manager.list())
+        if not checkouts:
+            return None
+        idx = max(0, min(self.clip_turntable.selected_track(), len(checkouts) - 1))
+        return checkouts[idx]
+
+    def _suggested_clip_filename(self, slot, co, suffix: str = "") -> str:
+        import re
+        base_slot = re.sub(r"[^A-Za-z0-9_-]+", "_", slot.name or "").strip("_").lower() or "source"
+        base = f"flashback_{base_slot}_{co.id}"
+        if suffix:
+            base += f"_{suffix}"
+        return base
+
+    def _default_clip_save_dir(self):
+        from pathlib import Path
+        return Path.home() / "Documents"
+
+    def _save_current_clip(self, fmt: str | None = None, trimmed: bool = True) -> None:
+        """Prompt for a target path and save the clip currently shown in
+        the clip panel. When `trimmed` is True, uses the stored trim
+        fracs (set via drag on the clip waveform)."""
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        co = self._currently_displayed_checkout()
+        if co is None:
+            QMessageBox.information(self, "Save", "No clip to save.")
+            return
+        slot = self._state.active_slot
+        suffix = "trim" if trimmed and self._clip_trim_fracs.get(co.id) else ""
+        default_ext = ".flac" if fmt == "FLAC" else ".wav"
+        filter_spec = (
+            "WAV audio (*.wav);;FLAC audio (*.flac)" if fmt is None
+            else ("WAV audio (*.wav)" if fmt == "WAV" else "FLAC audio (*.flac)")
+        )
+        default_path = str(
+            self._default_clip_save_dir()
+            / f"{self._suggested_clip_filename(slot, co, suffix)}{default_ext}"
+        )
+        target, selected = QFileDialog.getSaveFileName(
+            self, "Save clip", default_path, filter_spec
+        )
+        if not target:
+            return
+        # Resolve format from filter choice or file extension
+        if fmt is None:
+            resolved = "FLAC" if (
+                selected.startswith("FLAC") or target.lower().endswith(".flac")
+            ) else "WAV"
+        else:
+            resolved = fmt
+        try:
+            slot.checkout_manager.save(
+                co.id, Path(target), fmt=resolved, trimmed=trimmed
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
+
+    def _discard_current_clip(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        co = self._currently_displayed_checkout()
+        if co is None:
+            return
+        try:
+            self._state.active_slot.checkout_manager.discard(co.id)
+        except Exception as e:
+            QMessageBox.warning(self, "Discard failed", str(e))
+            return
+        self._clip_trim_fracs.pop(co.id, None)
+        self._refresh_clip_side()
+
+    def _on_clip_panel_context_menu(self, global_pos) -> None:
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QAction
+        co = self._currently_displayed_checkout()
+        if co is None:
+            return
+        has_trim = self._clip_trim_fracs.get(co.id) is not None
+        menu = QMenu(self)
+        act_save_wav = QAction(
+            "Save trimmed as WAV…" if has_trim else "Save as WAV…", self
+        )
+        act_save_wav.triggered.connect(
+            lambda: self._save_current_clip(fmt="WAV", trimmed=has_trim)
+        )
+        menu.addAction(act_save_wav)
+        act_save_flac = QAction(
+            "Save trimmed as FLAC…" if has_trim else "Save as FLAC…", self
+        )
+        act_save_flac.triggered.connect(
+            lambda: self._save_current_clip(fmt="FLAC", trimmed=has_trim)
+        )
+        menu.addAction(act_save_flac)
+        if has_trim:
+            menu.addSeparator()
+            act_save_full_wav = QAction("Save full clip as WAV…", self)
+            act_save_full_wav.triggered.connect(
+                lambda: self._save_current_clip(fmt="WAV", trimmed=False)
+            )
+            menu.addAction(act_save_full_wav)
+            act_clear_trim = QAction("Clear trim selection", self)
+            def _clear():
+                self._clip_trim_fracs.pop(co.id, None)
+                co.trim_in_samples = 0
+                co.trim_out_samples = 0
+                self.clip_panel.waveform.clear_manual_selection()
+                self._update_selection_display()
+            act_clear_trim.triggered.connect(_clear)
+            menu.addAction(act_clear_trim)
+        menu.addSeparator()
+        act_discard = QAction("Discard clip", self)
+        act_discard.triggered.connect(self._discard_current_clip)
+        menu.addAction(act_discard)
+
+        qpt = QPoint(int(global_pos.x()), int(global_pos.y()))
+        menu.exec(qpt)
 
     def _on_arm_all(self) -> None:
         for slot in self._state.slots:
             slot.armed = True
+            self._sync_slot_capture_to_armed(slot)
         self._refresh_source_indicators()
 
     def _on_source_chip_clicked(self, slot_idx: int) -> None:
@@ -430,11 +583,125 @@ class TurntableWindow(QMainWindow):
             return
         slot = self._state.slots[slot_idx]
         slot.armed = not slot.armed
+        self._sync_slot_capture_to_armed(slot)
         self._refresh_source_indicators()
+
+    def _sync_slot_capture_to_armed(self, slot) -> None:
+        """If the global transport is rolling, bring this slot's capture
+        state in line with its armed flag without touching others —
+        arming starts its capture, unarming pauses it."""
+        if not self._state.rolling:
+            return
+        try:
+            if slot.armed and not slot.is_capturing():
+                source = self._state.build_capture_for_slot(slot)
+                slot.bind_capture(source)
+                slot.start_capture()
+            elif not slot.armed and slot.is_capturing():
+                slot.stop_capture()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Capture state change failed",
+                f"Could not update capture on {slot.name!r}:\n\n{e}",
+            )
+
+    def _on_add_source_menu(self) -> None:
+        """Dropdown shown when ADD SOURCE+ is clicked. Hoists the
+        per-slot Capture Source submenu into the top level so the user
+        can pick a specific device/process for the new slot right from
+        the primary menu, rather than adding first and then routing via
+        the per-chip context menu. 'Configure…' still opens the full
+        dialog for name/buffer/sr/channels tuning."""
+        menu = QMenu(self)
+
+        # Quick-add with the current global capture spec.
+        default_act = QAction("Add with Default Source (global)", self)
+        default_act.triggered.connect(
+            lambda _c=False: self._quick_add_source(None)
+        )
+        menu.addAction(default_act)
+
+        # Process picker — opens the Windows per-process loopback dialog.
+        proc_act = QAction("Add from Process…", self)
+        proc_act.triggered.connect(
+            lambda _c=False: self._quick_add_source_from_process()
+        )
+        menu.addAction(proc_act)
+
+        menu.addSeparator()
+
+        devices = list_capture_devices()
+        if devices:
+            hdr = QAction("Add from Device", self)
+            hdr.setEnabled(False)
+            menu.addAction(hdr)
+            for dev in devices:
+                label = dev.name + ("   [default]" if dev.is_default else "")
+                act = QAction(label, self)
+                act.triggered.connect(
+                    lambda _c=False, d=dev: self._quick_add_source(d)
+                )
+                menu.addAction(act)
+            menu.addSeparator()
+
+        configure_act = QAction("Configure New Source…", self)
+        configure_act.triggered.connect(self._on_add_source)
+        menu.addAction(configure_act)
+
+        # Anchor the menu just below the ADD SOURCE+ button.
+        btn = self.nav_bar.add_source_btn
+        pos = btn.mapToGlobal(btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _quick_add_source(self, device: CaptureDevice | None) -> None:
+        """Add a slot with defaults and (optionally) a specific per-slot
+        capture_spec. Skips the configuration dialog."""
+        active = self._state.active_slot
+        from flashback_sampler.core.quality_presets import QualityPreset
+        preset = QualityPreset(
+            name="CUSTOM",
+            sample_rate=active.sample_rate,
+            channels=active.channels,
+            buffer_seconds=float(active.buffer_seconds),
+            description="",
+        )
+        name = f"Source {len(self._state.slots) + 1}"
+        try:
+            self._state.add_slot(preset, name=name)
+        except Exception as e:
+            QMessageBox.warning(self, "Add source failed", str(e))
+            return
+        new_idx = len(self._state.slots) - 1
+        if device is not None:
+            self._state.slots[new_idx].capture_spec = device
+        self._finalize_add_source(new_idx)
+
+    def _quick_add_source_from_process(self) -> None:
+        dlg = ProcessPickerDialog(parent=self)
+        if dlg.exec() != ProcessPickerDialog.Accepted:
+            return
+        device = dlg.result_device()
+        if device is None:
+            return
+        self._quick_add_source(device)
+
+    def _finalize_add_source(self, new_idx: int) -> None:
+        """Refresh visuals after a slot has been appended. Also start the
+        newly-added slot's capture immediately if the transport is
+        already rolling and the new slot is armed by default."""
+        n = len(self._state.slots)
+        self.buffer_turntable.set_track_count(n)
+        self._refresh_source_indicators()
+        self._refresh_source_names()
+        self._refresh_clip_side()
+        if 0 <= new_idx < n:
+            self._sync_slot_capture_to_armed(self._state.slots[new_idx])
+            self._refresh_source_indicators()
 
     def _on_add_source(self) -> None:
         from flashback_sampler.app.add_source_dialog import AddSourceDialog
-        from PySide6.QtWidgets import QMessageBox
         active = self._state.active_slot
         default_name = f"Source {len(self._state.slots) + 1}"
         default_buffer_s = active.buffer_seconds
@@ -458,14 +725,7 @@ class TurntableWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Add source failed", str(e))
             return
-        # Refresh visuals to match new slot count. Clip turntable reflects
-        # checkouts on the ACTIVE slot, not slot count, so re-run the clip
-        # refresh rather than forcing track count to match slots.
-        n = len(self._state.slots)
-        self.buffer_turntable.set_track_count(n)
-        self._refresh_source_indicators()
-        self._refresh_source_names()
-        self._refresh_clip_side()
+        self._finalize_add_source(len(self._state.slots) - 1)
 
     def _refresh_source_indicators(self) -> None:
         """Update the NavBar source chips to reflect current slot armed/capturing state."""
@@ -524,32 +784,36 @@ class TurntableWindow(QMainWindow):
             return (start_frac, end_frac)
 
         def compute_fracs_clip_side() -> tuple[float, float] | None:
-            if self._clip_sel_mode == "default":
-                # No default for clip side — clip selection waits for user input
+            # Clip selection lives in clip-local fractions — immutable
+            # with respect to the advancing buffer. Look up by the id of
+            # the currently displayed clip.
+            co = self._currently_displayed_checkout()
+            if co is None:
                 return None
-            if self._clip_sel_abs is None:
+            fracs = self._clip_trim_fracs.get(co.id)
+            if fracs is None:
                 return None
-            abs_start, abs_end = self._clip_sel_abs
-            start_ago = (total - abs_start) / sr
-            end_ago = (total - abs_end) / sr
-            end_frac = max(0.0, min(1.0, 1.0 - end_ago / buffered_s))
-            start_frac = max(0.0, min(1.0, 1.0 - start_ago / buffered_s))
-            if end_frac <= start_frac:
-                return None
-            return (start_frac, end_frac)
+            return fracs
 
         def apply(fracs: tuple[float, float] | None, color: str,
                   panel, turntable) -> None:
-            idx = self._state.active_slot_index
+            # The ring that the selection belongs to depends on the side:
+            # buffer rings mirror slot indices, clip rings mirror checkout
+            # indices (whichever clip is currently focused on the panel).
+            if turntable is self.clip_turntable:
+                idx = self.clip_turntable.selected_track()
+            else:
+                idx = self._state.active_slot_index
+            interacting = panel.waveform.is_user_interacting()
             if fracs is None:
-                if not panel.waveform._is_dragging:
+                if not interacting:
                     panel.waveform.blockSignals(True)
                     panel.waveform.clear_manual_selection()
                     panel.waveform.blockSignals(False)
                 turntable.set_track_selection(idx, None, None, color)
                 return
             s, e = fracs
-            if not panel.waveform._is_dragging:
+            if not interacting:
                 panel.waveform.blockSignals(True)
                 panel.waveform.set_manual_selection(s, e)
                 panel.waveform.blockSignals(False)
@@ -600,6 +864,12 @@ class TurntableWindow(QMainWindow):
                 left = format_time_signed_cs(-buffered_s)
                 right = "0:00.00"
                 self.buffer_panel.set_times(left, right)
+                # Feed the waveform's total duration so the selection
+                # band can render the in/out duration label on top.
+                if buffered_s > 0:
+                    self.buffer_panel.waveform.set_timeline(
+                        buffered_s, anchor="right"
+                    )
             except Exception:
                 pass
 
@@ -619,15 +889,28 @@ class TurntableWindow(QMainWindow):
                         i, np.zeros(0, dtype=np.float32), fill_fraction=0.0
                     )
                     continue
-                n_bins = max(16, int(360 * fill_frac))
-                bins = slot.buffer.get_peak_bins(seconds=buffered_s, n_bins=n_bins)
-                # Peak amplitude per bin: half the peak-to-peak over channels
-                amp = (
-                    (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
+                # Always request 360 bins against a capacity-based bin
+                # grid. This pins each summary slot's bin assignment for
+                # its lifetime: historical bars are computed once and
+                # never re-aggregated as more audio arrives. Only the
+                # bin holding the actively-growing newest slot changes
+                # tick-to-tick. Without the fixed grid, both `n_samples`
+                # and `n_bins` grow during fill — `bin_span` drifts and
+                # each slot gets periodically reassigned to a different
+                # bin, which shows up as the whole ring visibly pulsing.
+                capacity_samples = slot.buffer.buffer_size
+                display_n = 360
+                rms = slot.buffer.get_summary_bins(
+                    n_bins=display_n,
+                    bin_span_samples=max(1, capacity_samples // display_n),
+                )
+                amp_full = np.clip(
+                    rms.max(axis=1) * 3.0, 0.0, 1.0
                 ).astype(np.float32)
-                # Bins are already in [-1, 1] from float audio; peak-to-peak/2 is in [0, 1].
-                # Clip defensively; no renormalization.
-                amp = np.clip(amp, 0.0, 1.0)
+                # Trim to the currently-filled bars. Oldest is bar 0,
+                # newest sits just before the unfilled tail.
+                n_filled = max(1, int(round(fill_frac * display_n)))
+                amp = amp_full[:n_filled]
                 self.buffer_turntable.set_track_waveform(i, amp, fill_fraction=fill_frac)
             except Exception:
                 pass
