@@ -56,7 +56,7 @@ def test_window_has_nav_bar(qapp, state):
 def test_window_has_buffer_controls(qapp, state):
     win = TurntableWindow(state)
     labels = [b.text() for b in win.buffer_controls]
-    assert labels == ["FLUSH", "−", "+", "◀", "▶", "PAUSE"]
+    assert labels == ["FLUSH", "−", "+", "◀", "▶", "FREEZE"]
 
 
 def test_window_has_clip_controls(qapp, state):
