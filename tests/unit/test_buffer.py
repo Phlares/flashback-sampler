@@ -402,3 +402,95 @@ def test_get_segment_does_not_stall_writer():
         f"writer was stalled: max write() duration = "
         f"{results['max_write_time']*1000:.2f}ms"
     )
+
+
+@pytest.mark.timeout(15)
+def test_get_peak_bins_does_not_flicker_on_saturated_ring():
+    """
+    Regression: once the ring fills, repeated get_peak_bins() calls must
+    not intermittently return all-zero frames. The symptom was a visible
+    UI flicker between flat and waveform once the buffer hit max.
+
+    Cause: the reader snapshotted abs_start = total_written - n with
+    n == buffer_size, so any writer advance between snapshot and verify
+    satisfied (total_written_new - abs_start > buffer_size) and fired the
+    tear path. Fix leaves slack below buffer_size so the writer can
+    advance normally without invalidating the oldest sample.
+    """
+    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=48_000, channels=2)
+    sr = buf.sample_rate
+    block = np.full((512, 2), 0.5, dtype=np.float32)
+
+    # Saturate the ring (overfill so total_written > buffer_size).
+    for _ in range(int(2.0 * sr / 512) + 50):
+        buf.write(block)
+    assert buf.is_full
+
+    stop = threading.Event()
+
+    def writer():
+        while not stop.is_set():
+            buf.write(block)
+            time.sleep(0.01)  # ≈WASAPI period
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    time.sleep(0.03)  # let writer get into rhythm
+
+    zero_frames = 0
+    total_frames = 50
+    for _ in range(total_frames):
+        bins = buf.get_peak_bins(seconds=2.0, n_bins=360)
+        if not np.any(bins):
+            zero_frames += 1
+        time.sleep(0.033)  # ≈30 Hz UI refresh
+
+    stop.set()
+    t.join(timeout=1.0)
+
+    # Allow a couple of zero frames for scheduler jitter, but nothing
+    # close to flicker-level counts.
+    assert zero_frames < 5, (
+        f"saw {zero_frames}/{total_frames} zero frames — flicker regression"
+    )
+
+
+def test_get_peak_bins_stable_under_rolling_window():
+    """
+    Regression: rolling the window by tiny writer advances must not
+    shift the peaks of still-visible bins. The stride-sampling pattern
+    must be anchored to the absolute audio sample index, not to the
+    window's rolling start — otherwise each tick picks a different
+    subset of the bin's samples and the bar heights jump (visible as a
+    "rolling flicker" on the waveform display).
+    """
+    sr = 10_000
+    duration = 10.0  # 100 000-sample ring → span=900 per bin → stride=3
+    buf = AudioCircularBuffer(
+        duration_seconds=duration, sample_rate=sr, channels=1
+    )
+    rng = np.random.default_rng(seed=0)
+    content = (rng.standard_normal(int(duration * sr)) * 100).astype(np.float32)
+    buf.write(content[:, None])
+    assert buf.is_full
+
+    # Collect 10 frames, advancing by 1 sample between each. Middle bins
+    # cover essentially identical audio across all 10 reads (the window
+    # rolls by 10 samples total, far less than one bin's 900 samples).
+    frames = []
+    for _ in range(10):
+        frames.append(
+            buf.get_peak_bins(seconds=duration, n_bins=100)[:, 1, 0].copy()
+        )
+        buf.write(np.zeros((1, 1), dtype=np.float32))
+
+    mid = slice(30, 70)  # bins well inside the window
+    maxes = np.stack([f[mid] for f in frames])  # (10 frames, 40 bins)
+    per_bin_drift = maxes.max(axis=0) - maxes.min(axis=0)
+    per_bin_mean = np.abs(maxes).mean(axis=0)
+    ratio = (per_bin_drift / (per_bin_mean + 1e-6)).mean()
+
+    assert ratio < 0.03, (
+        f"bin heights drifted by avg {ratio*100:.1f}% across small writer "
+        f"advances — stride sampling is not abs-aligned (flicker regression)"
+    )

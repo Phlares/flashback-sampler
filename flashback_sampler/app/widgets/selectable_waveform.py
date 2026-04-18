@@ -74,6 +74,14 @@ class SelectableWaveform(WaveformView):
             return None
         return (float(self._manual_start), float(self._manual_end))
 
+    def is_user_interacting(self) -> bool:
+        """True while the user is actively dragging — either painting a
+        new selection or sliding an existing edge. Controllers should not
+        overwrite the manual selection while this returns True, otherwise
+        a periodic refresh tick will snap the drag back to its prior
+        position."""
+        return self._is_dragging or self._dragging_edge is not None
+
     def set_manual_selection(
         self,
         start_frac: float | None,
