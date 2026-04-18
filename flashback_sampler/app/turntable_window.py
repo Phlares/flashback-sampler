@@ -181,6 +181,10 @@ class TurntableWindow(QMainWindow):
         # Tracks whether the scrub player was rolling on the previous
         # tick — used to auto-restart on loop when playback drains.
         self._was_playing_last_tick: bool = False
+        # Whether the user has asked for playback (True) or stopped
+        # explicitly (False). LOOP only auto-restarts while this is
+        # True, so pressing STOP while LOOP is on actually stops.
+        self._intending_playback: bool = False
 
         # FREEZE state: when True, the buffer panel's waveform + time
         # labels + timeline are held at the snapshot taken when freeze
@@ -190,6 +194,10 @@ class TurntableWindow(QMainWindow):
         self._buffer_frozen: bool = False
         self._buffer_frozen_total: int = 0
         self._buffer_frozen_buffered_s: float = 0.0
+
+        # Guard so the "muxing combines inputs" warning only fires the
+        # first time the user asks to mux within this session.
+        self._mux_warning_shown: bool = False
 
         self._wire_selection_sync()
         self._wire_controls()
@@ -470,6 +478,8 @@ class TurntableWindow(QMainWindow):
         player = self._state.scrub_player
         if player.is_playing:
             player.pause()
+            # Explicit stop by the user — suppress LOOP auto-restart.
+            self._intending_playback = False
             self._refresh_play_button()
             return
         if co is None:
@@ -491,6 +501,7 @@ class TurntableWindow(QMainWindow):
                 self, "Playback failed", f"Could not start playback:\n\n{e}"
             )
             return
+        self._intending_playback = True
         self._refresh_play_button()
 
     def _refresh_play_button(self) -> None:
@@ -1137,10 +1148,13 @@ class TurntableWindow(QMainWindow):
             self.clip_panel.waveform.set_playhead(frac)
         else:
             self.clip_panel.waveform.set_playhead(None)
-            # LOOP: if checked and a clip is bound but playback stopped
-            # (source drained), restart from the start.
+            # LOOP: if checked, the user hasn't explicitly stopped,
+            # a clip is bound, and playback just drained, restart.
+            # Gating on _intending_playback keeps STOP-while-LOOPing
+            # from immediately re-triggering playback.
             if (
                 self.loop_btn.isChecked()
+                and self._intending_playback
                 and co is not None
                 and not player.is_playing
                 and getattr(self, "_was_playing_last_tick", False)
@@ -1249,17 +1263,21 @@ class TurntableWindow(QMainWindow):
     ) -> None:
         """Build the 'Select Source Input(s)' submenu for one slot.
         Structure matches AddSourceDialog's SOURCE INPUT menu: Default,
-        From Device… (nested device list), From Process… (picker)."""
+        From Device… (nested device list), From Process… (picker),
+        plus Add Another Input (mux) and, when applicable, a summary
+        of the slot's current muxed inputs."""
         slot = self._state.slots[slot_index]
-        current_spec = self._state.effective_capture_spec_for_slot(slot)
-        using_override = slot.capture_spec is not None
+        muxed = list(slot.capture_specs)
+        is_mux = len(muxed) >= 2
+        is_single = len(muxed) == 1
+        current_single = muxed[0] if is_single else None
 
         group = QActionGroup(src_menu)
         group.setExclusive(True)
 
         global_default = QAction("Default (global)", src_menu)
         global_default.setCheckable(True)
-        global_default.setChecked(not using_override)
+        global_default.setChecked(not muxed)
         global_default.triggered.connect(
             lambda _c=False, i=slot_index: self._set_slot_capture_spec(i, None)
         )
@@ -1281,10 +1299,9 @@ class TurntableWindow(QMainWindow):
                 act = QAction(label, dev_menu)
                 act.setCheckable(True)
                 if (
-                    using_override
-                    and current_spec is not None
-                    and current_spec.kind == dev.kind
-                    and current_spec.id == dev.id
+                    current_single is not None
+                    and current_single.kind == dev.kind
+                    and current_single.id == dev.id
                 ):
                     act.setChecked(True)
                 group.addAction(act)
@@ -1299,6 +1316,42 @@ class TurntableWindow(QMainWindow):
         )
         src_menu.addAction(proc_act)
 
+        src_menu.addSeparator()
+
+        # Mux — add more inputs to this slot so they share its buffer.
+        add_mux_menu = src_menu.addMenu("Add Another Input (mux)…")
+        mux_dev_menu = add_mux_menu.addMenu("From Device…")
+        if not devices:
+            hint = QAction("(no capture devices)", mux_dev_menu)
+            hint.setEnabled(False)
+            mux_dev_menu.addAction(hint)
+        else:
+            for dev in devices:
+                label = dev.name + ("   [default]" if dev.is_default else "")
+                act = QAction(label, mux_dev_menu)
+                act.triggered.connect(
+                    lambda _c=False, d=dev, i=slot_index: self._add_mux_input_to_slot(i, d)
+                )
+                mux_dev_menu.addAction(act)
+        mux_proc_act = QAction("From Process…", add_mux_menu)
+        mux_proc_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._add_mux_input_from_process(i)
+        )
+        add_mux_menu.addAction(mux_proc_act)
+
+        if is_mux:
+            src_menu.addSeparator()
+            hdr = QAction(f"Muxed Inputs ({len(muxed)})", src_menu)
+            hdr.setEnabled(False)
+            src_menu.addAction(hdr)
+            for idx, dev in enumerate(muxed):
+                label = f"  • {dev.name}"
+                remove_act = QAction(f"Remove: {dev.name}", src_menu)
+                remove_act.triggered.connect(
+                    lambda _c=False, i=slot_index, j=idx: self._remove_mux_input(i, j)
+                )
+                src_menu.addAction(remove_act)
+
     def _pick_process_for_slot(self, slot_index: int) -> None:
         """Open the ProcessPickerDialog and, on accept, set the slot's
         capture_spec to a per-process CaptureDevice."""
@@ -1309,6 +1362,92 @@ class TurntableWindow(QMainWindow):
         if device is None:
             return
         self._set_slot_capture_spec(slot_index, device)
+
+    def _add_mux_input_from_process(self, slot_index: int) -> None:
+        dlg = ProcessPickerDialog(parent=self)
+        if dlg.exec() != ProcessPickerDialog.Accepted:
+            return
+        device = dlg.result_device()
+        if device is None:
+            return
+        self._add_mux_input_to_slot(slot_index, device)
+
+    def _add_mux_input_to_slot(
+        self, slot_index: int, device: CaptureDevice
+    ) -> None:
+        """Append another capture input to the slot so its samples are
+        summed into the same ring buffer. Shows a first-time warning
+        explaining the bitrate/loudness tradeoff. Restarts the slot's
+        capture so the new mux takes effect immediately."""
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        if not self._confirm_mux_first_time():
+            return
+        slot = self._state.slots[slot_index]
+        # If the slot was following the global default (no local specs),
+        # prepend that global spec so the first click becomes a 2-input
+        # mux of [global, new_device] rather than replacing the global.
+        if not slot.capture_specs:
+            effective = self._state.effective_capture_spec_for_slot(slot)
+            if effective is not None:
+                slot.capture_specs.append(effective)
+        slot.capture_specs.append(device)
+        self._restart_slot_capture_if_rolling(slot, slot_index)
+
+    def _remove_mux_input(self, slot_index: int, input_index: int) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        if not (0 <= input_index < len(slot.capture_specs)):
+            return
+        del slot.capture_specs[input_index]
+        self._restart_slot_capture_if_rolling(slot, slot_index)
+
+    def _confirm_mux_first_time(self) -> bool:
+        """Show a one-time explainer the first time the user asks to
+        mux. Subsequent adds proceed silently. Returns True if the
+        user wants to proceed."""
+        if getattr(self, "_mux_warning_shown", False):
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Mux another input?",
+            (
+                "Muxing sums multiple capture inputs into this slot's "
+                "single ring buffer. You keep one slot's RAM footprint "
+                "at the same sample rate and channel count, but the "
+                "inputs lose their separate identity — they blend into "
+                "one stream.\n\n"
+                "Because inputs are summed, peaks can add up. Consider "
+                "lowering each source's gain before mixing if you hear "
+                "clipping.\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        self._mux_warning_shown = True
+        return True
+
+    def _restart_slot_capture_if_rolling(self, slot, slot_index: int) -> None:
+        """After mutating `slot.capture_specs`, rebuild and restart the
+        capture so the new spec list takes effect. No-op when the slot
+        isn't currently capturing."""
+        if not slot.is_capturing():
+            return
+        try:
+            slot.stop_capture()
+            new_source = self._state.build_capture_for_slot(slot)
+            slot.bind_capture(new_source)
+            slot.start_capture()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Capture restart failed",
+                f"Could not update capture on {slot.name!r}:\n\n{e}",
+            )
 
     def _set_slot_capture_spec(
         self, slot_index: int, device: CaptureDevice | None

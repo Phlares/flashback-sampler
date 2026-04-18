@@ -64,7 +64,12 @@ class CaptureSlot:
     buffer: AudioCircularBuffer
     checkout_manager: CheckoutManager
     capture_source: Optional[CaptureSource] = None
-    capture_spec: Any = None  # per-slot override; None = inherit global
+    # Per-slot capture routing. `capture_specs` is the canonical list:
+    # empty means follow AppState's global spec; one entry means a
+    # standard single-source route; two-or-more entries means the slot
+    # should be built as a MixedCaptureSource so all listed inputs mix
+    # into the same buffer (RAM-efficient multi-source capture).
+    capture_specs: list = field(default_factory=list)
     anchor_offset_s: float = 0.0
     duration_preset_idx: int = 4  # default 3:00 on the 8-preset cluster
     # User intent: will this slot be part of the next CAPTURE session?
@@ -78,6 +83,24 @@ class CaptureSlot:
     # remembers its own "which clip was I looking at" state. Cleared
     # when the referenced checkout is discarded or saved out.
     focused_checkout_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Backwards-compatible single-spec access
+    # ------------------------------------------------------------------
+
+    @property
+    def capture_spec(self):
+        """Convenience accessor for the single-input case. Returns the
+        lone spec when the slot has exactly one capture input; None if
+        it follows the global default or is running a multi-input mux.
+        Callers that care about mux should read `capture_specs` directly."""
+        return self.capture_specs[0] if len(self.capture_specs) == 1 else None
+
+    @capture_spec.setter
+    def capture_spec(self, value) -> None:
+        """Replace the slot's capture inputs with a single value. Pass
+        None to clear back to 'inherit global'."""
+        self.capture_specs = [] if value is None else [value]
 
     # ------------------------------------------------------------------
     # Factories

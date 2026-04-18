@@ -307,20 +307,47 @@ class AppState:
         """
         Instantiate a capture source wired to `slot`'s buffer.
 
-        Per-slot device routing: if `slot.capture_spec` is set, it
-        overrides the AppState global `capture_spec` for that one
-        slot only. Otherwise the slot inherits the global. Either way,
-        raises if no spec can be resolved.
+        Per-slot device routing: if `slot.capture_specs` has any
+        entries they take precedence — exactly one entry becomes a
+        standard single-source route, two or more become a muxed
+        MixedCaptureSource that sums all inputs into the same buffer.
+        An empty list falls back to AppState's global capture_spec.
         """
-        device = self.effective_capture_spec_for_slot(slot)
-        if device is None:
-            raise RuntimeError(
-                "No capture device selected. Pick one from the Audio menu "
-                "or from the slot's right-click menu."
+        specs = list(slot.capture_specs) if slot.capture_specs else []
+        if not specs:
+            device = self.effective_capture_spec_for_slot(slot)
+            if device is None:
+                raise RuntimeError(
+                    "No capture device selected. Pick one from the Audio menu "
+                    "or from the slot's right-click menu."
+                )
+            specs = [device]
+
+        if len(specs) == 1:
+            return build_capture_source(
+                device=specs[0],
+                buffer=slot.buffer,
+                sample_rate=slot.sample_rate,
+                channels=slot.channels,
             )
-        return build_capture_source(
-            device=device,
-            buffer=slot.buffer,
+
+        # Multi-input mux: every spec gets its own staging ring + sub-
+        # source; MixedCaptureSource mixes them into slot.buffer.
+        from flashback_sampler.core.mixed_capture import MixedCaptureSource
+
+        def make_factory(device):
+            def _factory(stage_buf):
+                return build_capture_source(
+                    device=device,
+                    buffer=stage_buf,
+                    sample_rate=slot.sample_rate,
+                    channels=slot.channels,
+                )
+            return _factory
+
+        return MixedCaptureSource(
+            target_buffer=slot.buffer,
+            sub_factories=[make_factory(d) for d in specs],
             sample_rate=slot.sample_rate,
             channels=slot.channels,
         )
