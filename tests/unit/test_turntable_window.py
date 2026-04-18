@@ -138,14 +138,14 @@ def test_track_selected_updates_active_slot(qapp, state):
     )
     state.add_slot(preset, name="Source 2")
     win = TurntableWindow(state)
-    # Grow track counts
+    # Grow buffer track count to match slot count
     win.buffer_turntable.set_track_count(len(state.slots))
-    win.clip_turntable.set_track_count(len(state.slots))
     # Emit track_selected from buffer side
     win.buffer_turntable.track_selected.emit(1)
     assert state.active_slot_index == 1
-    # Clip side should mirror
-    assert win.clip_turntable.selected_track() == 1
+    # Clip side rings correspond to checkouts now, not slots; with 0 checkouts
+    # the clip turntable falls back to a single empty ring.
+    assert win.clip_turntable.track_count() == 1
 
 
 def test_arm_all_arms_every_slot(qapp, state):
@@ -220,11 +220,11 @@ def test_switch_to_slot_updates_active_and_mirrors(qapp, state):
     state.add_slot(preset, name="Game")
     win = TurntableWindow(state)
     win.buffer_turntable.set_track_count(len(state.slots))
-    win.clip_turntable.set_track_count(len(state.slots))
     win._switch_to_slot(1)
     assert state.active_slot_index == 1
     assert win.buffer_turntable.selected_track() == 1
-    assert win.clip_turntable.selected_track() == 1
+    # Clip side now reflects the new active slot's checkouts (none yet → 1 empty ring)
+    assert win.clip_turntable.track_count() == 1
 
 
 def test_default_buffer_selection_applied_at_init(qapp, state):
@@ -346,7 +346,6 @@ def test_switching_tracks_resets_selection_mode(qapp, state):
     state.add_slot(preset, name="Game")
     win = TurntableWindow(state)
     win.buffer_turntable.set_track_count(len(state.slots))
-    win.clip_turntable.set_track_count(len(state.slots))
     buf = state.active_slot.buffer
     buf.total_written = 20 * buf.sample_rate
     win.buffer_panel.waveform.manualSelectionChanged.emit(0.3, 0.8)
@@ -354,3 +353,128 @@ def test_switching_tracks_resets_selection_mode(qapp, state):
     win.buffer_turntable.track_selected.emit(1)
     assert win._buffer_sel_mode == "default"
     assert win._buffer_sel_abs is None
+
+
+# ── OUT→ checkout flow + clip-side ring population ───────────────────────────
+
+
+def test_peak_bins_from_audio():
+    from flashback_sampler.app.turntable_window import _peak_bins_from_audio
+    import numpy as np
+    audio = np.linspace(-0.5, 0.5, 1000, dtype=np.float32).reshape(-1, 1)
+    bins = _peak_bins_from_audio(audio, n_bins=10)
+    assert bins.shape == (10, 2, 1)
+    # First bin's min should be near -0.5, last bin's max near 0.5
+    assert bins[0, 0, 0] < -0.4
+    assert bins[-1, 1, 0] > 0.4
+
+
+def test_out_button_creates_checkout(qapp, state):
+    win = TurntableWindow(state)
+    buf = state.active_slot.buffer
+    sr = buf.sample_rate
+    # Simulate 5 seconds of recorded audio
+    import numpy as np
+    samples = np.random.standard_normal((5 * sr, buf.channels)).astype(np.float32) * 0.3
+    buf.write(samples)
+    # Set a user selection covering the last portion of the buffer
+    win.buffer_panel.waveform.manualSelectionChanged.emit(0.6, 1.0)
+    # Click OUT→
+    before = len(state.active_slot.checkout_manager.list())
+    win.out_btn.clicked.emit()
+    after = len(state.active_slot.checkout_manager.list())
+    assert after == before + 1
+    # Clip side should now have a ring for the new checkout
+    assert win.clip_turntable.track_count() == after
+
+
+def test_out_button_in_default_mode_uses_preset(qapp, state):
+    import numpy as np
+    win = TurntableWindow(state)
+    buf = state.active_slot.buffer
+    sr = buf.sample_rate
+    # Write enough audio that the default 3:00 (180s) preset clamps correctly.
+    # state fixture gives a 60s buffer, so we only have 60s available; the
+    # handler will clamp abs_start to the oldest available sample.
+    samples = np.zeros((60 * sr, buf.channels), dtype=np.float32)
+    buf.write(samples)
+    win.out_btn.clicked.emit()
+    checkouts = state.active_slot.checkout_manager.list()
+    assert len(checkouts) == 1
+    co = checkouts[0]
+    # Default preset is 180s but capped by the 60s ring — expect close to 60.
+    assert co.duration_seconds > 50
+
+
+def test_new_checkout_adds_outermost_ring(qapp, state):
+    import numpy as np
+    win = TurntableWindow(state)
+    buf = state.active_slot.buffer
+    sr = buf.sample_rate
+    buf.write(np.zeros((5 * sr, buf.channels), dtype=np.float32))
+    win.out_btn.clicked.emit()
+    assert win.clip_turntable.track_count() == 1
+    buf.write(np.zeros((5 * sr, buf.channels), dtype=np.float32))
+    win.out_btn.clicked.emit()
+    assert win.clip_turntable.track_count() == 2
+    # Track 1 (outermost / newest) should be the newly-selected one
+    assert win.clip_turntable.selected_track() == 1
+
+
+def test_clip_ring_click_shows_that_clip_in_panel(qapp, state):
+    import numpy as np
+    win = TurntableWindow(state)
+    buf = state.active_slot.buffer
+    sr = buf.sample_rate
+    buf.write(np.zeros((5 * sr, buf.channels), dtype=np.float32))
+    win.out_btn.clicked.emit()
+    buf.write(np.zeros((5 * sr, buf.channels), dtype=np.float32))
+    win.out_btn.clicked.emit()
+    # Clicking track 0 (older clip) should show clip 1 of 2 in the panel
+    win.clip_turntable.track_selected.emit(0)
+    label = win.clip_panel.source_label.text()
+    assert "#1/2" in label
+
+
+def test_clip_ring_click_does_not_change_active_slot(qapp, state):
+    """Clicking a clip-side ring must NOT change which slot is active."""
+    import numpy as np
+    from flashback_sampler.core.quality_presets import QualityPreset
+    preset = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2,
+        buffer_seconds=30.0, description="test"
+    )
+    state.add_slot(preset, name="Source 2")
+    win = TurntableWindow(state)
+    win.buffer_turntable.set_track_count(len(state.slots))
+    # Active slot = 0 initially. Create two checkouts on slot 0.
+    buf = state.active_slot.buffer
+    sr = buf.sample_rate
+    buf.write(np.zeros((5 * sr, buf.channels), dtype=np.float32))
+    win.out_btn.clicked.emit()
+    buf.write(np.zeros((5 * sr, buf.channels), dtype=np.float32))
+    win.out_btn.clicked.emit()
+    assert state.active_slot_index == 0
+    # Click a clip-side ring; active slot must stay at 0.
+    win.clip_turntable.track_selected.emit(0)
+    assert state.active_slot_index == 0
+
+
+def test_drag_in_progress_not_overwritten_by_tick(qapp, state):
+    """During an active drag on the buffer panel, _tick must not overwrite
+    the in-progress manual selection on the linear waveform."""
+    win = TurntableWindow(state)
+    buf = state.active_slot.buffer
+    buf.total_written = 60 * buf.sample_rate  # 60s "buffered"
+    # Simulate the user mid-drag by flipping the flag directly. Set a
+    # user selection that the tick would normally re-apply.
+    win.buffer_panel.waveform._is_dragging = True
+    # Put a known manual selection into the widget, then run a tick.
+    win.buffer_panel.waveform.set_manual_selection(0.42, 0.77)
+    win._tick()
+    sel = win.buffer_panel.waveform.manual_selection()
+    assert sel is not None
+    s, e = sel
+    # _tick should have left the widget's manual selection alone.
+    assert abs(s - 0.42) < 1e-6
+    assert abs(e - 0.77) < 1e-6

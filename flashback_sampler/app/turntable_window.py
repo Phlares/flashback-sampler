@@ -32,6 +32,29 @@ from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
 
 
+def _peak_bins_from_audio(audio: np.ndarray, n_bins: int) -> np.ndarray:
+    """Same shape as AudioCircularBuffer.get_peak_bins but operating on
+    a static (N, channels) array — used to render a checkout's fixed audio."""
+    if audio.ndim == 1:
+        audio = audio[:, np.newaxis]
+    n = int(audio.shape[0])
+    channels = int(audio.shape[1])
+    out = np.zeros((n_bins, 2, channels), dtype=np.float32)
+    if n == 0:
+        return out
+    edges = np.linspace(0, n, n_bins + 1, dtype=np.int64)
+    for i in range(n_bins):
+        a, b = int(edges[i]), int(edges[i + 1])
+        if b <= a:
+            if i > 0:
+                out[i] = out[i - 1]
+            continue
+        chunk = audio[a:b]
+        out[i, 0] = chunk.min(axis=0)
+        out[i, 1] = chunk.max(axis=0)
+    return out
+
+
 class TurntableWindow(QMainWindow):
     def __init__(self, state: AppState, parent=None):
         super().__init__(parent)
@@ -131,10 +154,11 @@ class TurntableWindow(QMainWindow):
         self.nav_bar = NavBar()
         root.addWidget(self.nav_bar)
 
-        # Set track counts to match current slot count (at least 1)
+        # Buffer turntable has one ring per slot (at least 1). Clip
+        # turntable rings correspond to checkouts and are set in
+        # _refresh_clip_side() below.
         n = max(len(state.slots), 1)
         self.buffer_turntable.set_track_count(n)
-        self.clip_turntable.set_track_count(n)
 
         # Selection state for drift-with-audio.
         # abs_samples: (start, end) in total_written-space. Stays fixed; we
@@ -162,6 +186,8 @@ class TurntableWindow(QMainWindow):
         # Paint the initial default selection immediately rather than waiting
         # for the first tick (33ms).
         self._update_selection_display()
+        # Paint the initial (empty) clip side so its labels/rings are consistent.
+        self._refresh_clip_side()
 
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
@@ -231,6 +257,9 @@ class TurntableWindow(QMainWindow):
         self.buffer_turntable.track_selected.connect(self._on_track_selected)
         self.clip_turntable.track_selected.connect(self._on_track_selected)
 
+        # OUT → check out current buffer selection as a new clip
+        self.out_btn.clicked.connect(self._on_checkout_clicked)
+
         # NavBar actions
         self.nav_bar.arm_all_btn.clicked.connect(self._on_arm_all)
         self.nav_bar.add_source_btn.clicked.connect(self._on_add_source)
@@ -256,17 +285,25 @@ class TurntableWindow(QMainWindow):
         self._refresh_source_indicators()
 
     def _on_track_selected(self, index: int) -> None:
-        # Keep the other turntable's selection mirrored so both discs point at the same slot
+        sender = self.sender()
+        if sender is self.clip_turntable:
+            # Clip click: just show that clip in the panel, don't change slot
+            if not self._state.slots:
+                return
+            checkouts = list(self._state.active_slot.checkout_manager.list())
+            if 0 <= index < len(checkouts):
+                self._display_clip_in_panel(checkouts[index], index, len(checkouts))
+            return
+        # Buffer click: change the active slot
         try:
             self._state.set_active_slot_index(index)
         except IndexError:
             return  # clicked a track beyond current slot count — ignore
-        # Sync the OTHER turntable's visual selection
-        sender = self.sender()
-        other = self.clip_turntable if sender is self.buffer_turntable else self.buffer_turntable
-        if other.selected_track() != index:
-            other.select_track(index)
+        # Mirror the selection index on the clip side if it has that many rings
+        if index < self.clip_turntable.track_count():
+            self.clip_turntable.select_track(index)
         self._refresh_source_names()
+        self._refresh_source_indicators()
         # Reset selection state for the new active slot so it shows its own
         # default; abs-sample snapshots belong to the prior slot.
         self._buffer_sel_mode = "default"
@@ -274,6 +311,114 @@ class TurntableWindow(QMainWindow):
         self._clip_sel_mode = "default"
         self._clip_sel_abs = None
         self._update_selection_display()
+        # Refresh clip side to show the new slot's checkouts
+        self._refresh_clip_side()
+
+    def _on_checkout_clicked(self) -> None:
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+        buf = slot.buffer
+        total = int(buf.total_written)
+        sr = int(buf.sample_rate)
+
+        # Determine abs range from current selection mode
+        if self._buffer_sel_mode == "user" and self._buffer_sel_abs is not None:
+            abs_start, abs_end = self._buffer_sel_abs
+        else:
+            # Default mode — use slot.duration_preset_idx + anchor_offset_s from "now"
+            from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+            preset_idx = max(
+                0, min(len(DEFAULT_PRESETS) - 1, slot.duration_preset_idx)
+            )
+            duration_s = DEFAULT_PRESETS[preset_idx]
+            anchor_s = max(0.0, slot.anchor_offset_s)
+            abs_end = total - int(anchor_s * sr)
+            abs_start = abs_end - int(duration_s * sr)
+
+        # Clamp abs_start to what's still in the ring
+        oldest_available = max(0, total - buf.buffer_size)
+        abs_start = max(abs_start, oldest_available)
+        if abs_end <= abs_start:
+            QMessageBox.warning(
+                self, "Check out failed",
+                "Selection is empty or has already scrolled out of the buffer."
+            )
+            return
+
+        try:
+            slot.checkout_manager.create_from_abs_range(abs_start, abs_end)
+        except Exception as e:
+            QMessageBox.warning(self, "Check out failed", str(e))
+            return
+
+        # Clear buffer selection → return to default behavior
+        self._buffer_sel_mode = "default"
+        self._buffer_sel_abs = None
+
+        # Refresh clip side to include the new checkout; auto-select it
+        self._refresh_clip_side(auto_select_newest=True)
+
+    def _refresh_clip_side(self, auto_select_newest: bool = False) -> None:
+        """Populate the clip_turntable rings and clip panel with checkouts
+        from the ACTIVE slot. Newest checkout = outermost ring (highest index)."""
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+        checkouts = list(slot.checkout_manager.list())  # oldest first
+        n = len(checkouts)
+
+        # Resize clip turntable. Keep a minimum of 1 ring for visual
+        # consistency when there are no checkouts yet.
+        self.clip_turntable.set_track_count(max(n, 1))
+
+        # Clear out any track waveforms / selections / statuses that no
+        # longer correspond to a checkout.
+        self.clip_turntable._track_waveforms.clear()
+        self.clip_turntable._track_selections.clear()
+
+        if n == 0:
+            # Nothing to render; force a repaint so cleared rings show.
+            self.clip_turntable.update()
+            self.clip_panel.waveform.set_data(
+                np.zeros((1, 2, 1), dtype=np.float32)
+            )
+            self.clip_panel.set_source_name("CLIP")
+            self.clip_panel.set_duration_text("")
+            self.clip_panel.set_clip_id("")
+            self.clip_panel.set_times("0:00.00", "0:00.00")
+            return
+
+        # Plot each checkout onto its ring.
+        for j, co in enumerate(checkouts):
+            bins = _peak_bins_from_audio(co.audio, n_bins=540)
+            amp = (
+                (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
+            ).astype(np.float32)
+            amp = np.clip(amp, 0.0, 1.0)
+            self.clip_turntable.set_track_waveform(j, amp, fill_fraction=1.0)
+
+        # Decide which clip's waveform the clip PANEL displays
+        if auto_select_newest:
+            sel_idx = n - 1
+        else:
+            sel_idx = max(0, min(self.clip_turntable.selected_track(), n - 1))
+        self.clip_turntable.select_track(sel_idx)
+        self._display_clip_in_panel(checkouts[sel_idx], sel_idx, n)
+
+    def _display_clip_in_panel(self, co, index: int, total: int) -> None:
+        """Render a single checkout's full audio into the clip WaveformPanel."""
+        bins = _peak_bins_from_audio(co.audio, n_bins=360)
+        self.clip_panel.waveform.set_data(bins)
+        slot_name = (
+            self._state.active_slot.name if self._state.slots else "?"
+        )
+        self.clip_panel.set_source_name(
+            f"{slot_name.upper()} #{index + 1}/{total}"
+        )
+        self.clip_panel.set_duration_text(f"{co.duration_seconds:.1f}s")
+        self.clip_panel.set_clip_id(co.id[:6].upper())
+        self.clip_panel.set_times("0:00.00", f"{co.duration_seconds:.2f}s")
 
     def _on_arm_all(self) -> None:
         for slot in self._state.slots:
@@ -313,12 +458,14 @@ class TurntableWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Add source failed", str(e))
             return
-        # Refresh visuals to match new slot count
+        # Refresh visuals to match new slot count. Clip turntable reflects
+        # checkouts on the ACTIVE slot, not slot count, so re-run the clip
+        # refresh rather than forcing track count to match slots.
         n = len(self._state.slots)
         self.buffer_turntable.set_track_count(n)
-        self.clip_turntable.set_track_count(n)
         self._refresh_source_indicators()
         self._refresh_source_names()
+        self._refresh_clip_side()
 
     def _refresh_source_indicators(self) -> None:
         """Update the NavBar source chips to reflect current slot armed/capturing state."""
@@ -395,15 +542,17 @@ class TurntableWindow(QMainWindow):
                   panel, turntable) -> None:
             idx = self._state.active_slot_index
             if fracs is None:
-                panel.waveform.blockSignals(True)
-                panel.waveform.clear_manual_selection()
-                panel.waveform.blockSignals(False)
+                if not panel.waveform._is_dragging:
+                    panel.waveform.blockSignals(True)
+                    panel.waveform.clear_manual_selection()
+                    panel.waveform.blockSignals(False)
                 turntable.set_track_selection(idx, None, None, color)
                 return
             s, e = fracs
-            panel.waveform.blockSignals(True)
-            panel.waveform.set_manual_selection(s, e)
-            panel.waveform.blockSignals(False)
+            if not panel.waveform._is_dragging:
+                panel.waveform.blockSignals(True)
+                panel.waveform.set_manual_selection(s, e)
+                panel.waveform.blockSignals(False)
             turntable.set_track_selection(idx, s, e, color)
 
         apply(compute_fracs_buffer_side(), SELECTION_COLOR_BUFFER,
@@ -516,6 +665,7 @@ class TurntableWindow(QMainWindow):
         self._clip_sel_mode = "default"
         self._clip_sel_abs = None
         self._update_selection_display()
+        self._refresh_clip_side()
         self._refresh_source_indicators()
 
     def _on_source_chip_context_menu(
@@ -707,18 +857,17 @@ class TurntableWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Remove failed", str(e))
             return
-        # Adjust track counts on both turntables to match the new slot count
+        # Adjust buffer turntable track count to match the new slot count;
+        # the clip turntable now reflects checkouts via _refresh_clip_side.
         n = len(self._state.slots)
         self.buffer_turntable.set_track_count(max(n, 1))
-        self.clip_turntable.set_track_count(max(n, 1))
         # Mirror selection on the (now-current) active slot
         active_idx = self._state.active_slot_index
         if 0 <= active_idx < self.buffer_turntable.track_count():
             self.buffer_turntable.select_track(active_idx)
-        if 0 <= active_idx < self.clip_turntable.track_count():
-            self.clip_turntable.select_track(active_idx)
         self._refresh_source_names()
         self._refresh_source_indicators()
+        self._refresh_clip_side()
 
     def _populate_demo_data(self) -> None:
         rng = np.random.default_rng(seed=42)
