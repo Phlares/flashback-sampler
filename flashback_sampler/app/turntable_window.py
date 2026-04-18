@@ -275,7 +275,7 @@ class TurntableWindow(QMainWindow):
 
         # NavBar actions
         self.nav_bar.arm_all_btn.clicked.connect(self._on_arm_all)
-        self.nav_bar.add_source_btn.clicked.connect(self._on_add_source_menu)
+        self.nav_bar.add_source_btn.clicked.connect(self._on_add_source)
         # Per-source chips in the NavBar — NavBar forwards per-chip
         # signals so the wiring stays valid even as chips are created
         # dynamically when the user adds more sources.
@@ -607,86 +607,6 @@ class TurntableWindow(QMainWindow):
                 f"Could not update capture on {slot.name!r}:\n\n{e}",
             )
 
-    def _on_add_source_menu(self) -> None:
-        """Dropdown shown when ADD SOURCE+ is clicked. Hoists the
-        per-slot Capture Source submenu into the top level so the user
-        can pick a specific device/process for the new slot right from
-        the primary menu, rather than adding first and then routing via
-        the per-chip context menu. 'Configure…' still opens the full
-        dialog for name/buffer/sr/channels tuning."""
-        menu = QMenu(self)
-
-        # Quick-add with the current global capture spec.
-        default_act = QAction("Add with Default Source (global)", self)
-        default_act.triggered.connect(
-            lambda _c=False: self._quick_add_source(None)
-        )
-        menu.addAction(default_act)
-
-        # Process picker — opens the Windows per-process loopback dialog.
-        proc_act = QAction("Add from Process…", self)
-        proc_act.triggered.connect(
-            lambda _c=False: self._quick_add_source_from_process()
-        )
-        menu.addAction(proc_act)
-
-        menu.addSeparator()
-
-        devices = list_capture_devices()
-        if devices:
-            hdr = QAction("Add from Device", self)
-            hdr.setEnabled(False)
-            menu.addAction(hdr)
-            for dev in devices:
-                label = dev.name + ("   [default]" if dev.is_default else "")
-                act = QAction(label, self)
-                act.triggered.connect(
-                    lambda _c=False, d=dev: self._quick_add_source(d)
-                )
-                menu.addAction(act)
-            menu.addSeparator()
-
-        configure_act = QAction("Configure New Source…", self)
-        configure_act.triggered.connect(self._on_add_source)
-        menu.addAction(configure_act)
-
-        # Anchor the menu just below the ADD SOURCE+ button.
-        btn = self.nav_bar.add_source_btn
-        pos = btn.mapToGlobal(btn.rect().bottomLeft())
-        menu.exec(pos)
-
-    def _quick_add_source(self, device: CaptureDevice | None) -> None:
-        """Add a slot with defaults and (optionally) a specific per-slot
-        capture_spec. Skips the configuration dialog."""
-        active = self._state.active_slot
-        from flashback_sampler.core.quality_presets import QualityPreset
-        preset = QualityPreset(
-            name="CUSTOM",
-            sample_rate=active.sample_rate,
-            channels=active.channels,
-            buffer_seconds=float(active.buffer_seconds),
-            description="",
-        )
-        name = f"Source {len(self._state.slots) + 1}"
-        try:
-            self._state.add_slot(preset, name=name)
-        except Exception as e:
-            QMessageBox.warning(self, "Add source failed", str(e))
-            return
-        new_idx = len(self._state.slots) - 1
-        if device is not None:
-            self._state.slots[new_idx].capture_spec = device
-        self._finalize_add_source(new_idx)
-
-    def _quick_add_source_from_process(self) -> None:
-        dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
-            return
-        device = dlg.result_device()
-        if device is None:
-            return
-        self._quick_add_source(device)
-
     def _finalize_add_source(self, new_idx: int) -> None:
         """Refresh visuals after a slot has been appended. Also start the
         newly-added slot's capture immediately if the transport is
@@ -701,6 +621,10 @@ class TurntableWindow(QMainWindow):
             self._refresh_source_indicators()
 
     def _on_add_source(self) -> None:
+        """Open the Configure Source dialog. The dialog carries the
+        capture-source picker ("SOURCE INPUT" field) so the user chooses
+        device / process / default in the same pass as name and buffer.
+        No intermediate menu."""
         from flashback_sampler.app.add_source_dialog import AddSourceDialog
         active = self._state.active_slot
         default_name = f"Source {len(self._state.slots) + 1}"
@@ -725,7 +649,11 @@ class TurntableWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Add source failed", str(e))
             return
-        self._finalize_add_source(len(self._state.slots) - 1)
+        new_idx = len(self._state.slots) - 1
+        device = dlg.result_device()
+        if device is not None and 0 <= new_idx < len(self._state.slots):
+            self._state.slots[new_idx].capture_spec = device
+        self._finalize_add_source(new_idx)
 
     def _refresh_source_indicators(self) -> None:
         """Update the NavBar source chips to reflect current slot armed/capturing state."""
@@ -978,11 +906,13 @@ class TurntableWindow(QMainWindow):
 
         menu.addSeparator()
 
-        # Capture Source submenu — per-slot device routing. "Use
-        # Default (global)" at the top sets slot.capture_spec = None so
-        # the slot follows whatever the Audio menu has selected.
-        cap_menu = menu.addMenu("Capture Source")
-        self._populate_slot_capture_source_menu(cap_menu, slot_index)
+        # Select Source Input(s) — mirrors the AddSourceDialog's
+        # SOURCE INPUT menu (Default / From Device… / From Process…)
+        # so the add-source flow and the per-slot reroute flow feel
+        # identical. Device list hidden behind a sub-submenu instead
+        # of inlined so the top-level stays short.
+        src_menu = menu.addMenu("Select Source Input(s)")
+        self._populate_slot_capture_source_menu(src_menu, slot_index)
 
         menu.addSeparator()
 
@@ -1006,60 +936,59 @@ class TurntableWindow(QMainWindow):
         menu.exec(qpt)
 
     def _populate_slot_capture_source_menu(
-        self, cap_menu: QMenu, slot_index: int
+        self, src_menu: QMenu, slot_index: int
     ) -> None:
-        """Build (or rebuild) the per-slot Capture Source submenu."""
+        """Build the 'Select Source Input(s)' submenu for one slot.
+        Structure matches AddSourceDialog's SOURCE INPUT menu: Default,
+        From Device… (nested device list), From Process… (picker)."""
         slot = self._state.slots[slot_index]
         current_spec = self._state.effective_capture_spec_for_slot(slot)
         using_override = slot.capture_spec is not None
 
-        group = QActionGroup(cap_menu)
+        group = QActionGroup(src_menu)
         group.setExclusive(True)
 
-        global_default = QAction("Use Default (global)", cap_menu)
+        global_default = QAction("Default (global)", src_menu)
         global_default.setCheckable(True)
         global_default.setChecked(not using_override)
         global_default.triggered.connect(
             lambda _c=False, i=slot_index: self._set_slot_capture_spec(i, None)
         )
         group.addAction(global_default)
-        cap_menu.addAction(global_default)
+        src_menu.addAction(global_default)
 
-        cap_menu.addSeparator()
+        src_menu.addSeparator()
 
-        # Capture from Process... — opens the Windows-only process
-        # picker, returns a CaptureDevice with kind="process_loopback"
-        proc_act = QAction("Capture from Process…", cap_menu)
+        # From Device… — nested submenu keeps the top level short.
+        dev_menu = src_menu.addMenu("From Device…")
+        devices = list_capture_devices()
+        if not devices:
+            hint = QAction("(no capture devices)", dev_menu)
+            hint.setEnabled(False)
+            dev_menu.addAction(hint)
+        else:
+            for dev in devices:
+                label = dev.name + ("   [default]" if dev.is_default else "")
+                act = QAction(label, dev_menu)
+                act.setCheckable(True)
+                if (
+                    using_override
+                    and current_spec is not None
+                    and current_spec.kind == dev.kind
+                    and current_spec.id == dev.id
+                ):
+                    act.setChecked(True)
+                group.addAction(act)
+                dev_menu.addAction(act)
+                act.triggered.connect(
+                    lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(i, d)
+                )
+
+        proc_act = QAction("From Process…", src_menu)
         proc_act.triggered.connect(
             lambda _c=False, i=slot_index: self._pick_process_for_slot(i)
         )
-        cap_menu.addAction(proc_act)
-
-        cap_menu.addSeparator()
-
-        devices = list_capture_devices()
-        if not devices:
-            hint = QAction("(no capture devices)", cap_menu)
-            hint.setEnabled(False)
-            cap_menu.addAction(hint)
-            return
-
-        for dev in devices:
-            label = dev.name + ("   [default]" if dev.is_default else "")
-            act = QAction(label, cap_menu)
-            act.setCheckable(True)
-            if (
-                using_override
-                and current_spec is not None
-                and current_spec.kind == dev.kind
-                and current_spec.id == dev.id
-            ):
-                act.setChecked(True)
-            group.addAction(act)
-            cap_menu.addAction(act)
-            act.triggered.connect(
-                lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(i, d)
-            )
+        src_menu.addAction(proc_act)
 
     def _pick_process_for_slot(self, slot_index: int) -> None:
         """Open the ProcessPickerDialog and, on accept, set the slot's
