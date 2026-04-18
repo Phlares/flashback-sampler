@@ -121,9 +121,11 @@ class TurntableWindow(QMainWindow):
         buffer_col = QHBoxLayout()
         buffer_col.setSpacing(4)
         self.buffer_controls: list[TactileButton] = []
-        for label in ["FLUSH", "−", "+", "◀", "▶", "PAUSE"]:
+        for label in ["FLUSH", "−", "+", "◀", "▶", "FREEZE"]:
             btn = TactileButton(label, variant="secondary")
             btn.setMinimumWidth(40); btn.setMinimumHeight(36)
+            if label == "FREEZE":
+                btn.setCheckable(True)
             self.buffer_controls.append(btn)
             buffer_col.addWidget(btn)
         buffer_col.addStretch()
@@ -180,6 +182,15 @@ class TurntableWindow(QMainWindow):
         # tick — used to auto-restart on loop when playback drains.
         self._was_playing_last_tick: bool = False
 
+        # FREEZE state: when True, the buffer panel's waveform + time
+        # labels + timeline are held at the snapshot taken when freeze
+        # was engaged; the ring keeps polling live audio, and selection
+        # fractions are computed against the frozen total/buffered_s so
+        # the user can drag on a static waveform while capture rolls on.
+        self._buffer_frozen: bool = False
+        self._buffer_frozen_total: int = 0
+        self._buffer_frozen_buffered_s: float = 0.0
+
         self._wire_selection_sync()
         self._wire_controls()
 
@@ -190,6 +201,7 @@ class TurntableWindow(QMainWindow):
         self._tick_timer.start()
 
         self._refresh_source_names()
+        self._update_buffer_duration_label()
         # Paint the initial default selection immediately rather than waiting
         # for the first tick (33ms).
         self._update_selection_display()
@@ -210,10 +222,12 @@ class TurntableWindow(QMainWindow):
                 return
             slot = self._state.active_slot
             buf = slot.buffer
-            buffered_s = float(buf.buffered_seconds)
+            # While frozen, fractions resolve against the snapshot so a
+            # drag on the static waveform lands on the audio the user
+            # actually sees, not on the live-advancing buffer.
+            total, buffered_s = self._effective_total_and_buffered(buf)
             if buffered_s <= 0 or end <= start:
                 return
-            total = int(buf.total_written)
             sr = int(buf.sample_rate)
             samples_visible = int(buffered_s * sr)
             oldest_visible = total - samples_visible
@@ -257,9 +271,10 @@ class TurntableWindow(QMainWindow):
         # Transport
         self.center_bridge.start_btn.clicked.connect(self._on_start_clicked)
         self.center_bridge.stop_btn.clicked.connect(self._on_stop_clicked)
-        # PAUSE is per-side (in buffer_controls[-1]) — maps to same stop_rolling for now
-        pause_btn = self.buffer_controls[-1]   # "PAUSE" is index 5
-        pause_btn.clicked.connect(self._on_stop_clicked)
+        # FREEZE toggles the buffer-panel display without stopping
+        # capture — see _on_freeze_toggled.
+        freeze_btn = self.buffer_controls[-1]
+        freeze_btn.toggled.connect(self._on_freeze_toggled)
 
         # Track selection on either turntable → update active slot
         self.buffer_turntable.track_selected.connect(self._on_track_selected)
@@ -350,7 +365,9 @@ class TurntableWindow(QMainWindow):
 
     def _nudge_buffer_duration(self, step: int) -> None:
         """− (step=-1) / + (step=+1): step through DEFAULT_PRESETS to
-        shrink or grow the default buffer selection window."""
+        shrink or grow the default buffer selection window. Also
+        re-clamps the anchor so the selection stays inside the
+        buffered audio and updates the duration label in the header."""
         from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
@@ -358,14 +375,20 @@ class TurntableWindow(QMainWindow):
         idx = int(slot.duration_preset_idx) + step
         idx = max(0, min(len(DEFAULT_PRESETS) - 1, idx))
         slot.duration_preset_idx = idx
+        # Clamp the anchor so the new duration still fits the buffer.
+        self._clamp_buffer_anchor(slot)
         self._buffer_sel_mode = "default"
         self._buffer_sel_abs = None
         self._update_selection_display()
+        self._update_buffer_duration_label()
 
     def _nudge_buffer_anchor(self, direction: int) -> None:
         """◀ (direction=+1, older) / ▶ (direction=-1, newer): shift the
         buffer selection's anchor by half the current duration so
-        repeated presses walk through the audio without overlap."""
+        repeated presses walk through the audio without overlap.
+        Anchor is clamped so the full selection stays inside the
+        buffered range — pressing ◀ past the edge parks at the edge
+        instead of collapsing the selection below its preset length."""
         from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
@@ -374,11 +397,65 @@ class TurntableWindow(QMainWindow):
             0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
         )
         step_s = float(DEFAULT_PRESETS[preset_idx]) * 0.5
-        slot.anchor_offset_s = max(
-            0.0, float(slot.anchor_offset_s) + step_s * direction
-        )
+        slot.anchor_offset_s = float(slot.anchor_offset_s) + step_s * direction
+        self._clamp_buffer_anchor(slot)
         self._buffer_sel_mode = "default"
         self._buffer_sel_abs = None
+        self._update_selection_display()
+
+    def _clamp_buffer_anchor(self, slot) -> None:
+        """Keep anchor_offset in [0, buffered_s − duration_s] so that
+        anchor + duration never exceeds the available buffered audio.
+        If the duration is longer than what's buffered, anchor parks
+        at 0 (selection is as wide as the buffer allows)."""
+        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+        preset_idx = max(
+            0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
+        )
+        duration_s = float(DEFAULT_PRESETS[preset_idx])
+        buffered_s = float(slot.buffer.buffered_seconds)
+        max_anchor = max(0.0, buffered_s - duration_s)
+        slot.anchor_offset_s = max(
+            0.0, min(max_anchor, float(slot.anchor_offset_s))
+        )
+
+    def _update_buffer_duration_label(self) -> None:
+        """Sync the buffer panel header's duration readout (the '3:00'
+        next to the source name) with the active slot's current
+        duration preset."""
+        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+        idx = max(
+            0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
+        )
+        seconds = int(DEFAULT_PRESETS[idx])
+        m, s = seconds // 60, seconds % 60
+        self.buffer_panel.set_duration_text(f"{m}:{s:02d}")
+
+    # ------------------------------------------------------------------
+    # FREEZE — hold the buffer-panel display static while capture rolls
+    # ------------------------------------------------------------------
+
+    def _on_freeze_toggled(self, checked: bool) -> None:
+        """Enter / leave frozen state. While frozen, the linear buffer
+        waveform, time labels and timeline are pinned to the snapshot
+        taken at freeze time. Capture continues — the radial ring keeps
+        spinning — and drag selections on the frozen panel resolve
+        against the snapshot so the user can dig out a clip from a
+        static waveform without chasing a live one."""
+        if checked and self._state.slots:
+            buf = self._state.active_slot.buffer
+            self._buffer_frozen_total = int(buf.total_written)
+            self._buffer_frozen_buffered_s = float(buf.buffered_seconds)
+            self._buffer_frozen = True
+            self.buffer_controls[-1].setText("FROZEN")
+        else:
+            self._buffer_frozen = False
+            self.buffer_controls[-1].setText("FREEZE")
+        # Refresh selection display so fractions recompute against the
+        # correct (frozen or live) total/buffered reference.
         self._update_selection_display()
 
     # ------------------------------------------------------------------
@@ -485,6 +562,7 @@ class TurntableWindow(QMainWindow):
             self.clip_turntable.select_track(index)
         self._refresh_source_names()
         self._refresh_source_indicators()
+        self._update_buffer_duration_label()
         # Reset selection state for the new active slot so it shows its own
         # default; abs-sample snapshots belong to the prior slot. Clip
         # trim fractions are keyed by checkout id so they survive the
@@ -837,6 +915,15 @@ class TurntableWindow(QMainWindow):
             else:
                 chip.set_status("inactive")
 
+    def _effective_total_and_buffered(self, buf) -> tuple[int, float]:
+        """Return (total_written, buffered_seconds) pinned to the
+        freeze snapshot when the buffer panel is frozen; live values
+        otherwise. Used by selection-fraction math so dragging on a
+        frozen waveform targets the audio the user actually sees."""
+        if self._buffer_frozen:
+            return (self._buffer_frozen_total, self._buffer_frozen_buffered_s)
+        return (int(buf.total_written), float(buf.buffered_seconds))
+
     def _update_selection_display(self) -> None:
         """Convert stored absolute sample positions (or default anchor /
         duration when in "default" mode) into current display fractions
@@ -848,12 +935,11 @@ class TurntableWindow(QMainWindow):
             return
         slot = self._state.active_slot
         buf = slot.buffer
-        buffered_s = float(buf.buffered_seconds)
+        total, buffered_s = self._effective_total_and_buffered(buf)
         if buffered_s <= 0:
             # Nothing to show yet
             return
         sr = int(buf.sample_rate)
-        total = int(buf.total_written)
 
         def compute_fracs_buffer_side() -> tuple[float, float] | None:
             if self._buffer_sel_mode == "default":
@@ -944,8 +1030,10 @@ class TurntableWindow(QMainWindow):
         slots = self._state.slots
         active_idx = self._state.active_slot_index
 
-        # Active slot → buffer panel's linear waveform view + timestamps
-        if 0 <= active_idx < len(slots):
+        # Active slot → buffer panel's linear waveform view + timestamps.
+        # While frozen, the panel stays pinned to the snapshot taken at
+        # freeze time — the ring below still updates live.
+        if 0 <= active_idx < len(slots) and not self._buffer_frozen:
             active_buf = slots[active_idx].buffer
             try:
                 bins = active_buf.get_peak_bins(
@@ -1098,6 +1186,7 @@ class TurntableWindow(QMainWindow):
         self._update_selection_display()
         self._refresh_clip_side()
         self._refresh_source_indicators()
+        self._update_buffer_duration_label()
 
     def _on_source_chip_context_menu(
         self, slot_index: int, global_pos: QPoint
