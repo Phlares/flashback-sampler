@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -176,6 +176,10 @@ class TurntableWindow(QMainWindow):
         # checkout id so switching clips preserves each one's trim.
         self._clip_trim_fracs: dict[str, tuple[float, float]] = {}
 
+        # Tracks whether the scrub player was rolling on the previous
+        # tick — used to auto-restart on loop when playback drains.
+        self._was_playing_last_tick: bool = False
+
         self._wire_selection_sync()
         self._wire_controls()
 
@@ -268,6 +272,45 @@ class TurntableWindow(QMainWindow):
         save_btn = self.clip_controls[-1]
         save_btn.clicked.connect(lambda: self._save_current_clip())
 
+        # Buffer controls: [FLUSH, −, +, ◀, ▶, PAUSE]. FLUSH wipes the
+        # active slot's buffer; − / + step the duration preset; ◀ / ▶
+        # shift the anchor by half the current duration (older / newer).
+        self.buffer_controls[0].clicked.connect(self._on_flush_active_buffer)
+        self.buffer_controls[1].clicked.connect(
+            lambda: self._nudge_buffer_duration(-1)
+        )
+        self.buffer_controls[2].clicked.connect(
+            lambda: self._nudge_buffer_duration(+1)
+        )
+        self.buffer_controls[3].clicked.connect(
+            lambda: self._nudge_buffer_anchor(+1)
+        )
+        self.buffer_controls[4].clicked.connect(
+            lambda: self._nudge_buffer_anchor(-1)
+        )
+
+        # Clip controls: [PLAY, −, +, ◀, ▶, SAVE]. PLAY toggles playback
+        # of the trimmed clip; − / + tighten / expand the trim window
+        # around its centre; ◀ / ▶ shift the whole trim earlier / later.
+        self.clip_controls[0].clicked.connect(self._on_play_clip_clicked)
+        self.clip_controls[1].clicked.connect(
+            lambda: self._nudge_clip_trim_span(-0.05)
+        )
+        self.clip_controls[2].clicked.connect(
+            lambda: self._nudge_clip_trim_span(+0.05)
+        )
+        self.clip_controls[3].clicked.connect(
+            lambda: self._nudge_clip_trim_shift(-0.05)
+        )
+        self.clip_controls[4].clicked.connect(
+            lambda: self._nudge_clip_trim_shift(+0.05)
+        )
+
+        # Spacebar → toggle clip playback from in-marker to out-marker.
+        play_sc = QShortcut(QKeySequence(Qt.Key_Space), self)
+        play_sc.setContext(Qt.ApplicationShortcut)
+        play_sc.activated.connect(self._on_play_clip_clicked)
+
         # Right-click on clip waveform → save/discard context menu
         self.clip_panel.waveform.contextMenuRequested.connect(
             self._on_clip_panel_context_menu
@@ -296,6 +339,131 @@ class TurntableWindow(QMainWindow):
     def _on_stop_clicked(self) -> None:
         self._state.stop_rolling()
         self._refresh_source_indicators()
+
+    # ------------------------------------------------------------------
+    # Buffer-side transport controls (− / + / ◀ / ▶ / FLUSH)
+    # ------------------------------------------------------------------
+
+    def _on_flush_active_buffer(self) -> None:
+        """FLUSH button — wipe the currently active slot's buffer."""
+        self._flush_slot_buffer(self._state.active_slot_index)
+
+    def _nudge_buffer_duration(self, step: int) -> None:
+        """− (step=-1) / + (step=+1): step through DEFAULT_PRESETS to
+        shrink or grow the default buffer selection window."""
+        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+        idx = int(slot.duration_preset_idx) + step
+        idx = max(0, min(len(DEFAULT_PRESETS) - 1, idx))
+        slot.duration_preset_idx = idx
+        self._buffer_sel_mode = "default"
+        self._buffer_sel_abs = None
+        self._update_selection_display()
+
+    def _nudge_buffer_anchor(self, direction: int) -> None:
+        """◀ (direction=+1, older) / ▶ (direction=-1, newer): shift the
+        buffer selection's anchor by half the current duration so
+        repeated presses walk through the audio without overlap."""
+        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+        preset_idx = max(
+            0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
+        )
+        step_s = float(DEFAULT_PRESETS[preset_idx]) * 0.5
+        slot.anchor_offset_s = max(
+            0.0, float(slot.anchor_offset_s) + step_s * direction
+        )
+        self._buffer_sel_mode = "default"
+        self._buffer_sel_abs = None
+        self._update_selection_display()
+
+    # ------------------------------------------------------------------
+    # Clip-side transport controls (PLAY / − / + / ◀ / ▶)
+    # ------------------------------------------------------------------
+
+    def _on_play_clip_clicked(self) -> None:
+        """Toggle playback of the currently displayed clip. Plays from
+        the in-marker to the out-marker; if no trim is set, plays the
+        full clip. Bound to both the PLAY button and the Space key."""
+        co = self._currently_displayed_checkout()
+        player = self._state.scrub_player
+        if player.is_playing:
+            player.pause()
+            self._refresh_play_button()
+            return
+        if co is None:
+            return
+        has_trim = (
+            co.trim_in_samples > 0
+            or (
+                co.trim_out_samples > 0
+                and co.trim_out_samples < co.audio.shape[0]
+            )
+        )
+        audio = co.trimmed_audio() if has_trim else co.audio
+        try:
+            player.bind(audio)
+            player.open()
+            player.play()
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Playback failed", f"Could not start playback:\n\n{e}"
+            )
+            return
+        self._refresh_play_button()
+
+    def _refresh_play_button(self) -> None:
+        """Keep PLAY button label in sync with the scrub player state."""
+        self.clip_controls[0].setText(
+            "STOP" if self._state.scrub_player.is_playing else "PLAY"
+        )
+
+    def _nudge_clip_trim_span(self, delta_frac: float) -> None:
+        """− (delta=-0.05): tighten the trim around its centre.
+        + (delta=+0.05): loosen it outward. Clamped to [0, 1]."""
+        co = self._currently_displayed_checkout()
+        if co is None or co.audio.shape[0] == 0:
+            return
+        fracs = self._clip_trim_fracs.get(co.id)
+        start, end = fracs if fracs is not None else (0.0, 1.0)
+        half = delta_frac / 2.0
+        new_start = max(0.0, min(1.0, start - half))
+        new_end = max(0.0, min(1.0, end + half))
+        if new_end <= new_start:
+            return
+        self._apply_clip_trim(co, new_start, new_end)
+
+    def _nudge_clip_trim_shift(self, delta_frac: float) -> None:
+        """◀ / ▶: slide the whole trim window earlier / later by
+        delta_frac, preserving its width. Hits the edges rather than
+        wrapping."""
+        co = self._currently_displayed_checkout()
+        if co is None or co.audio.shape[0] == 0:
+            return
+        fracs = self._clip_trim_fracs.get(co.id)
+        if fracs is None:
+            return
+        start, end = fracs
+        width = end - start
+        new_start = max(0.0, min(1.0 - width, start + delta_frac))
+        new_end = new_start + width
+        self._apply_clip_trim(co, new_start, new_end)
+
+    def _apply_clip_trim(self, co, start: float, end: float) -> None:
+        """Persist a new trim range for the given checkout and reflect
+        it in both the panel waveform and the ring selection arc."""
+        self._clip_trim_fracs[co.id] = (start, end)
+        n = int(co.audio.shape[0])
+        co.trim_in_samples = max(0, int(start * n))
+        co.trim_out_samples = max(co.trim_in_samples, int(end * n))
+        self.clip_panel.waveform.blockSignals(True)
+        self.clip_panel.waveform.set_manual_selection(start, end)
+        self.clip_panel.waveform.blockSignals(False)
+        self._update_selection_display()
 
     def _on_track_selected(self, index: int) -> None:
         sender = self.sender()
@@ -848,8 +1016,60 @@ class TurntableWindow(QMainWindow):
         # the current fill fraction.
         self._update_selection_display()
 
+        # Playhead + PLAY button + LOOP restart.
+        self._update_clip_playback_state()
+
+    def _update_clip_playback_state(self) -> None:
+        """Drive the clip panel's playhead from the scrub player's
+        cursor, keep PLAY / STOP label in sync, and auto-rewind when
+        the LOOP button is toggled on and playback has drained."""
+        player = self._state.scrub_player
+        co = self._currently_displayed_checkout()
+        # Playhead: express the current cursor position as a fraction
+        # of the FULL clip audio so the playhead lines up with the
+        # displayed waveform (not with the trimmed slice).
+        if (
+            co is not None
+            and player.is_playing
+            and co.audio.shape[0] > 0
+        ):
+            cursor_samples = int(player.cursor_samples)
+            has_trim = (
+                co.trim_in_samples > 0
+                or (
+                    co.trim_out_samples > 0
+                    and co.trim_out_samples < co.audio.shape[0]
+                )
+            )
+            base_offset = co.trim_in_samples if has_trim else 0
+            abs_sample = base_offset + cursor_samples
+            frac = max(
+                0.0, min(1.0, abs_sample / float(co.audio.shape[0]))
+            )
+            self.clip_panel.waveform.set_playhead(frac)
+        else:
+            self.clip_panel.waveform.set_playhead(None)
+            # LOOP: if checked and a clip is bound but playback stopped
+            # (source drained), restart from the start.
+            if (
+                self.loop_btn.isChecked()
+                and co is not None
+                and not player.is_playing
+                and getattr(self, "_was_playing_last_tick", False)
+            ):
+                try:
+                    player.play()
+                except Exception:
+                    pass
+        self._was_playing_last_tick = bool(player.is_playing)
+        self._refresh_play_button()
+
     def closeEvent(self, event) -> None:
         self._tick_timer.stop()
+        try:
+            self._state.scrub_player.pause()
+        except Exception:
+            pass
         self._state.shutdown()
         super().closeEvent(event)
 
