@@ -110,6 +110,18 @@ class TurntableWidget(QWidget):
     def header_angle_deg(self) -> int:
         return 0 if self._side == "buffer" else 180
 
+    def _arc_dir(self) -> int:
+        """Sweep direction from the header for "behind in time" content.
+
+        Both turntables should fill into the BOTTOM HALF of the disc so
+        the two are visually mirrored across the vertical axis. With
+        screen-space painting (cos, -sin), reaching the bottom from the
+        buffer header (3 o'clock, theta=0) means math-DECREASING theta
+        (toward -π/2 = bottom). From the clip header (9 o'clock, theta=π)
+        it means math-INCREASING theta (toward 3π/2 = bottom).
+        """
+        return -1 if self._side == "buffer" else +1
+
     def set_track_waveform(
         self, track_idx: int, samples: "np.ndarray", fill_fraction: float = 1.0
     ) -> None:
@@ -174,50 +186,42 @@ class TurntableWidget(QWidget):
         # Concentric track rings (innermost = track 0, outermost = last)
         for i in range(self._track_count):
             r = g.ring_radius(i)
-            # Dark neutral ring — waveform bars stand out against it
+            # Dark neutral ring — waveform bars stand out against it.
+            # Kept uniform across tracks; selected-track indication is a
+            # subtle pair of edge strokes drawn after bars (below).
             ring_outline_color = QColor(EREBUS["plate"])
-            if i == self._selected_track:
-                ring_outline_color = QColor(EREBUS["ash"])  # slightly lighter to indicate selection
             ring_outline_color.setAlpha(180)
             ring_pen_w = max(g.ring_width * 0.5, 2)
             p.setPen(QPen(ring_outline_color, ring_pen_w))
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
-            # Fill-indicator arc: always visible even during silence
+            # Waveform bars carry their own colour and opacity — no
+            # separate fill arc underneath. The dark ring outline above
+            # plus the per-bar amplitude lines are enough to communicate
+            # both "where the audio is" and "which track is selected".
             entry = self._track_waveforms.get(i)
-            if entry is not None:
-                samples, fill_frac = entry
-                if fill_frac > 1e-4:
-                    fill_color = QColor(colors[i])
-                    fill_color.setAlpha(90 if i == self._selected_track else 45)
-                    fill_pen = QPen(fill_color, max(g.ring_width * 0.35, 2))
-                    fill_pen.setCapStyle(Qt.FlatCap)
-                    p.setPen(fill_pen)
-                    fill_start_deg = self.header_angle_deg()  # newest edge at play angle
-                    fill_span_deg = -fill_frac * 360.0        # clockwise
-                    rect = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
-                    p.drawArc(rect, int(fill_start_deg * 16), int(fill_span_deg * 16))
-
-            # Draw waveform bars on top of fill arc
             if entry is None:
                 continue
             samples, fill_frac = entry
             if fill_frac < 1e-4 or samples.size == 0:
                 continue
             bar_color = QColor(colors[i])
-            bar_color.setAlpha(255 if i == self._selected_track else 180)
+            bar_color.setAlpha(220)
             bar_pen = QPen(bar_color, 1)
             bar_pen.setCapStyle(Qt.FlatCap)
             p.setPen(bar_pen)
             arc_span_rad = fill_frac * 2 * math.pi
             play_angle_rad = math.radians(self.header_angle_deg())
+            dir_sign = self._arc_dir()
             n = int(samples.size)
             for j in range(n):
                 t = (j / (n - 1)) if n > 1 else 1.0  # t=0 at oldest, t=1 at newest
-                theta = play_angle_rad - (1.0 - t) * arc_span_rad
+                theta = play_angle_rad + dir_sign * (1.0 - t) * arc_span_rad
                 # At t=1 (newest): theta = play_angle (correct)
-                # At t=0 (oldest): theta = play_angle - arc_span (clockwise behind)
+                # At t=0 (oldest): theta is offset by dir_sign*arc_span —
+                # CW in screen for buffer, also CW in screen for clip
+                # (because on the opposite side, CCW math = CW screen).
                 a = max(0.0, min(1.0, float(samples[j])))
                 r_inner = r - g.ring_width * 0.35 * a
                 r_outer = r + g.ring_width * 0.35 * a
@@ -228,6 +232,21 @@ class TurntableWidget(QWidget):
                 xo = g.cx + r_outer * ct
                 yo = g.cy - r_outer * st_v
                 p.drawLine(QPointF(xi, yi), QPointF(xo, yo))
+
+        # ── Selected-track highlight ────────────────────────────────────
+        # Subtle 1 px strokes at the inner and outer edges of the selected
+        # track's band, tinted with the track color. Keeps the selection
+        # visible without recolouring the whole ring.
+        if 0 <= self._selected_track < self._track_count:
+            r_sel = g.ring_radius(self._selected_track)
+            band_half = max(g.ring_width * 0.5, 2)
+            edge_color = QColor(colors[self._selected_track])
+            edge_color.setAlpha(200)
+            edge_pen = QPen(edge_color, 1)
+            p.setPen(edge_pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(g.cx, g.cy), r_sel - band_half, r_sel - band_half)
+            p.drawEllipse(QPointF(g.cx, g.cy), r_sel + band_half, r_sel + band_half)
 
         # ── Selection arc on each track with a stored selection ─────────
         # Body is 25% opacity; inner/outer edges are 1px fully-opaque strokes.
@@ -244,11 +263,17 @@ class TurntableWidget(QWidget):
             if fill_frac <= 1e-4:
                 continue
             play_angle_deg = self.header_angle_deg()
-            # Newer edge (end_f) sits at play_angle (no CW offset). Map
-            # linear fraction [0..1] → position within the filled arc so
-            # the selection stays within the filled portion of the ring.
-            start_angle = play_angle_deg - (1.0 - end_f) * fill_frac * 360.0
-            span = -(end_f - start_f) * fill_frac * 360.0
+            dir_sign = self._arc_dir()
+            # The bar at sample-fraction t sits at play_angle +
+            # dir_sign·(1-t)·arc. The selection arc must cover the
+            # angular range between the bars at start_f (older edge)
+            # and end_f (newer edge). Qt drawArc's start parameter is
+            # the FIRST angle drawn, so we anchor it at the OLDER edge
+            # (start_f) and let the span carry us forward to end_f.
+            # A positive span sweeps CCW in Qt's convention; the sign
+            # falls out from end_f − start_f after the dir_sign flip.
+            start_angle = play_angle_deg + dir_sign * (1.0 - start_f) * fill_frac * 360.0
+            span = -dir_sign * (end_f - start_f) * fill_frac * 360.0
             band_w = max(g.ring_width * 0.8, 3)
             p.setBrush(Qt.NoBrush)
 

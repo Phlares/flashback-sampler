@@ -93,12 +93,20 @@ def test_buffer_selection_updates_disc(qapp, state):
 def test_clip_selection_updates_disc(qapp, state):
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
+    # Populate buffer and create a checkout so a clip is displayed.
     buf.total_written = int(60 * buf.sample_rate)
+    state.active_slot.checkout_manager.create_from_abs_range(
+        0, int(30 * buf.sample_rate)
+    )
+    win._refresh_clip_side(auto_select_newest=True)
     win.clip_panel.waveform.manualSelectionChanged.emit(0.2, 0.5)
     win._update_selection_display()
     idx = win.clip_turntable.selected_track()
     assert idx in win.clip_turntable._track_selections
-    _, _, color = win.clip_turntable._track_selections[idx]
+    start, end, color = win.clip_turntable._track_selections[idx]
+    # Clip selection is stored as clip-local fractions — the values
+    # round-trip exactly because there's no buffer-advance math.
+    assert abs(start - 0.2) < 1e-6 and abs(end - 0.5) < 1e-6
     assert color == "#FF9500"
 
 
@@ -194,12 +202,19 @@ def test_tick_timer_runs_without_crash(qapp, state):
     win._tick()  # should handle empty/not-started capture gracefully
 
 
-def test_right_click_chip_emits_context_menu_request(qapp, state):
-    """Right-click on a source chip should emit contextMenuRequested."""
+def test_right_click_chip_emits_context_menu_request(qapp):
+    """Right-click on a source chip should emit contextMenuRequested.
+
+    Tests the SlotChip widget in isolation. Constructing a full
+    TurntableWindow here would also wire up the production handler
+    that calls QMenu.exec() — that handler then opens a real menu on
+    the developer's desktop during VSCode's auto-test-on-save runs,
+    which is exactly what we don't want.
+    """
     from PySide6.QtCore import QPoint, Qt, QEvent
     from PySide6.QtGui import QMouseEvent
-    win = TurntableWindow(state)
-    chip = win.nav_bar.source_slots[0]
+    from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+    chip = SourceIndicator(0, "Test")
     captured = []
     chip.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
