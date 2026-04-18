@@ -17,6 +17,7 @@ SCRATCH) is gone — the user wants direct control.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -25,10 +26,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
+from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
+from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.theme import EREBUS
 from flashback_sampler.app.time_format import format_time_cs
 from flashback_sampler.core.quality_presets import (
@@ -69,8 +74,13 @@ class AddSourceDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add Source")
         self.setModal(True)
-        self.resize(420, 300)
+        self.resize(440, 340)
         self._max_buffer_seconds = int(max(1.0, max_buffer_seconds))
+        # Capture-source selection for the new slot. None = inherit the
+        # app's global capture spec; a CaptureDevice routes this one
+        # slot to a specific device or per-process loopback.
+        self._selected_device: CaptureDevice | None = None
+        self._selected_label: str = "Default (global)"
         self._build_ui(
             default_name=default_name,
             default_buffer_seconds=default_buffer_seconds,
@@ -129,6 +139,20 @@ class AddSourceDialog(QDialog):
         self._ch_combo.currentIndexChanged.connect(self._update_ram_readout)
         form.addRow(QLabel("CHANNELS"), self._ch_combo)
 
+        # SELECT SOURCE INPUT(S) — picks the capture backing for this
+        # slot. Opens a small menu: Default (global) / From Device… /
+        # From Process…. Device list hidden behind a submenu so the
+        # primary picker stays simple.
+        self._source_input_btn = QPushButton(self._selected_label)
+        self._source_input_btn.setCursor(Qt.PointingHandCursor)
+        self._source_input_btn.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding: 4px 8px; "
+            f"border: 1px solid {EREBUS['ash']}; background: transparent; "
+            f"color: {EREBUS['cream']}; }}"
+        )
+        self._source_input_btn.clicked.connect(self._show_source_input_menu)
+        form.addRow(QLabel("SOURCE INPUT"), self._source_input_btn)
+
         root.addLayout(form)
         root.addSpacing(4)
 
@@ -185,3 +209,64 @@ class AddSourceDialog(QDialog):
 
     def result_name(self) -> str:
         return self._name_edit.text().strip()
+
+    def result_device(self) -> CaptureDevice | None:
+        """Return the per-slot capture_spec chosen via SOURCE INPUT, or
+        None to indicate the slot should inherit the app's global spec."""
+        return self._selected_device
+
+    # ------------------------------------------------------------------
+    # Source-input menu
+    # ------------------------------------------------------------------
+
+    def _show_source_input_menu(self) -> None:
+        menu = QMenu(self)
+
+        default_act = QAction("Default (global)", self)
+        default_act.triggered.connect(
+            lambda _c=False: self._set_source_device(None, "Default (global)")
+        )
+        menu.addAction(default_act)
+
+        menu.addSeparator()
+
+        dev_menu = menu.addMenu("From Device…")
+        devs = list_capture_devices()
+        if not devs:
+            empty = QAction("(no capture devices)", dev_menu)
+            empty.setEnabled(False)
+            dev_menu.addAction(empty)
+        else:
+            for dev in devs:
+                label = dev.name + ("   [default]" if dev.is_default else "")
+                act = QAction(label, dev_menu)
+                act.triggered.connect(
+                    lambda _c=False, d=dev: self._set_source_device(d, d.name)
+                )
+                dev_menu.addAction(act)
+
+        proc_act = QAction("From Process…", self)
+        proc_act.triggered.connect(self._pick_process)
+        menu.addAction(proc_act)
+
+        menu.exec(
+            self._source_input_btn.mapToGlobal(
+                self._source_input_btn.rect().bottomLeft()
+            )
+        )
+
+    def _pick_process(self) -> None:
+        dlg = ProcessPickerDialog(parent=self)
+        if dlg.exec() != ProcessPickerDialog.Accepted:
+            return
+        device = dlg.result_device()
+        if device is None:
+            return
+        self._set_source_device(device, f"Process: {device.name}")
+
+    def _set_source_device(
+        self, device: CaptureDevice | None, label: str
+    ) -> None:
+        self._selected_device = device
+        self._selected_label = label
+        self._source_input_btn.setText(label)
