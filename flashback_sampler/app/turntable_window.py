@@ -4,10 +4,14 @@ Parallel to MainWindow. Launch with --ui turntable.
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QMainWindow,
     QMenu,
@@ -22,14 +26,15 @@ from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
-
-SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
-SELECTION_COLOR_CLIP = "#FF9500"     # orange
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
+from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
 from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+
+SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
+SELECTION_COLOR_CLIP = "#FF9500"     # orange
 
 
 def _peak_bins_from_audio(audio: np.ndarray, n_bins: int) -> np.ndarray:
@@ -295,9 +300,10 @@ class TurntableWindow(QMainWindow):
         save_btn = self.clip_controls[-1]
         save_btn.clicked.connect(lambda: self._save_current_clip())
 
-        # Buffer controls: [FLUSH, −, +, ◀, ▶, PAUSE]. FLUSH wipes the
+        # Buffer controls: [FLUSH, −, +, ◀, ▶, FREEZE]. FLUSH wipes the
         # active slot's buffer; − / + step the duration preset; ◀ / ▶
-        # shift the anchor by half the current duration (older / newer).
+        # shift the anchor by half the current duration (older / newer);
+        # FREEZE wiring lives separately in the block below.
         self.buffer_controls[0].clicked.connect(self._on_flush_active_buffer)
         self.buffer_controls[1].clicked.connect(
             lambda: self._nudge_buffer_duration(-1)
@@ -354,7 +360,6 @@ class TurntableWindow(QMainWindow):
     def _on_start_clicked(self) -> None:
         started, err = self._state.start_rolling()
         if err is not None:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Start capture failed", str(err))
             return
         self._refresh_source_indicators()
@@ -371,22 +376,46 @@ class TurntableWindow(QMainWindow):
         """FLUSH button — wipe the currently active slot's buffer."""
         self._flush_slot_buffer(self._state.active_slot_index)
 
+    @staticmethod
+    def _active_duration_s(slot) -> float:
+        """Return the duration in seconds of slot's current DEFAULT_PRESETS
+        entry, clamped to a valid preset index."""
+        idx = max(0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx)))
+        return float(DEFAULT_PRESETS[idx])
+
+    @staticmethod
+    def _checkout_has_trim(co) -> bool:
+        """True if the checkout has a non-trivial trim window (either
+        in-marker past 0 or out-marker before end)."""
+        return (
+            co.trim_in_samples > 0
+            or (
+                co.trim_out_samples > 0
+                and co.trim_out_samples < co.audio.shape[0]
+            )
+        )
+
+    def _reset_buffer_selection_to_default(self) -> None:
+        """Clear any user-dragged buffer selection so the next tick
+        rebuilds it from the slot's preset + anchor."""
+        self._buffer_sel_mode = "default"
+        self._buffer_sel_abs = None
+
     def _nudge_buffer_duration(self, step: int) -> None:
         """− (step=-1) / + (step=+1): step through DEFAULT_PRESETS to
         shrink or grow the default buffer selection window. Also
         re-clamps the anchor so the selection stays inside the
         buffered audio and updates the duration label in the header."""
-        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
         slot = self._state.active_slot
-        idx = int(slot.duration_preset_idx) + step
-        idx = max(0, min(len(DEFAULT_PRESETS) - 1, idx))
-        slot.duration_preset_idx = idx
-        # Clamp the anchor so the new duration still fits the buffer.
+        new_idx = max(
+            0,
+            min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx) + step),
+        )
+        slot.duration_preset_idx = new_idx
         self._clamp_buffer_anchor(slot)
-        self._buffer_sel_mode = "default"
-        self._buffer_sel_abs = None
+        self._reset_buffer_selection_to_default()
         self._update_selection_display()
         self._update_buffer_duration_label()
 
@@ -397,18 +426,13 @@ class TurntableWindow(QMainWindow):
         Anchor is clamped so the full selection stays inside the
         buffered range — pressing ◀ past the edge parks at the edge
         instead of collapsing the selection below its preset length."""
-        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
         slot = self._state.active_slot
-        preset_idx = max(
-            0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
-        )
-        step_s = float(DEFAULT_PRESETS[preset_idx]) * 0.5
+        step_s = self._active_duration_s(slot) * 0.5
         slot.anchor_offset_s = float(slot.anchor_offset_s) + step_s * direction
         self._clamp_buffer_anchor(slot)
-        self._buffer_sel_mode = "default"
-        self._buffer_sel_abs = None
+        self._reset_buffer_selection_to_default()
         self._update_selection_display()
 
     def _clamp_buffer_anchor(self, slot) -> None:
@@ -416,11 +440,7 @@ class TurntableWindow(QMainWindow):
         anchor + duration never exceeds the available buffered audio.
         If the duration is longer than what's buffered, anchor parks
         at 0 (selection is as wide as the buffer allows)."""
-        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
-        preset_idx = max(
-            0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
-        )
-        duration_s = float(DEFAULT_PRESETS[preset_idx])
+        duration_s = self._active_duration_s(slot)
         buffered_s = float(slot.buffer.buffered_seconds)
         max_anchor = max(0.0, buffered_s - duration_s)
         slot.anchor_offset_s = max(
@@ -431,14 +451,9 @@ class TurntableWindow(QMainWindow):
         """Sync the buffer panel header's duration readout (the '3:00'
         next to the source name) with the active slot's current
         duration preset."""
-        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
-        slot = self._state.active_slot
-        idx = max(
-            0, min(len(DEFAULT_PRESETS) - 1, int(slot.duration_preset_idx))
-        )
-        seconds = int(DEFAULT_PRESETS[idx])
+        seconds = int(self._active_duration_s(self._state.active_slot))
         m, s = seconds // 60, seconds % 60
         self.buffer_panel.set_duration_text(f"{m}:{s:02d}")
 
@@ -484,13 +499,7 @@ class TurntableWindow(QMainWindow):
             return
         if co is None:
             return
-        has_trim = (
-            co.trim_in_samples > 0
-            or (
-                co.trim_out_samples > 0
-                and co.trim_out_samples < co.audio.shape[0]
-            )
-        )
+        has_trim = self._checkout_has_trim(co)
         audio = co.trimmed_audio() if has_trim else co.audio
         try:
             player.bind(audio)
@@ -578,8 +587,7 @@ class TurntableWindow(QMainWindow):
         # default; abs-sample snapshots belong to the prior slot. Clip
         # trim fractions are keyed by checkout id so they survive the
         # switch and don't need clearing.
-        self._buffer_sel_mode = "default"
-        self._buffer_sel_abs = None
+        self._reset_buffer_selection_to_default()
         self._update_selection_display()
         # Refresh clip side to show the new slot's checkouts
         self._refresh_clip_side()
@@ -597,11 +605,7 @@ class TurntableWindow(QMainWindow):
             abs_start, abs_end = self._buffer_sel_abs
         else:
             # Default mode — use slot.duration_preset_idx + anchor_offset_s from "now"
-            from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
-            preset_idx = max(
-                0, min(len(DEFAULT_PRESETS) - 1, slot.duration_preset_idx)
-            )
-            duration_s = DEFAULT_PRESETS[preset_idx]
+            duration_s = self._active_duration_s(slot)
             anchor_s = max(0.0, slot.anchor_offset_s)
             abs_end = total - int(anchor_s * sr)
             abs_start = abs_end - int(duration_s * sr)
@@ -725,15 +729,12 @@ class TurntableWindow(QMainWindow):
         return base
 
     def _default_clip_save_dir(self):
-        from pathlib import Path
         return Path.home() / "Documents"
 
     def _save_current_clip(self, fmt: str | None = None, trimmed: bool = True) -> None:
         """Prompt for a target path and save the clip currently shown in
         the clip panel. When `trimmed` is True, uses the stored trim
         fracs (set via drag on the clip waveform)."""
-        from pathlib import Path
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
         co = self._currently_displayed_checkout()
         if co is None:
             QMessageBox.information(self, "Save", "No clip to save.")
@@ -771,7 +772,6 @@ class TurntableWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
 
     def _discard_current_clip(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
         co = self._currently_displayed_checkout()
         if co is None:
             return
@@ -784,8 +784,6 @@ class TurntableWindow(QMainWindow):
         self._refresh_clip_side()
 
     def _on_clip_panel_context_menu(self, global_pos) -> None:
-        from PySide6.QtCore import QPoint
-        from PySide6.QtGui import QAction
         co = self._currently_displayed_checkout()
         if co is None:
             return
@@ -857,7 +855,6 @@ class TurntableWindow(QMainWindow):
             elif not slot.armed and slot.is_capturing():
                 slot.stop_capture()
         except Exception as e:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self,
                 "Capture state change failed",
@@ -941,7 +938,6 @@ class TurntableWindow(QMainWindow):
         and apply them to both the linear WaveformPanel and the matching
         disc ring. Called every tick so user selections ride the audio as
         the buffer advances."""
-        from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
         if not self._state.slots:
             return
         slot = self._state.active_slot
@@ -954,10 +950,7 @@ class TurntableWindow(QMainWindow):
 
         def compute_fracs_buffer_side() -> tuple[float, float] | None:
             if self._buffer_sel_mode == "default":
-                preset_idx = max(
-                    0, min(len(DEFAULT_PRESETS) - 1, slot.duration_preset_idx)
-                )
-                duration_s = DEFAULT_PRESETS[preset_idx]
+                duration_s = self._active_duration_s(slot)
                 anchor_s = max(0.0, slot.anchor_offset_s)
                 end_ago = anchor_s
                 start_ago = anchor_s + duration_s
@@ -1027,8 +1020,9 @@ class TurntableWindow(QMainWindow):
             self._state.active_slot.name if self._state.slots else "SOURCE 1"
         )
         self.buffer_panel.set_source_name(active_name.upper())
-        # Clip panel's source label stays "CLIP" for now (clip-side names
-        # belong to checkouts which come in a later phase)
+        # Clip panel's source label is set by _display_clip_in_panel to
+        # "<slot_name> #<idx>/<total>" so it reflects the current clip,
+        # not the active slot — nothing to do here.
 
     # ------------------------------------------------------------------
     # Live audio polling
@@ -1133,13 +1127,7 @@ class TurntableWindow(QMainWindow):
             and co.audio.shape[0] > 0
         ):
             cursor_samples = int(player.cursor_samples)
-            has_trim = (
-                co.trim_in_samples > 0
-                or (
-                    co.trim_out_samples > 0
-                    and co.trim_out_samples < co.audio.shape[0]
-                )
-            )
+            has_trim = self._checkout_has_trim(co)
             base_offset = co.trim_in_samples if has_trim else 0
             abs_sample = base_offset + cursor_samples
             frac = max(
@@ -1192,11 +1180,9 @@ class TurntableWindow(QMainWindow):
         if slot_index < self.clip_turntable.track_count():
             self.clip_turntable.select_track(slot_index)
         self._refresh_source_names()
-        # Reset selection state for the new active slot.
-        self._buffer_sel_mode = "default"
-        self._buffer_sel_abs = None
-        self._clip_sel_mode = "default"
-        self._clip_sel_abs = None
+        # Reset buffer selection for the new active slot; clip-side
+        # trims are keyed by checkout id and survive slot switches.
+        self._reset_buffer_selection_to_default()
         self._update_selection_display()
         self._refresh_clip_side()
         self._refresh_source_indicators()
@@ -1345,7 +1331,6 @@ class TurntableWindow(QMainWindow):
             hdr.setEnabled(False)
             src_menu.addAction(hdr)
             for idx, dev in enumerate(muxed):
-                label = f"  • {dev.name}"
                 remove_act = QAction(f"Remove: {dev.name}", src_menu)
                 remove_act.triggered.connect(
                     lambda _c=False, i=slot_index, j=idx: self._remove_mux_input(i, j)
@@ -1460,23 +1445,7 @@ class TurntableWindow(QMainWindow):
             return
         slot = self._state.slots[slot_index]
         slot.capture_spec = device
-
-        if not slot.is_capturing():
-            return
-
-        # Restart on the new source
-        try:
-            slot.stop_capture()
-            new_source = self._state.build_capture_for_slot(slot)
-            slot.bind_capture(new_source)
-            slot.start_capture()
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Capture restart failed",
-                f"Could not switch capture source on "
-                f"{slot.name!r}:\n\n{e}",
-            )
+        self._restart_slot_capture_if_rolling(slot, slot_index)
 
     def _flush_slot_buffer(self, slot_index: int) -> None:
         if not (0 <= slot_index < len(self._state.slots)):
@@ -1528,14 +1497,3 @@ class TurntableWindow(QMainWindow):
         self._refresh_source_names()
         self._refresh_source_indicators()
         self._refresh_clip_side()
-
-    def _populate_demo_data(self) -> None:
-        rng = np.random.default_rng(seed=42)
-        for tt in (self.buffer_turntable, self.clip_turntable):
-            for i in range(tt.track_count()):
-                n = 540
-                t = np.linspace(0, 2 * np.pi, n, endpoint=False)
-                amp = 0.4 * np.sin(t * (2 + i)) + 0.15 * rng.standard_normal(n)
-                tt.set_track_waveform(i, amp.astype(np.float32))
-        self.buffer_panel.set_demo_waveform()
-        self.clip_panel.set_demo_waveform()

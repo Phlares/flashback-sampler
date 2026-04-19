@@ -38,8 +38,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--ui",
         choices=("classic", "turntable"),
-        default="classic",
-        help="UI layout: 'classic' (current) or 'turntable' (dual-turntable wireframe)",
+        default="turntable",
+        help="UI layout: 'turntable' (default) or 'classic' (legacy single-column)",
     )
     # Parse known args only — leave sys.argv[1:] extras untouched for Qt
     args, _ = p.parse_known_args(argv)
