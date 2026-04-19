@@ -132,11 +132,32 @@ class MixedCaptureSource:
         available samples across all staging rings (so no sub ever gets
         skipped) and writes the sum into the target. Clipping to [-1, 1]
         happens after summing so sub-sources that push the sum over
-        range still produce valid float32 audio."""
-        max_chunk = int(0.1 * self.sample_rate)  # cap per-iteration work
+        range still produce valid float32 audio.
+
+        Staleness recovery: if any sub drops behind far enough that its
+        staging ring has already overwritten our read position, the
+        read position is fast-forwarded to the oldest still-valid
+        sample. Without this, a single xrun on one sub would make the
+        mixer wait forever for data that no longer exists and nothing
+        would reach the target buffer — the external symptom being
+        'only one sub seems to record'.
+        """
+        max_chunk = int(0.05 * self.sample_rate)
+        diag_last_ts = time.monotonic()
+        diag_counts = [0] * len(self._subs)
         while not self._stop_event.is_set():
+            # Before picking n, pull every read position forward if the
+            # staging ring has lapped it. Losing the pre-lap data is
+            # better than blocking the whole mix indefinitely.
+            for i, stage in enumerate(self._stages):
+                oldest = max(
+                    0, int(stage.total_written) - int(stage.buffer_size)
+                )
+                if self._read_positions[i] < oldest:
+                    self._read_positions[i] = oldest
+
             avail_list = [
-                stage.total_written - read_pos
+                int(stage.total_written) - int(read_pos)
                 for stage, read_pos in zip(self._stages, self._read_positions)
             ]
             n = min(avail_list) if avail_list else 0
@@ -151,18 +172,19 @@ class MixedCaptureSource:
             ):
                 segment = stage._copy_abs_range(read_pos, read_pos + n)  # noqa: SLF001
                 if segment.shape[0] == 0:
+                    # Rare: writer lapped us between the stale-fixup
+                    # above and the copy. Reset on next iteration.
                     mixed = None
                     break
                 if mixed is None:
                     mixed = segment.astype(np.float32, copy=True)
                 else:
-                    # Shape may differ if channel counts mismatch — skip
-                    # safely in that case (caller configuration error).
                     if segment.shape != mixed.shape:
                         mixed = None
                         break
                     mixed += segment
                 self._read_positions[i] = read_pos + n
+                diag_counts[i] += n
 
             if mixed is None:
                 time.sleep(self.MIX_POLL_SECONDS)
@@ -170,3 +192,16 @@ class MixedCaptureSource:
 
             np.clip(mixed, -1.0, 1.0, out=mixed)
             self._target.write(mixed)
+
+            # Diagnostic: every 2 s print per-sub sample counts so the
+            # developer can tell at a glance whether all sources are
+            # actually producing. Cheap (one print per couple seconds).
+            now = time.monotonic()
+            if now - diag_last_ts >= 2.0:
+                written = [int(s.total_written) for s in self._stages]
+                print(
+                    f"[MixedCapture] subs_written={written} "
+                    f"mixed_to_target={list(diag_counts)}"
+                )
+                diag_last_ts = now
+                diag_counts = [0] * len(self._subs)
