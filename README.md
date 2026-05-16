@@ -1,5 +1,8 @@
 # flashback-sampler
 
+[![test](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml)
+[![release](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml)
+
 A standalone desktop applet that continuously captures the past several minutes of Windows system audio into a circular ring buffer. Pull a slice of it out as a "checkout" (like lifting a record off a turntable while another one keeps spinning), preview it, and decide whether to save it to WAV/FLAC or discard it.
 
 Designed with an eventual VST / OBS plugin port in mind — the audio core is intentionally framework-agnostic (pure Python + numpy, no Qt imports), and the UI is PySide6 native rather than a webview so it can later be embedded inside a DAW or OBS dock.
@@ -83,8 +86,68 @@ tests/
 ## Development
 
 ```powershell
-pytest tests/unit -v          # full unit suite
-pytest tests/unit -v --cov=flashback_sampler/core
+pytest tests/unit -v                                    # full unit suite
+pytest tests/unit --cov=flashback_sampler --cov-branch  # with branch coverage
+pytest tests/unit --cov=flashback_sampler --cov-report=html  # browse htmlcov/index.html
 ```
 
 Audio-hardware-dependent tests are marked `@pytest.mark.audio_hw` and excluded by default.
+
+## CI / CD
+
+Two GitHub Actions workflows live under `.github/workflows/`:
+
+### `test.yml` — runs on every push & PR
+
+- Windows runner, Python 3.10 / 3.11 / 3.12 matrix.
+- Installs the package via `pip install -e ".[dev]"`.
+- Runs `pytest tests/unit` with branch coverage, headless Qt (`QT_QPA_PLATFORM=offscreen`).
+- Coverage XML / HTML and JUnit XML are uploaded as workflow artifacts.
+- Build fails if coverage drops below the `fail_under` threshold in `pyproject.toml`
+  (currently `70` — ratchet upward as tests are added).
+
+### `release.yml` — runs on version tags
+
+Trigger an auto-build by pushing a semver tag:
+
+```powershell
+# 1. Bump the version
+#    edit pyproject.toml -> [project] version = "0.1.0"
+git commit -am "release: v0.1.0"
+
+# 2. Tag and push
+git tag v0.1.0
+git push origin main --tags
+```
+
+The workflow then:
+
+1. Checks out the tagged commit on `windows-latest`.
+2. Installs deps + PyInstaller (`pip install -e ".[dev]" pyinstaller`).
+3. Runs the unit suite as a smoke check (`-x` — abort on first failure).
+4. Builds the standalone with `pyinstaller flashback_sampler.spec --noconfirm --clean`.
+5. Packages `dist/flashback-sampler/` into
+   `flashback-sampler-<version>-windows-x64.zip` plus a `.sha256` companion.
+6. Publishes a GitHub Release at the tag with auto-generated changelog
+   (commits since the previous tag) and attaches the zip.
+
+Tags containing a hyphen (e.g. `v0.1.0-rc1`) publish as pre-releases.
+
+You can also run the workflow manually from the Actions tab via
+`workflow_dispatch` — useful for building a one-off bundle from a branch
+without publishing a release.
+
+### Coverage philosophy
+
+`tool.coverage.run.omit` in `pyproject.toml` excludes paths that can't be
+exercised on CI runners:
+
+- `flashback_sampler/app/main.py` — PyInstaller entry, only meaningful at runtime.
+- `flashback_sampler/hardware/*` — Raspberry Pi GPIO encoder.
+- `flashback_sampler/io/win32_process_loopback.py` — ctypes against `Mmdevapi.dll`.
+- `flashback_sampler/core/loopback_capture.py` — `soundcard` WASAPI loopback.
+
+Everything else is fair game and counts toward `fail_under`. Bump the
+threshold by 5 each time you add a meaningful batch of tests; 100% is
+aspirational but realistic to within a few percent once UI widgets are
+covered with a Qt offscreen fixture.
