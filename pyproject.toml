@@ -24,6 +24,9 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-timeout>=2.3",
 ]
+release = [
+    "pyinstaller>=6.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["flashback_sampler*"]
@@ -39,3 +42,33 @@ timeout = 30
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["flashback_sampler"]
+omit = [
+    "flashback_sampler/app/main.py",
+    "flashback_sampler/hardware/*",
+    "flashback_sampler/io/win32_process_loopback.py",
+    "flashback_sampler/core/loopback_capture.py",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+fail_under = 70
+exclude_also = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"
