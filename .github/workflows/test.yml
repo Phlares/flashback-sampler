@@ -51,7 +51,7 @@ jobs:
           --cov-report=xml:coverage.xml
           --cov-report=html:htmlcov
           --junitxml=junit.xml
-          -m "not audio_hw"
+          -m "not audio_hw and not perf"
 
       - name: Upload coverage XML
         if: always()

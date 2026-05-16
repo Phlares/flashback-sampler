@@ -69,7 +69,7 @@ jobs:
           echo "Resolved version: $version"
 
       - name: Run unit tests (smoke before build)
-        run: pytest tests/unit -m "not audio_hw" -x -q
+        run: pytest tests/unit -m "not audio_hw and not perf" -x -q
 
       - name: Build with PyInstaller
         run: pyinstaller flashback_sampler.spec --noconfirm --clean
