@@ -237,6 +237,7 @@ def test_checkout_duration_clamped_to_available():
 
 
 @pytest.mark.timeout(20)
+@pytest.mark.perf
 def test_checkout_create_does_not_stall_writer():
     """
     Create checkouts while a writer thread is pounding the buffer.
