@@ -37,6 +37,7 @@ testpaths = ["tests"]
 markers = [
     "audio_hw: requires real audio hardware (opt-in, not run in CI)",
     "slow: takes more than a second",
+    "perf: timing-sensitive performance regression test (excluded on CI runners; run locally to catch regressions)",
 ]
 timeout = 30
 filterwarnings = [

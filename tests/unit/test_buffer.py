@@ -345,6 +345,7 @@ def test_flush_after_wrap_fully_clears_ring():
 
 
 @pytest.mark.timeout(15)
+@pytest.mark.perf
 def test_get_segment_does_not_stall_writer():
     """
     The writer thread must not see inter-write latency spikes even when
