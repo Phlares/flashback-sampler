@@ -1,9 +1,22 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _clear_action_registry():
+    """Reset the global action registry before every test so that
+    tests that instantiate TurntableWindow (which registers transport
+    actions) do not collide with each other."""
+    from flashback_sampler.input.core.actions import clear_registry
+    clear_registry()
+    yield
+    clear_registry()
 
 
 # Block QMenu.exec / popup process-wide for the duration of any pytest
