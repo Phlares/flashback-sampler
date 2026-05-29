@@ -3,15 +3,9 @@
 [![test](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml)
 [![release](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml)
 
-A standalone desktop applet that continuously captures the past several minutes of Windows system audio into a circular ring buffer. Pull a slice of it out as a "checkout" (like lifting a record off a turntable while another one keeps spinning), preview it, and decide whether to save it to WAV/FLAC or discard it.
+A standalone desktop applet that continuously captures the past several minutes of system audio into a circular ring buffer. Pull a slice of it out as a "checkout" — like lifting a record off a turntable while another keeps spinning — preview it, trim it, and decide whether to save it to WAV/FLAC or discard it.
 
-Designed with an eventual VST / OBS plugin port in mind — the audio core is intentionally framework-agnostic (pure Python + numpy, no Qt imports), and the UI is PySide6 native rather than a webview so it can later be embedded inside a DAW or OBS dock.
-
-## Status
-
-P1 core complete and wired through a minimal UI. You can capture Windows speaker audio via WASAPI loopback, check out a clip in any of 8 preset durations (0:15 to 15:00), preview it through your default output, save it to WAV or FLAC, or discard it. Ring buffer is non-blocking under multi-megabyte reads (seqlock pattern); writer is never stalled by checkouts. All P1 logic is TDD-covered (66 unit tests).
-
-The full TP-7-style visual chassis (custom-painted waveform view, rotary knob, thermal VU meter, Monaspace typography, two-track layout) lands in M5–M8.
+The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt imports) so it can later be embedded in a DAW (VST) or OBS dock; the UI is PySide6 native rather than a webview for the same reason.
 
 ## Install
 
@@ -19,9 +13,9 @@ The full TP-7-style visual chassis (custom-painted waveform view, rotary knob, t
 pip install -e ".[dev]"
 ```
 
-Installs the package plus test deps. Windows only for real capture (needs the `soundcard` library for WASAPI loopback); tests are cross-platform via fake audio sources.
+Installs the package plus test deps. **Loopback capture of system audio is Windows-only** (needs the `soundcard` library for WASAPI loopback). Mic / line-in capture works cross-platform via `sounddevice`, and the test suite runs anywhere via fake audio sources.
 
-## Run the app
+## Run
 
 ```powershell
 python -m flashback_sampler.app.main
@@ -29,132 +23,70 @@ python -m flashback_sampler.app.main
 
 CLI flags:
 
-- `--buffer-minutes N` — ring buffer length (default 15). Use `0.5` to force a rollover quickly for testing.
+- `--buffer-minutes N` — ring buffer length (default 15). Use `0.5` to force a rollover quickly when testing.
 - `--sample-rate N` — capture sample rate (default 48000).
 - `--channels N` — 1 mono or 2 stereo (default 2).
 
-## Flow
+## Using it
 
-1. **Audio menu** → **Capture Source** — pick which speaker to loopback (Windows WASAPI) or which input device (mic / line-in). Defaults to your system default speaker. The choice is persisted to `%APPDATA%\flashback-sampler\config.json`.
-2. **Audio menu** → **Preview Output** — pick which device to audition checkouts on. **Set this to a different device than your capture source** (e.g. headphones while capturing speakers) to avoid the preview feeding back into the ring. Also persisted.
-3. **START CAPTURE** — begins capturing from the selected source. Watch the dBFS level meter and the fill % climb.
-4. **RotaryKnob** labeled ANCHOR — drag to scrub the prospective checkout back in time through the live buffer. Double-click to snap to NOW. Hub readout shows `−MM:SS` offset.
-5. **DurationPreset** cluster — click a cell (0:15 / 0:30 / 1:00 / 2:00 / 3:00 / 5:00 / 10:00 / 15:00). The CHECK OUT button label updates live.
-6. **Section view** on the live waveform — translucent ember band shows exactly which range of audio CHECK OUT will pull, with a dashed edge at the start and a solid edge at the end.
-7. **CHECK OUT** — snapshots the selection into a frozen in-RAM clip. Ring buffer keeps recording throughout.
-8. Select the clip in the list → **▶ PREVIEW** plays it through the selected Preview Output. Click on the Track 2 waveform to seek.
-9. **SAVE** opens a file dialog (WAV or FLAC). **DISCARD** drops it.
-10. **FLUSH BUFFER** discards everything currently buffered (with confirmation). Does not touch existing checkouts.
+The window is a pair of turntables. The **left deck** is the live ring buffer (your capture sources); the **right deck** holds checked-out clips.
 
-Checkouts are valid even after stopping capture — you can pull a clip from buffered audio without an active stream.
+1. **Pick a source.** Right-click the left deck → **Select Source Input(s)** to choose Default (system output), a specific capture device, a process, or to mux several inputs into one slot.
+2. **START / STOP** (center) begins and ends capture. Watch the buffer deck fill.
+3. **Set the slice.** The duration presets (0:15 → 15:00) and the buffer **− / +** controls set how much audio a checkout grabs; **◀ / ▶** scrub the anchor back through the buffer. **FREEZE** pins the buffer display so you can line up a grab while capture keeps rolling.
+4. **OUT →** checks out the current selection as a frozen in-RAM clip onto the right deck. The ring buffer keeps recording throughout.
+5. **Preview & trim.** Select a clip, then **PLAY** (or the spacebar) auditions it. The clip **− / + / ◀ / ▶** controls trim the in/out points; **LOOP** repeats the trimmed range.
+6. **SAVE** opens a file dialog (WAV or FLAC); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
 
-## Known limitations
+> Set your **preview output to a different device than your capture source** (e.g. headphones while capturing speakers) so the preview doesn't feed back into the ring.
 
-- **Loopback capture is Windows-only.** Mic / line-in via `sounddevice` works cross-platform.
-- No trim handles on the checkout clip yet — click-to-seek works, but you can't yet drag in/out markers to shorten a clip before saving. Backlog item B1.
-- Typography is fallback Consolas until **M8** when Monaspace Krypton/Neon/Argon are bundled.
-- No settings dialog yet — buffer duration is CLI-only via `--buffer-minutes`. Backlog item B5.
+Checkouts survive after you stop capture — you can pull a clip from buffered audio without an active stream.
 
 ## Architecture
 
 ```
 flashback_sampler/
-  core/                  # pure Python + numpy, no Qt/soundcard/sounddevice
+  core/                  # pure Python + numpy — no Qt / soundcard / sounddevice
     buffer.py            # AudioCircularBuffer — seqlock non-blocking reads
-    checkout.py          # Checkout + CheckoutManager
+    checkout.py          # Checkout + CheckoutManager (+ WAV/FLAC save)
     scrub_player.py      # ScrubPlayer — callback-driven preview engine
-    capture.py           # AudioCapture (sounddevice InputStream — mic/line-in)
-    loopback_capture.py  # LoopbackCapture (soundcard WASAPI — Windows speakers)
-    playback.py          # Legacy AudioPlayback + AudioExporter
+    capture.py           # AudioCapture (sounddevice — mic / line-in)
+    loopback_capture.py  # LoopbackCapture (soundcard WASAPI — Windows output)
+    mixed_capture.py     # sum multiple inputs into one slot
+    capture_slot.py      # one buffer + its source(s) + checkout manager
+    quality_presets.py   # sample-rate / channel presets
+  io/
+    win32_process_loopback.py  # ctypes WASAPI per-process loopback (Windows)
   app/                   # PySide6 only — isolated from core
-    main.py              # QApplication bootstrap
-    state.py             # AppState — owns buffer / checkout mgr / scrub player
-    main_window.py       # Main window + wiring
-    theme.py             # Erebus palette + base QSS
-  hardware/              # Raspberry Pi rotary encoder (unchanged from prototype)
+    main.py              # QApplication bootstrap + CLI
+    state.py             # AppState — owns slots / buffers / checkouts
+    turntable_window.py  # the main window
+    theme.py             # Erebus palette + base QSS, Monaspace fonts
+    widgets/             # custom-painted instruments (turntable, waveform, …)
 tests/
   unit/                  # TDD suite — no real audio hardware
-    test_buffer.py
-    test_checkout.py
-    test_scrub_player.py
-    test_app_state.py
-  fixtures/
-    sine_source.py       # deterministic sine + ramp generators
-  test_quick.py          # legacy CLI smoke test (keep for dev use)
+  fixtures/              # deterministic sine / ramp generators
 ```
+
+The ring buffer uses a seqlock so multi-megabyte checkout reads never stall the capture writer.
 
 ## Development
 
 ```powershell
-pytest tests/unit -v                                    # full unit suite
-pytest tests/unit --cov=flashback_sampler --cov-branch  # with branch coverage
-pytest tests/unit --cov=flashback_sampler --cov-report=html  # browse htmlcov/index.html
+pytest tests/unit -q                                         # full unit suite (headless Qt)
+pytest tests/unit --cov=flashback_sampler --cov-branch        # with branch coverage
+pytest tests/unit --cov=flashback_sampler --cov-report=html   # browse htmlcov/index.html
 ```
 
-Audio-hardware-dependent tests are marked `@pytest.mark.audio_hw` and excluded by default.
+Tests run headless with `QT_QPA_PLATFORM=offscreen`. Hardware-dependent tests are marked `@pytest.mark.audio_hw` and excluded by default; timing-sensitive ones are marked `@pytest.mark.perf` and excluded on CI.
 
 ## CI / CD
 
 Two GitHub Actions workflows live under `.github/workflows/`:
 
-### `test.yml` — runs on every push & PR
+- **`test.yml`** — every push & PR. Windows runner, Python 3.10–3.12 matrix, installs `.[dev]`, runs `pytest tests/unit` with branch coverage. Coverage / JUnit XML are uploaded as artifacts (no threshold enforced yet).
+- **`release.yml`** — on a semver tag (`vX.Y.Z`): runs the suite as a smoke check, builds a Windows standalone with `pyinstaller flashback_sampler.spec`, zips `dist/flashback-sampler/` with a `.sha256`, and publishes a GitHub Release. Tags with a hyphen (`v0.1.0-rc1`) publish as pre-releases. Can also be run manually via `workflow_dispatch`.
 
-- Windows runner, Python 3.10 / 3.11 / 3.12 matrix.
-- Installs the package via `pip install -e ".[dev]"`.
-- Runs `pytest tests/unit` with branch coverage, headless Qt (`QT_QPA_PLATFORM=offscreen`).
-- Coverage XML / HTML and JUnit XML are uploaded as workflow artifacts.
-- No coverage threshold is enforced yet (current coverage ~53% post-omits).
-  Re-enable `fail_under` in `pyproject.toml` once you've written real
-  Qt-fixture tests for the widget layer and want a regression tripwire.
+## License
 
-### `release.yml` — runs on version tags
-
-Trigger an auto-build by pushing a semver tag:
-
-```powershell
-# 1. Bump the version
-#    edit pyproject.toml -> [project] version = "0.1.0"
-git commit -am "release: v0.1.0"
-
-# 2. Tag and push
-git tag v0.1.0
-git push origin main --tags
-```
-
-The workflow then:
-
-1. Checks out the tagged commit on `windows-latest`.
-2. Installs deps + PyInstaller (`pip install -e ".[dev]" pyinstaller`).
-3. Runs the unit suite as a smoke check (`-x` — abort on first failure).
-4. Builds the standalone with `pyinstaller flashback_sampler.spec --noconfirm --clean`.
-5. Packages `dist/flashback-sampler/` into
-   `flashback-sampler-<version>-windows-x64.zip` plus a `.sha256` companion.
-6. Publishes a GitHub Release at the tag with auto-generated changelog
-   (commits since the previous tag) and attaches the zip.
-
-Tags containing a hyphen (e.g. `v0.1.0-rc1`) publish as pre-releases.
-
-You can also run the workflow manually from the Actions tab via
-`workflow_dispatch` — useful for building a one-off bundle from a branch
-without publishing a release.
-
-### Coverage philosophy
-
-`tool.coverage.run.omit` in `pyproject.toml` excludes paths that can't
-be exercised on CI runners or are legacy / on their way out:
-
-- `flashback_sampler/app/main.py` — PyInstaller entry, only meaningful at runtime.
-- `flashback_sampler/app/main_window.py` — legacy classic UI (`--ui classic`),
-  replaced by `turntable_window`.
-- `flashback_sampler/hardware/*` — Raspberry Pi GPIO encoder.
-- `flashback_sampler/io/win32_process_loopback.py` — ctypes against `Mmdevapi.dll`.
-- `flashback_sampler/core/loopback_capture.py` — `soundcard` WASAPI loopback.
-
-Largest remaining gaps are in `app/widgets/` (waveform_view, rotary_knob,
-slot_chip, capture_all_button, …) and `core/mixed_capture.py` (0%
-covered). Closing those requires Qt-fixture tests, which is the next
-deliberate test-writing pass — not blocking CI.
-
-When you've ratcheted real coverage upward, re-enable `fail_under` in
-`pyproject.toml` a few points below the current actual to catch
-regressions without forcing test-writing on every commit.
+MIT — see [LICENSE](LICENSE).

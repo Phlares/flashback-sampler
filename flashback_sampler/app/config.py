@@ -1,7 +1,7 @@
 """
 Persistent app settings — written to a JSON file under %APPDATA% on
-Windows (or ~/.config on Unix). Currently holds device selections and
-the buffer duration; the settings dialog (backlog B5) will extend this.
+Windows (or ~/.config on Unix). Holds device selections and the buffer
+duration.
 """
 
 from __future__ import annotations

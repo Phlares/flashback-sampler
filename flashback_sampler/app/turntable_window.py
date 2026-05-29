@@ -1,7 +1,4 @@
-"""TurntableWindow — dual-turntable wireframe layout.
-
-Parallel to MainWindow. Launch with --ui turntable.
-"""
+"""TurntableWindow — dual-turntable layout, the application's main window."""
 from __future__ import annotations
 
 import re
