@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -29,6 +29,9 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+from flashback_sampler.input.core import Action, BindingTable, invoke, register
+from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
+from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
 
 SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
 SELECTION_COLOR_CLIP = "#FF9500"     # orange
@@ -64,6 +67,9 @@ class TurntableWindow(QMainWindow):
         self.setWindowTitle("Flashback — Turntable UI")
         self.setMinimumSize(960, 700)
         self.resize(1120, 800)
+
+        self._binding_table = BindingTable()
+        self._keyboard_source = KeyboardSource(self._binding_table, self)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -201,6 +207,20 @@ class TurntableWindow(QMainWindow):
         # first time the user asks to mux within this session.
         self._mux_warning_shown: bool = False
 
+        register(Action(id="transport.start_recording", name="Start Recording",
+                        category="Transport",
+                        callable=self._on_start_clicked,
+                        repeat_policy="ignore_repeat"))
+        register(Action(id="transport.stop_recording", name="Stop Recording",
+                        category="Transport",
+                        callable=self._on_stop_clicked,
+                        repeat_policy="ignore_repeat"))
+        register(Action(id="transport.play_clip", name="Play Clip",
+                        category="Transport",
+                        callable=self._on_play_clip_clicked,
+                        default_binding="Space",
+                        repeat_policy="ignore_repeat"))
+
         self._wire_selection_sync()
         self._wire_controls()
 
@@ -217,6 +237,13 @@ class TurntableWindow(QMainWindow):
         self._update_selection_display()
         # Paint the initial (empty) clip side so its labels/rings are consistent.
         self._refresh_clip_side()
+
+        # ── Menu bar ─────────────────────────────────────────────────
+        settings_menu = self.menuBar().addMenu("Settings")
+        keybindings_act = settings_menu.addAction("Keybindings…")
+        keybindings_act.triggered.connect(self._open_keybindings_dialog)
+
+        self._binding_table.load()
 
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
@@ -279,8 +306,8 @@ class TurntableWindow(QMainWindow):
 
     def _wire_controls(self) -> None:
         # Transport
-        self.center_bridge.start_btn.clicked.connect(self._on_start_clicked)
-        self.center_bridge.stop_btn.clicked.connect(self._on_stop_clicked)
+        self.center_bridge.start_btn.clicked.connect(lambda: invoke("transport.start_recording"))
+        self.center_bridge.stop_btn.clicked.connect(lambda: invoke("transport.stop_recording"))
         # FREEZE toggles the buffer-panel display without stopping
         # capture — see _on_freeze_toggled.
         freeze_btn = self.buffer_controls[-1]
@@ -291,51 +318,98 @@ class TurntableWindow(QMainWindow):
         self.clip_turntable.track_selected.connect(self._on_track_selected)
 
         # OUT → check out current buffer selection as a new clip
-        self.out_btn.clicked.connect(self._on_checkout_clicked)
+        register(Action(id="clip.checkout", name="Checkout",
+                        category="Clip",
+                        callable=self._on_checkout_clicked,
+                        repeat_policy="ignore_repeat"))
+        self.out_btn.clicked.connect(lambda: invoke("clip.checkout"))
 
         # SAVE (clip side, last button in clip_controls) → save current clip
         save_btn = self.clip_controls[-1]
-        save_btn.clicked.connect(lambda: self._save_current_clip())
+        register(Action(id="clip.save", name="Save Clip",
+                        category="Clip",
+                        callable=lambda: self._save_current_clip(),
+                        repeat_policy="ignore_repeat"))
+        save_btn.clicked.connect(lambda: invoke("clip.save"))
 
         # Buffer controls: [FLUSH, −, +, ◀, ▶, FREEZE]. FLUSH wipes the
         # active slot's buffer; − / + step the duration preset; ◀ / ▶
         # shift the anchor by half the current duration (older / newer);
         # FREEZE wiring lives separately in the block below.
-        self.buffer_controls[0].clicked.connect(self._on_flush_active_buffer)
+        register(Action(id="buffer.flush_active", name="Flush Active Buffer",
+                        category="Buffer",
+                        callable=self._on_flush_active_buffer,
+                        repeat_policy="ignore_repeat"))
+        self.buffer_controls[0].clicked.connect(lambda: invoke("buffer.flush_active"))
+
+        register(Action(id="buffer.duration_shorter", name="Shorter Buffer Duration",
+                        category="Buffer",
+                        callable=lambda: self._nudge_buffer_duration(-1),
+                        repeat_policy="fire"))
         self.buffer_controls[1].clicked.connect(
-            lambda: self._nudge_buffer_duration(-1)
+            lambda: invoke("buffer.duration_shorter")
         )
+
+        register(Action(id="buffer.duration_longer", name="Longer Buffer Duration",
+                        category="Buffer",
+                        callable=lambda: self._nudge_buffer_duration(+1),
+                        repeat_policy="fire"))
         self.buffer_controls[2].clicked.connect(
-            lambda: self._nudge_buffer_duration(+1)
+            lambda: invoke("buffer.duration_longer")
         )
+
+        register(Action(id="buffer.anchor_newer", name="Shift Buffer Anchor Newer",
+                        category="Buffer",
+                        callable=lambda: self._nudge_buffer_anchor(+1),
+                        repeat_policy="fire"))
         self.buffer_controls[3].clicked.connect(
-            lambda: self._nudge_buffer_anchor(+1)
+            lambda: invoke("buffer.anchor_newer")
         )
+
+        register(Action(id="buffer.anchor_older", name="Shift Buffer Anchor Older",
+                        category="Buffer",
+                        callable=lambda: self._nudge_buffer_anchor(-1),
+                        repeat_policy="fire"))
         self.buffer_controls[4].clicked.connect(
-            lambda: self._nudge_buffer_anchor(-1)
+            lambda: invoke("buffer.anchor_older")
         )
 
         # Clip controls: [PLAY, −, +, ◀, ▶, SAVE]. PLAY toggles playback
         # of the trimmed clip; − / + tighten / expand the trim window
         # around its centre; ◀ / ▶ shift the whole trim earlier / later.
-        self.clip_controls[0].clicked.connect(self._on_play_clip_clicked)
+        self.clip_controls[0].clicked.connect(lambda: invoke("transport.play_clip"))
+
+        register(Action(id="clip.trim_shorter", name="Tighten Clip Trim",
+                        category="Clip",
+                        callable=lambda: self._nudge_clip_trim_span(-0.05),
+                        repeat_policy="fire"))
         self.clip_controls[1].clicked.connect(
-            lambda: self._nudge_clip_trim_span(-0.05)
-        )
-        self.clip_controls[2].clicked.connect(
-            lambda: self._nudge_clip_trim_span(+0.05)
-        )
-        self.clip_controls[3].clicked.connect(
-            lambda: self._nudge_clip_trim_shift(-0.05)
-        )
-        self.clip_controls[4].clicked.connect(
-            lambda: self._nudge_clip_trim_shift(+0.05)
+            lambda: invoke("clip.trim_shorter")
         )
 
-        # Spacebar → toggle clip playback from in-marker to out-marker.
-        play_sc = QShortcut(QKeySequence(Qt.Key_Space), self)
-        play_sc.setContext(Qt.ApplicationShortcut)
-        play_sc.activated.connect(self._on_play_clip_clicked)
+        register(Action(id="clip.trim_longer", name="Expand Clip Trim",
+                        category="Clip",
+                        callable=lambda: self._nudge_clip_trim_span(+0.05),
+                        repeat_policy="fire"))
+        self.clip_controls[2].clicked.connect(
+            lambda: invoke("clip.trim_longer")
+        )
+
+        register(Action(id="clip.trim_earlier", name="Shift Clip Trim Earlier",
+                        category="Clip",
+                        callable=lambda: self._nudge_clip_trim_shift(-0.05),
+                        repeat_policy="fire"))
+        self.clip_controls[3].clicked.connect(
+            lambda: invoke("clip.trim_earlier")
+        )
+
+        register(Action(id="clip.trim_later", name="Shift Clip Trim Later",
+                        category="Clip",
+                        callable=lambda: self._nudge_clip_trim_shift(+0.05),
+                        repeat_policy="fire"))
+        self.clip_controls[4].clicked.connect(
+            lambda: invoke("clip.trim_later")
+        )
 
         # Right-click on clip waveform → save/discard context menu
         self.clip_panel.waveform.contextMenuRequested.connect(
@@ -343,8 +417,17 @@ class TurntableWindow(QMainWindow):
         )
 
         # NavBar actions
-        self.nav_bar.arm_all_btn.clicked.connect(self._on_arm_all)
-        self.nav_bar.add_source_btn.clicked.connect(self._on_add_source)
+        register(Action(id="buffer.arm_all", name="Arm All Sources",
+                        category="Buffer",
+                        callable=self._on_arm_all,
+                        repeat_policy="ignore_repeat"))
+        self.nav_bar.arm_all_btn.clicked.connect(lambda: invoke("buffer.arm_all"))
+
+        register(Action(id="buffer.add_source", name="Add Source",
+                        category="Buffer",
+                        callable=self._on_add_source,
+                        repeat_policy="ignore_repeat"))
+        self.nav_bar.add_source_btn.clicked.connect(lambda: invoke("buffer.add_source"))
         # Per-source chips in the NavBar — NavBar forwards per-chip
         # signals so the wiring stays valid even as chips are created
         # dynamically when the user adds more sources.
@@ -353,6 +436,10 @@ class TurntableWindow(QMainWindow):
             self._on_source_chip_context_menu
         )
         self._refresh_source_indicators()
+
+    def _open_keybindings_dialog(self) -> None:
+        dialog = KeybindingsDialog(self._binding_table)
+        dialog.exec()
 
     def _on_start_clicked(self) -> None:
         started, err = self._state.start_rolling()
