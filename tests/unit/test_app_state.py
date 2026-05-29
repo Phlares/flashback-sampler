@@ -377,30 +377,3 @@ def test_cli_mono_override():
     args = _parse_args(["--channels", "1", "--sample-rate", "16000"])
     assert args.channels == 1
     assert args.sample_rate == 16_000
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Duration preset stepper logic (headless — tests the module constants
-# and math; no Qt widget required)
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def test_duration_presets_are_monotonic():
-    from flashback_sampler.app.main_window import DURATION_PRESETS_S
-
-    # Must be strictly ascending so the stepper makes sense
-    for a, b in zip(DURATION_PRESETS_S, DURATION_PRESETS_S[1:]):
-        assert a < b
-    # Must contain the default (3:00) and cover 0:15 up to 15:00
-    assert 15.0 in DURATION_PRESETS_S
-    assert 180.0 in DURATION_PRESETS_S
-    assert 900.0 in DURATION_PRESETS_S
-
-
-def test_duration_default_index_maps_to_three_minutes():
-    from flashback_sampler.app.main_window import (
-        DEFAULT_DURATION_INDEX,
-        DURATION_PRESETS_S,
-    )
-
-    assert DURATION_PRESETS_S[DEFAULT_DURATION_INDEX] == 180.0

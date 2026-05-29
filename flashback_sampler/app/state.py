@@ -1,13 +1,10 @@
 """
 AppState — the root object graph for the Qt application layer.
 
-M10.4 refactors this from "one buffer, one checkout manager, one
-optional capture source" to "a LIST of CaptureSlots with one active
-index." Each slot owns its own buffer / checkout manager / capture
-source. Backward-compat properties (buffer, checkout_manager, capture)
-delegate to the ACTIVE slot so every existing widget keeps working
-without changes — M10.5's source strip will then add a UI affordance
-for switching which slot is active.
+Holds a LIST of CaptureSlots with one active index. Each slot owns its
+own buffer / checkout manager / capture source. Convenience properties
+(buffer, checkout_manager, capture) delegate to the ACTIVE slot, and the
+UI switches which slot is active.
 
 Nothing in this file imports PySide6 — it's a plain Python container
 so unit tests can drive it headless.
@@ -15,7 +12,6 @@ so unit tests can drive it headless.
 
 from __future__ import annotations
 
-import sys
 from typing import Optional
 
 from flashback_sampler.app.audio_devices import (
@@ -57,8 +53,8 @@ class AppState:
         # Build one initial slot from the constructor args. It's
         # conceptually a "CUSTOM" quality preset since the values come
         # from CLI flags / settings rather than one of the named
-        # presets. M10.5's Add Source dialog will use the named
-        # presets for subsequent slots.
+        # presets. The Add Source dialog uses the named presets for
+        # subsequent slots.
         initial_preset = QualityPreset(
             name="CUSTOM",
             sample_rate=int(sample_rate),
@@ -208,10 +204,9 @@ class AppState:
             self.active_slot_index -= 1
 
     # ------------------------------------------------------------------
-    # Backward-compat properties — delegate to the active slot so every
-    # existing widget continues to work against state.buffer /
-    # state.checkout_manager / state.capture / state.sample_rate /
-    # state.channels as before M10.4.
+    # Convenience properties — delegate to the active slot so callers can
+    # use state.buffer / state.checkout_manager / state.capture /
+    # state.sample_rate / state.channels without reaching into the slot.
     # ------------------------------------------------------------------
 
     @property
@@ -415,16 +410,3 @@ class AppState:
             self.scrub_player.close()
         except Exception:  # pragma: no cover
             pass
-
-
-def make_loopback_capture(state: AppState):
-    """
-    DEPRECATED: use `state.build_capture()` instead. Kept for any leftover
-    callers from before M7.
-    """
-    if sys.platform != "win32":
-        raise RuntimeError(
-            "Loopback capture is Windows-only for now. "
-            "Use a mic/line-in CaptureSource on this platform."
-        )
-    return state.build_capture()
