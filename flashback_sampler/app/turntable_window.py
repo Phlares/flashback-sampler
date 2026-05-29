@@ -8,6 +8,7 @@ import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QMainWindow,
@@ -32,6 +33,8 @@ from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
 from flashback_sampler.input.core import Action, BindingTable, invoke, register
 from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
+from flashback_sampler.platform.capabilities import tray_supported
+from flashback_sampler.platform.tray import SystemTray
 from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
 
 SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
@@ -253,6 +256,54 @@ class TurntableWindow(QMainWindow):
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
 
+        # ── System tray ──────────────────────────────────────────────
+        # Gated on availability (off under headless/offscreen Qt). When a
+        # tray exists, closing the window hides to tray and keeps capturing;
+        # the app only really exits via the tray's Quit.
+        self._quitting = False
+        self._close_to_tray = True
+        self._bg_notice_shown = False
+        self._tray: SystemTray | None = None
+        if tray_supported():
+            self._tray = SystemTray(
+                is_recording=self._any_recording,
+                source_count=self._recording_source_count,
+                on_open=self._restore_window,
+                on_quit=self._request_quit,
+                on_settings=self._open_keybindings_dialog,
+                parent=self,
+            )
+            self._tray.show()
+            # Keep capture alive when the last window is hidden/closed.
+            QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    # ------------------------------------------------------------------
+    # System-tray helpers
+    # ------------------------------------------------------------------
+
+    def _any_recording(self) -> bool:
+        return any(slot.is_capturing() for slot in self._state.slots)
+
+    def _recording_source_count(self) -> int:
+        return sum(1 for slot in self._state.slots if slot.is_capturing())
+
+    def _restore_window(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _request_quit(self) -> None:
+        """Tray → Quit: tear down and exit (bypasses close-to-tray)."""
+        self._quitting = True
+        self.close()
+        if self._tray is not None:
+            self._tray.hide()
+        QApplication.instance().quit()
+
+    def _sync_tray(self) -> None:
+        if self._tray is not None:
+            self._tray.refresh()
+
     def _wire_selection_sync(self) -> None:
         """When the user drags a selection on a waveform, snapshot the
         buffer's absolute sample indices so the selection rides the audio.
@@ -452,10 +503,12 @@ class TurntableWindow(QMainWindow):
             QMessageBox.warning(self, "Start capture failed", str(err))
             return
         self._refresh_source_indicators()
+        self._sync_tray()
 
     def _on_stop_clicked(self) -> None:
         self._state.stop_rolling()
         self._refresh_source_indicators()
+        self._sync_tray()
 
     # ------------------------------------------------------------------
     # Buffer-side transport controls (− / + / ◀ / ▶ / FLUSH)
@@ -1244,6 +1297,19 @@ class TurntableWindow(QMainWindow):
         self._refresh_play_button()
 
     def closeEvent(self, event) -> None:
+        # Close-to-tray: hide and keep capturing instead of tearing down,
+        # unless the user explicitly quit (tray → Quit) or there's no tray.
+        if not self._quitting and self._tray is not None and self._close_to_tray:
+            event.ignore()
+            self.hide()
+            if not self._bg_notice_shown:
+                self._bg_notice_shown = True
+                self._tray.notify(
+                    "Still running in the background",
+                    "flashback-sampler keeps capturing. Right-click the tray "
+                    "icon to stop or quit.",
+                )
+            return
         self._tick_timer.stop()
         try:
             self._state.scrub_player.pause()
