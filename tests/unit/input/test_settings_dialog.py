@@ -38,9 +38,10 @@ def test_dialog_shows_category_headers(qapp, tmp_path):
                     callable=lambda: None))
     table = BindingTable(storage_path=tmp_path / "b.json")
     dialog = KeybindingsDialog(table)
-    categories = set(dialog._category_labels())
-    assert "Transport" in categories
-    assert "Deck" in categories
+    from PySide6.QtWidgets import QLabel
+    header_text = " ".join(lbl.text() for lbl in dialog.findChildren(QLabel))
+    assert "Transport" in header_text
+    assert "Deck" in header_text
 
 
 def test_rebind_updates_edit_buffer(qapp, tmp_path):
@@ -131,7 +132,7 @@ def test_ok_writes_edit_buffer_to_table_and_disk(qapp, tmp_path):
     dialog = KeybindingsDialog(table)
     dialog._apply_rebind("t.a", "Ctrl+R")
     dialog.accept()
-    assert table._overrides == {"Ctrl+R": "t.a"}
+    assert table.overrides_snapshot() == {"Ctrl+R": "t.a"}
     assert path.exists()
 
 
@@ -143,5 +144,5 @@ def test_cancel_does_not_touch_table_or_disk(qapp, tmp_path):
     dialog = KeybindingsDialog(table)
     dialog._apply_rebind("t.a", "Ctrl+R")
     dialog.reject()
-    assert table._overrides == {}
+    assert table.overrides_snapshot() == {}
     assert not path.exists()

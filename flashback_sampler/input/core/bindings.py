@@ -65,6 +65,31 @@ class BindingTable:
         self._overrides.clear()
         self._overridden_action_ids.clear()
 
+    def overrides_snapshot(self) -> dict[str, str | None]:
+        """A copy of the current overrides, for editors that buffer edits."""
+        return dict(self._overrides)
+
+    def replace_overrides(self, overrides: dict[str, str | None]) -> None:
+        """Atomically replace all overrides and re-derive suppression state.
+
+        This is the single normalization path — ``load()`` and the
+        keybindings dialog both route through it, so the in-memory result of
+        editing in the dialog is identical to reloading from disk.
+        """
+        self._overrides = {
+            str(code): aid for code, aid in overrides.items()
+            if aid is None or isinstance(aid, str)
+        }
+        self._overridden_action_ids = {
+            aid for aid in self._overrides.values() if aid is not None
+        }
+        # Re-suppress defaults for codes carrying an explicit null override.
+        for code, aid in self._overrides.items():
+            if aid is None:
+                for a in actions.all_actions():
+                    if a.default_binding == code:
+                        self._overridden_action_ids.add(a.id)
+
     # --- persistence ---
 
     def save(self) -> None:
@@ -86,19 +111,7 @@ class BindingTable:
         overrides = data.get("bindings", {})
         if not isinstance(overrides, dict):
             return
-        self._overrides = {
-            str(code): aid for code, aid in overrides.items()
-            if aid is None or isinstance(aid, str)
-        }
-        self._overridden_action_ids = {
-            aid for aid in self._overrides.values() if aid is not None
-        }
-        # Re-suppress defaults for codes with explicit null
-        for code, aid in self._overrides.items():
-            if aid is None:
-                for a in actions.all_actions():
-                    if a.default_binding == code:
-                        self._overridden_action_ids.add(a.id)
+        self.replace_overrides(overrides)
 
     # --- lookup ---
 
@@ -110,6 +123,3 @@ class BindingTable:
             if a.default_binding == code and a.id not in self._overridden_action_ids:
                 return a.id
         return None
-
-    def conflicts(self, event_code: str) -> str | None:
-        return self.resolve(InputEvent(source="keyboard", kind="press", code=event_code))

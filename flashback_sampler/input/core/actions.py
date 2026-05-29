@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-RepeatPolicy = Literal["fire", "ignore_repeat", "edge_only"]
+RepeatPolicy = Literal["fire", "ignore_repeat"]
 
 
 @dataclass
@@ -39,6 +39,6 @@ def invoke(action_id: str, *, is_repeat: bool = False) -> None:
     action = _registry.get(action_id)
     if action is None:
         return
-    if is_repeat and action.repeat_policy in ("ignore_repeat", "edge_only"):
+    if is_repeat and action.repeat_policy == "ignore_repeat":
         return
     action.callable()

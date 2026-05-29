@@ -64,7 +64,7 @@ class KeybindingsDialog(QDialog):
         self.setWindowTitle("Keybindings")
         self.resize(640, 480)
         self._table = table
-        self._edit_buffer: dict[str, str | None] = dict(table._overrides)
+        self._edit_buffer: dict[str, str | None] = table.overrides_snapshot()
         self._rows: list[_Row] = []
         self._build_ui()
 
@@ -154,9 +154,6 @@ class KeybindingsDialog(QDialog):
                 return None
         return action.default_binding
 
-    def _category_labels(self) -> list[str]:
-        return sorted({a.category for a in all_actions()})
-
     def _open_rebind(self, action_id: str, action_name: str) -> None:
         modal = _RebindModal(action_name, parent=self)
         if modal.exec() == QDialog.Accepted:
@@ -234,17 +231,8 @@ class KeybindingsDialog(QDialog):
             container.setVisible(needle in hay)
 
     def accept(self) -> None:
-        # Replace table state with edit buffer
-        self._table._overrides = dict(self._edit_buffer)
-        self._table._overridden_action_ids = {
-            aid for aid in self._edit_buffer.values() if aid is not None
-        }
-        # Re-suppress defaults for explicit nulls
-        for code, aid in self._edit_buffer.items():
-            if aid is None:
-                for a in all_actions():
-                    if a.default_binding == code:
-                        self._table._overridden_action_ids.add(a.id)
+        # Commit the edit buffer through the table's single normalization path.
+        self._table.replace_overrides(self._edit_buffer)
         self._table.save()
         super().accept()
 

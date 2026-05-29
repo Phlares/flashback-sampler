@@ -103,13 +103,3 @@ def test_invoke_ignore_repeat_policy_suppresses_repeats():
     invoke("t.x", is_repeat=True)
     invoke("t.x", is_repeat=True)
     assert called == [1]
-
-
-def test_invoke_edge_only_policy_suppresses_repeats():
-    called = []
-    register(Action(id="t.x", name="X", category="T",
-                    callable=lambda: called.append(1),
-                    repeat_policy="edge_only"))
-    invoke("t.x", is_repeat=False)
-    invoke("t.x", is_repeat=True)
-    assert called == [1]

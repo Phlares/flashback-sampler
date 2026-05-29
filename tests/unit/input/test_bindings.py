@@ -162,21 +162,21 @@ def test_default_storage_path_has_no_doubled_segment():
     ), f"doubled app-name segment in {p}"
 
 
-def test_conflicts_returns_existing_action_for_override():
+def test_resolve_returns_existing_action_for_override():
     register(Action(id="t.a", name="A", category="T",
                     callable=lambda: None))
     table = BindingTable()
     table.bind("Ctrl+R", "t.a")
-    assert table.conflicts("Ctrl+R") == "t.a"
+    assert table.resolve(_key("Ctrl+R")) == "t.a"
 
 
-def test_conflicts_returns_default_action_for_unbound_code():
+def test_resolve_returns_default_action_for_unbound_code():
     register(Action(id="t.a", name="A", category="T",
                     callable=lambda: None, default_binding="F13"))
     table = BindingTable()
-    assert table.conflicts("F13") == "t.a"
+    assert table.resolve(_key("F13")) == "t.a"
 
 
-def test_conflicts_returns_none_for_free_code():
+def test_resolve_returns_none_for_free_code():
     table = BindingTable()
-    assert table.conflicts("F20") is None
+    assert table.resolve(_key("F20")) is None
