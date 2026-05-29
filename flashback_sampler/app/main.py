@@ -20,7 +20,6 @@ from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.state import AppState
-from flashback_sampler.app.main_window import MainWindow
 from flashback_sampler.app.theme import EREBUS, base_stylesheet, load_fonts
 
 
@@ -35,12 +34,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--sample-rate", type=int, default=48_000)
     p.add_argument("--channels", type=int, default=2, choices=(1, 2))
-    p.add_argument(
-        "--ui",
-        choices=("classic", "turntable"),
-        default="turntable",
-        help="UI layout: 'turntable' (default) or 'classic' (legacy single-column)",
-    )
     # Parse known args only — leave sys.argv[1:] extras untouched for Qt
     args, _ = p.parse_known_args(argv)
     return args
@@ -81,11 +74,8 @@ def main() -> int:
         sample_rate=args.sample_rate,
         channels=args.channels,
     )
-    if args.ui == "turntable":
-        from flashback_sampler.app.turntable_window import TurntableWindow
-        window = TurntableWindow(state)
-    else:
-        window = MainWindow(state)
+    from flashback_sampler.app.turntable_window import TurntableWindow
+    window = TurntableWindow(state)
     window.show()
 
     return app.exec()
