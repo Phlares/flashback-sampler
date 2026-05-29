@@ -11,7 +11,11 @@ SCHEMA_VERSION = 1
 
 
 def default_storage_path() -> Path:
-    return Path(platformdirs.user_config_dir("flashback-sampler")) / "bindings.json"
+    # appauthor=False avoids platformdirs' default of repeating the app name
+    # as the author segment (…/flashback-sampler/flashback-sampler). This is
+    # only the fallback when no path is injected; the app injects a path that
+    # co-locates bindings.json with its config.json.
+    return Path(platformdirs.user_config_dir("flashback-sampler", appauthor=False)) / "bindings.json"
 
 
 class BindingTable:
@@ -71,9 +75,21 @@ class BindingTable:
     def load(self) -> None:
         if not self._storage_path.exists():
             return
-        data = json.loads(self._storage_path.read_text())
-        overrides: dict[str, str | None] = data.get("bindings", {})
-        self._overrides = dict(overrides)
+        # A corrupt or hand-edited file must never break startup — fall back
+        # to defaults (empty overrides) on any malformed content.
+        try:
+            data = json.loads(self._storage_path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        overrides = data.get("bindings", {})
+        if not isinstance(overrides, dict):
+            return
+        self._overrides = {
+            str(code): aid for code, aid in overrides.items()
+            if aid is None or isinstance(aid, str)
+        }
         self._overridden_action_ids = {
             aid for aid in self._overrides.values() if aid is not None
         }

@@ -118,6 +118,50 @@ def test_load_missing_file_is_noop(tmp_path):
     assert table.resolve(_key("F13")) == "t.a"
 
 
+@pytest.mark.parametrize("content", [
+    "{ this is not valid json",   # truncated / corrupt
+    "[]",                          # valid JSON but not an object
+    '"a string"',                  # valid JSON, wrong type
+    '{"version": 1, "bindings": ["not", "a", "dict"]}',  # bindings wrong shape
+    '{"version": 1}',              # no bindings key
+])
+def test_load_degrades_gracefully_on_bad_file(tmp_path, content):
+    """A corrupt or hand-edited bindings.json must never break startup —
+    load() falls back to defaults instead of raising."""
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    path = tmp_path / "bindings.json"
+    path.write_text(content)
+    table = BindingTable(storage_path=path)
+    table.load()  # must not raise
+    # falls back to defaults — t.a's default binding still resolves
+    assert table.resolve(_key("F13")) == "t.a"
+
+
+def test_load_skips_non_string_binding_values(tmp_path):
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    path = tmp_path / "bindings.json"
+    # "BadKey" → 123 is a junk value; it must be dropped, while the valid
+    # "Ctrl+R" → "t.a" override still loads.
+    path.write_text('{"version": 1, "bindings": {"BadKey": 123, "Ctrl+R": "t.a"}}')
+    table = BindingTable(storage_path=path)
+    table.load()
+    assert table.resolve(_key("Ctrl+R")) == "t.a"
+    assert table.resolve(_key("BadKey")) is None  # junk dropped, not bound
+
+
+def test_default_storage_path_has_no_doubled_segment():
+    from flashback_sampler.input.core.bindings import default_storage_path
+    p = default_storage_path()
+    parts = p.parts
+    # the app-name segment must not repeat back-to-back
+    assert not any(
+        parts[i] == parts[i + 1] == "flashback-sampler"
+        for i in range(len(parts) - 1)
+    ), f"doubled app-name segment in {p}"
+
+
 def test_conflicts_returns_existing_action_for_override():
     register(Action(id="t.a", name="A", category="T",
                     callable=lambda: None))

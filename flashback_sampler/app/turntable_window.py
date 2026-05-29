@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
 from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
+from flashback_sampler.app.config import config_dir
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
@@ -68,7 +69,11 @@ class TurntableWindow(QMainWindow):
         self.setMinimumSize(960, 700)
         self.resize(1120, 800)
 
-        self._binding_table = BindingTable()
+        # Keep keybindings next to the app's config.json (same dir as
+        # AppState's device/buffer settings) rather than the binding
+        # engine's standalone default, so all per-user state lives in one
+        # place. input/core stays app-agnostic — the app injects the path.
+        self._binding_table = BindingTable(storage_path=config_dir() / "bindings.json")
         self._keyboard_source = KeyboardSource(self._binding_table, self)
 
         central = QWidget()
