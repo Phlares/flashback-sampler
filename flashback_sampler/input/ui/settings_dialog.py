@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
 from flashback_sampler.input.core import (
     Action,
     BindingTable,
-    InputEvent,
     all_actions,
 )
 

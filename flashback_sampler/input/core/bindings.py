@@ -50,16 +50,18 @@ class BindingTable:
                 self._overridden_action_ids.add(a.id)
 
     def reset_one(self, action_id: str) -> None:
-        # Drop any overrides pointing to this action
-        self._overrides = {
+        # Drop any overrides pointing to this action…
+        new_overrides = {
             code: aid for code, aid in self._overrides.items() if aid != action_id
         }
-        # Also drop null entries targeting the default code of this action
+        # …and any explicit-null override on this action's own default code.
         a = actions.get(action_id)
-        if a is not None and a.default_binding in self._overrides:
-            if self._overrides[a.default_binding] is None:
-                del self._overrides[a.default_binding]
-        self._overridden_action_ids.discard(action_id)
+        if (a is not None and a.default_binding in new_overrides
+                and new_overrides[a.default_binding] is None):
+            del new_overrides[a.default_binding]
+        # Re-derive through the single normalization path so the suppression
+        # set never goes stale (e.g. when actions share a default code).
+        self.replace_overrides(new_overrides)
 
     def reset_to_defaults(self) -> None:
         self._overrides.clear()
