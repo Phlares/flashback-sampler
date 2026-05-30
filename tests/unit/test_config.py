@@ -77,3 +77,18 @@ def test_save_creates_parent_directories(tmp_path: Path):
     save_config({"k": "v"}, p)
     assert p.exists()
     assert load_config(p) == {"k": "v"}
+
+
+def test_global_hotkeys_defaults_false(tmp_path: Path):
+    from flashback_sampler.app.config import load_global_hotkeys_enabled
+    assert load_global_hotkeys_enabled(tmp_path / "config.json") is False
+
+
+def test_global_hotkeys_roundtrip(tmp_path: Path):
+    from flashback_sampler.app.config import (
+        load_global_hotkeys_enabled,
+        save_global_hotkeys_enabled,
+    )
+    p = tmp_path / "config.json"
+    save_global_hotkeys_enabled(True, p)
+    assert load_global_hotkeys_enabled(p) is True

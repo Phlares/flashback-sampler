@@ -125,3 +125,33 @@ class BindingTable:
             if a.default_binding == code and a.id not in self._overridden_action_ids:
                 return a.id
         return None
+
+    def remap_actions(self, mapping: dict[str, str]) -> bool:
+        """Rewrite override targets from retired action ids to replacements —
+        a one-time migration after an action is renamed or retired. Null
+        overrides and unmapped targets are left untouched. Returns True if any
+        override changed (so the caller can persist the migrated file)."""
+        new = {
+            code: (mapping.get(aid, aid) if aid is not None else None)
+            for code, aid in self._overrides.items()
+        }
+        if new == self._overrides:
+            return False
+        self.replace_overrides(new)
+        return True
+
+    def binding_for(self, action_id: str) -> str | None:
+        """The code currently bound to ``action_id`` (override or default), or
+        None if unbound. The inverse of :meth:`resolve`; agrees with it for
+        every code so global hotkeys and in-focus keys stay in lockstep."""
+        for code, aid in self._overrides.items():
+            if aid == action_id:
+                return code
+        a = actions.get(action_id)
+        if a is not None and a.default_binding:
+            code = a.default_binding
+            # Default applies only if its code isn't overridden (by a null or by
+            # another action) and the action's default isn't suppressed.
+            if code not in self._overrides and action_id not in self._overridden_action_ids:
+                return code
+        return None

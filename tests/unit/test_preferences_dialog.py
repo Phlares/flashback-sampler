@@ -25,3 +25,25 @@ def test_toggling_checkbox_applies_live(qapp):
     dlg.notify_check.setChecked(False)
     dlg.notify_check.setChecked(True)
     assert changes == [False, True]
+
+
+def test_global_hotkeys_checkbox_reflects_and_fires(qapp):
+    changes = []
+    dlg = PreferencesDialog(
+        show_notifications=True, on_notifications_changed=lambda v: None,
+        global_hotkeys_enabled=True, on_global_hotkeys_changed=lambda v: changes.append(v),
+        global_hotkeys_supported=True,
+    )
+    assert dlg.global_hotkeys_check.isChecked() is True
+    dlg.global_hotkeys_check.setChecked(False)
+    assert changes == [False]
+
+
+def test_global_hotkeys_checkbox_disabled_when_unsupported(qapp):
+    dlg = PreferencesDialog(
+        show_notifications=True, on_notifications_changed=lambda v: None,
+        global_hotkeys_enabled=True, on_global_hotkeys_changed=lambda v: None,
+        global_hotkeys_supported=False,
+    )
+    assert dlg.global_hotkeys_check.isEnabled() is False
+    assert dlg.global_hotkeys_check.isChecked() is False  # forced off when unsupported
