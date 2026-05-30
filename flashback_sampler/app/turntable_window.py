@@ -36,8 +36,19 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+from flashback_sampler.core.source_status import (
+    SILENCE_DBFS,
+    Severity,
+    SourceSnapshot,
+    SourceStatus,
+    evaluate,
+    worst,
+)
 from flashback_sampler.input.core import Action, BindingTable, invoke, register
 from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
+
+# Linear magnitude of the silence floor, for the per-source silent-duration tally.
+_SILENCE_MAG = 10.0 ** (SILENCE_DBFS / 20.0)
 from flashback_sampler.platform.capabilities import tray_supported
 from flashback_sampler.platform.tray import SystemTray
 from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
@@ -271,6 +282,11 @@ class TurntableWindow(QMainWindow):
         self._close_to_tray = True
         self._bg_notice_shown = False
         self._show_notifications = load_show_notifications()
+        # Per-source defensive-heal status, polled once a second.
+        self._worst_sev = Severity.OK
+        self._silent_secs: dict[int, float] = {}
+        self._prev_xrun: dict[int, int] = {}
+        self._prev_source_sev: dict[int, Severity] = {}
         self._tray: SystemTray | None = None
         if tray_supported():
             self._tray = SystemTray(
@@ -281,16 +297,17 @@ class TurntableWindow(QMainWindow):
                 on_settings=self._open_preferences_dialog,
                 on_toggle_notifications=self._set_notifications_enabled,
                 memory_bytes=self._state.total_project_ram_bytes,
+                worst_severity=lambda: self._worst_sev,
                 show_toasts=self._show_notifications,
                 parent=self,
             )
             self._tray.show()
             # Keep capture alive when the last window is hidden/closed.
             QApplication.instance().setQuitOnLastWindowClosed(False)
-            # Refresh the tooltip's live memory readout once a second.
-            self._tray_tooltip_timer = QTimer(self)
-            self._tray_tooltip_timer.timeout.connect(self._tray.update_tooltip)
-            self._tray_tooltip_timer.start(1000)
+            # Poll source health + refresh the tray (ring colour + tooltip) at 1 Hz.
+            self._status_timer = QTimer(self)
+            self._status_timer.timeout.connect(self._poll_source_status)
+            self._status_timer.start(1000)
 
     # ------------------------------------------------------------------
     # System-tray helpers
@@ -316,6 +333,55 @@ class TurntableWindow(QMainWindow):
         QApplication.instance().quit()
 
     def _sync_tray(self) -> None:
+        if self._tray is not None:
+            self._tray.refresh()
+
+    def _evaluate_slot(self, idx: int, slot) -> "SourceStatus":
+        """Build a snapshot for one slot and evaluate its health. Advances the
+        per-slot silent-duration / xrun trackers (call once per poll tick)."""
+        capturing = slot.is_capturing()
+        level = 0.0
+        if capturing:
+            try:
+                levels = slot.buffer.get_rms_levels(0.2)
+                level = float(max(levels)) if len(levels) else 0.0
+            except Exception:
+                level = 0.0
+        if capturing and level < _SILENCE_MAG:
+            self._silent_secs[idx] = self._silent_secs.get(idx, 0.0) + 1.0
+        else:
+            self._silent_secs[idx] = 0.0
+        try:
+            dur = slot.buffer.duration
+            fill = slot.buffer.buffered_seconds() / dur if dur else 0.0
+        except Exception:
+            fill = 0.0
+        try:
+            xr = slot.xrun_count()
+        except Exception:
+            xr = 0
+        rate = max(0, xr - self._prev_xrun.get(idx, xr))
+        self._prev_xrun[idx] = xr
+        try:
+            err = slot.last_error()
+        except Exception:
+            err = None
+        return evaluate(SourceSnapshot(
+            capturing=capturing, peak=level,
+            silent_seconds=self._silent_secs.get(idx, 0.0),
+            buffer_fill=fill, xrun_rate=float(rate), error=err,
+        ))
+
+    def _poll_source_status(self) -> None:
+        """1 Hz: evaluate every source, roll up the worst severity for the
+        tray, refresh the tray, and toast on a source entering an error."""
+        statuses = [self._evaluate_slot(i, s) for i, s in enumerate(self._state.slots)]
+        for i, st in enumerate(statuses):
+            prev = self._prev_source_sev.get(i, Severity.OK)
+            if st.severity is Severity.ERROR and prev is not Severity.ERROR and self._tray:
+                self._tray.notify(st.message, f"{self._state.slots[i].name}: {st.message}")
+            self._prev_source_sev[i] = st.severity
+        self._worst_sev = worst(statuses).severity
         if self._tray is not None:
             self._tray.refresh()
 
@@ -1345,7 +1411,7 @@ class TurntableWindow(QMainWindow):
             return
         self._tick_timer.stop()
         if self._tray is not None:
-            self._tray_tooltip_timer.stop()  # don't fire update_tooltip() after shutdown
+            self._status_timer.stop()  # don't poll/refresh the tray after shutdown
         try:
             self._state.scrub_player.pause()
         except Exception:
