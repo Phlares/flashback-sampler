@@ -337,53 +337,55 @@ class TurntableWindow(QMainWindow):
         if self._tray is not None:
             self._tray.refresh()
 
-    def _evaluate_slot(self, idx: int, slot) -> "SourceStatus":
+    def _evaluate_slot(self, slot) -> SourceStatus:
         """Build a snapshot for one slot and evaluate its health. Advances the
-        per-slot silent-duration / xrun trackers (call once per poll tick)."""
+        per-slot silent-duration / xrun trackers (keyed by slot identity, so
+        removing a slot can't mis-attribute another's state). Call once per
+        poll tick."""
+        key = id(slot)
         capturing = slot.is_capturing()
         level = 0.0
         if capturing:
+            # The one call worth guarding — touches numpy + the seqlock.
             try:
                 levels = slot.buffer.get_rms_levels(0.2)
                 level = float(max(levels)) if len(levels) else 0.0
             except Exception:
                 level = 0.0
         if capturing and level < _SILENCE_MAG:
-            self._silent_secs[idx] = self._silent_secs.get(idx, 0.0) + 1.0
+            self._silent_secs[key] = self._silent_secs.get(key, 0.0) + 1.0
         else:
-            self._silent_secs[idx] = 0.0
-        try:
-            dur = slot.buffer.duration
-            fill = slot.buffer.buffered_seconds() / dur if dur else 0.0
-        except Exception:
-            fill = 0.0
-        try:
-            xr = slot.xrun_count()
-        except Exception:
-            xr = 0
-        rate = max(0, xr - self._prev_xrun.get(idx, xr))
-        self._prev_xrun[idx] = xr
-        try:
-            err = slot.last_error()
-        except Exception:
-            err = None
+            self._silent_secs[key] = 0.0
+        dur = slot.buffer.duration
+        fill = slot.buffer.buffered_seconds / dur if dur else 0.0  # property, not a call
+        xr = slot.xrun_count()
+        rate = max(0, xr - self._prev_xrun.get(key, xr))
+        self._prev_xrun[key] = xr
         return evaluate(SourceSnapshot(
             capturing=capturing, peak=level,
-            silent_seconds=self._silent_secs.get(idx, 0.0),
-            buffer_fill=fill, xrun_rate=float(rate), error=err,
+            silent_seconds=self._silent_secs[key],
+            buffer_fill=fill, xrun_rate=float(rate), error=slot.last_error(),
         ))
 
     def _poll_source_status(self) -> None:
-        """1 Hz: evaluate every source, roll up the worst severity for the
-        tray, refresh the tray, and toast on a source entering an error."""
-        statuses = [self._evaluate_slot(i, s) for i, s in enumerate(self._state.slots)]
-        for i, st in enumerate(statuses):
-            prev = self._prev_source_sev.get(i, Severity.OK)
+        """1 Hz: evaluate every source, drive the in-app chip badges, roll up
+        the worst severity for the tray, and toast when a source enters an
+        error. Trackers are pruned to live slots so they can't go stale."""
+        slots = self._state.slots
+        live = {id(s) for s in slots}
+        for tracker in (self._silent_secs, self._prev_xrun, self._prev_source_sev):
+            for stale in [k for k in tracker if k not in live]:
+                del tracker[stale]
+
+        statuses = [self._evaluate_slot(s) for s in slots]
+        for slot, st in zip(slots, statuses):
+            key = id(slot)
+            prev = self._prev_source_sev.get(key, Severity.OK)
             if st.severity is Severity.ERROR and prev is not Severity.ERROR and self._tray:
-                self._tray.notify(st.message, f"{self._state.slots[i].name}: {st.message}")
-            self._prev_source_sev[i] = st.severity
+                self._tray.notify(st.message, f"{slot.name}: {st.message}")
+            self._prev_source_sev[key] = st.severity
         # In-app per-source badge (always); tray roll-up + tooltip (if present).
-        self.nav_bar.set_source_severities([int(s.severity) for s in statuses])
+        self.nav_bar.set_source_severities([s.severity for s in statuses])
         self._worst_sev = worst(statuses).severity
         if self._tray is not None:
             self._tray.refresh()

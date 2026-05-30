@@ -6,6 +6,11 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 
 from flashback_sampler.app.theme import EREBUS, font_family
+from flashback_sampler.core.source_status import (
+    SEVERITY_GLYPH,
+    SEVERITY_RING_COLOR,
+    Severity,
+)
 
 TRACK_COLORS = [
     "#EDF9B8",  # Source 1 — yellow-green
@@ -65,21 +70,19 @@ class SourceIndicator(QWidget):
         p.drawRect(2, y_center - indicator_size // 2, indicator_size, indicator_size)
         # Health glyph — only shown when there's a problem (warning/error),
         # carved into the chip at the right edge so it never clashes with the
-        # left arm-state square.
-        if self._severity >= 2:
-            glyph = "✕" if self._severity >= 3 else "!"
-            color = "#F85149" if self._severity >= 3 else "#D29922"
-            name_w = w - indicator_size - 8 - 12
+        # left arm-state square. Healthy/INFO sources show no badge.
+        show_glyph = self._severity >= Severity.WARN
+        name_w = w - indicator_size - 8 - (12 if show_glyph else 0)
+        if show_glyph:
+            sev = Severity.ERROR if self._severity >= Severity.ERROR else Severity.WARN
             gfont = p.font()
             gfont.setPointSize(9)
             gfont.setBold(True)
             p.setFont(gfont)
             p.setPen(QColor(0, 0, 0, 170))  # carved: shadow first
-            p.drawText(w - 13, 2, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, glyph)
-            p.setPen(QColor(color))
-            p.drawText(w - 13, 1, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, glyph)
-        else:
-            name_w = w - indicator_size - 8
+            p.drawText(w - 13, 2, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev])
+            p.setPen(QColor(SEVERITY_RING_COLOR[sev]))
+            p.drawText(w - 13, 1, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev])
         p.setPen(QColor(self._color))
         fam = font_family("label").split(",")[0].strip().strip('"')
         font = p.font()

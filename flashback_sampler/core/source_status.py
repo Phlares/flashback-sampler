@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 __all__ = [
-    "Severity", "SourceSnapshot", "SourceStatus", "evaluate", "worst", "SILENCE_DBFS",
+    "Severity", "SourceSnapshot", "SourceStatus", "evaluate", "worst",
+    "SILENCE_DBFS", "SEVERITY_RING_COLOR", "SEVERITY_GLYPH",
 ]
 
 
@@ -35,6 +36,21 @@ CLIP_PEAK = 0.99           # sample magnitude at/above this is clipping
 SILENCE_GRACE_S = 5.0      # must stay silent this long before warning
 BUFFER_FULL_FRAC = 0.98    # ring buffer this full is "almost full"
 XRUN_RATE_WARN = 1.0       # sustained xruns/sec worth surfacing
+
+
+# Presentation per severity — single source of truth so the tray ring and the
+# in-app chip badge can't drift. Plain data (no Qt), so it lives next to the
+# enum it describes rather than in the Qt theme.
+SEVERITY_RING_COLOR = {
+    Severity.OK: "#9aa886",     # calm sage — "good", not alarmist
+    Severity.INFO: "#9aa886",
+    Severity.WARN: "#d29922",   # amber — no signal / clipping / buffer near cap
+    Severity.ERROR: "#f85149",  # red — disconnected / permission / failure
+}
+SEVERITY_GLYPH = {
+    Severity.WARN: "!",
+    Severity.ERROR: "✕",
+}
 
 
 @dataclass(frozen=True)

@@ -29,18 +29,10 @@ from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
 from flashback_sampler.core.quality_presets import MB
-from flashback_sampler.core.source_status import Severity
+from flashback_sampler.core.source_status import SEVERITY_RING_COLOR, Severity
 from flashback_sampler.input.core import invoke
 
 APP_NAME = "flashback-sampler"
-
-# Outer-ring colour per severity (neutral "good", amber warning, red error).
-_RING = {
-    Severity.OK: "#9aa886",     # calm sage — "good", not alarmist
-    Severity.INFO: "#9aa886",
-    Severity.WARN: "#d29922",   # amber — no signal / clipping / buffer near cap
-    Severity.ERROR: "#f85149",  # red — disconnected / permission / failure
-}
 
 
 def record_action_label(is_recording: bool) -> str:
@@ -76,7 +68,7 @@ def _disc_icon(recording: bool, severity: Severity = Severity.OK) -> QIcon:
     p.setRenderHint(QPainter.Antialiasing, True)
     # Disc fill + status ring, run right up to the edge.
     p.setBrush(QColor("#15151a"))
-    pen = QPen(QColor(_RING.get(severity, _RING[Severity.OK])))
+    pen = QPen(QColor(SEVERITY_RING_COLOR.get(severity, SEVERITY_RING_COLOR[Severity.OK])))
     pen.setWidthF(2.7)
     p.setPen(pen)
     p.drawEllipse(2.0, 2.0, 28.0, 28.0)
