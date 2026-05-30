@@ -471,6 +471,7 @@ class TurntableWindow(QMainWindow):
         """(Re)build or tear down the global-hotkey source to match the pref."""
         if self._global_hotkeys is not None:
             self._global_hotkeys.close()
+            self._global_hotkeys.deleteLater()  # don't leak the QObject child
             self._global_hotkeys = None
         if enabled and global_hotkeys_supported():
             self._global_hotkeys = GlobalHotkeySource(GLOBAL_HOTKEYS, self)
