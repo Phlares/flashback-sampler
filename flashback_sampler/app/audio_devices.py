@@ -29,7 +29,8 @@ class CaptureDevice:
     `kind`:
         "loopback" — Windows WASAPI loopback on a speaker (captures
             what that speaker is playing). `id` is the soundcard
-            speaker name.
+            speaker name, OR an empty string to mean "follow the live OS
+            default output" (the DEFAULT_LOOPBACK sentinel below).
         "input" — a normal sounddevice input (mic, line-in, virtual
             cable). `id` is the sounddevice device index as a string.
         "process_loopback" — Windows 10 2004+ per-process WASAPI

@@ -57,27 +57,17 @@ def test_list_output_devices_does_not_raise():
 
 
 def test_build_capture_source_input_kind_requires_integer_id():
-    # Fake buffer object — only needs to exist; build_capture_source
-    # passes it through to the source constructor unchanged.
-    class FakeBuffer:
-        sample_rate = 48_000
-        channels = 2
-
     dev = CaptureDevice(kind="input", name="Mic", id="not_an_int")
     with pytest.raises(ValueError, match="integer"):
-        build_capture_source(dev, buffer=FakeBuffer(), sample_rate=48_000, channels=2)
+        build_capture_source(dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2)
 
 
 def test_build_capture_source_rejects_unknown_kind():
-    class FakeBuffer:
-        sample_rate = 48_000
-        channels = 2
-
     # Use object.__setattr__ to bypass frozen dataclass
     dev = CaptureDevice(kind="loopback", name="x", id="x")
     object.__setattr__(dev, "kind", "wtf")
     with pytest.raises(ValueError, match="unknown"):
-        build_capture_source(dev, buffer=FakeBuffer(), sample_rate=48_000, channels=2)
+        build_capture_source(dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2)
 
 
 # ─────────────────────────────────────────────────────────────────────────
