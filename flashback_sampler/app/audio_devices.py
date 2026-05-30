@@ -12,9 +12,10 @@ the right concrete source object.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import Literal
+
+from flashback_sampler.platform.capabilities import loopback_supported
 
 
 CaptureKind = Literal["loopback", "input", "process_loopback"]
@@ -65,7 +66,7 @@ def list_capture_devices() -> list[CaptureDevice]:
     """
     devices: list[CaptureDevice] = []
 
-    if sys.platform == "win32":
+    if loopback_supported():
         devices.extend(_list_loopback_devices())
 
     devices.extend(_list_input_devices())
