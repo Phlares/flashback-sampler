@@ -27,6 +27,15 @@ def test_tooltip_text():
     assert tooltip_text(True, 3) == "flashback-sampler — Recording (3 sources)"
 
 
+def test_tooltip_includes_memory_when_provided():
+    assert tooltip_text(False, 0, 0) == "flashback-sampler — Idle"  # 0 → no suffix
+    assert tooltip_text(False, 0, 150 * 1024 * 1024) == "flashback-sampler — Idle · 150 MB"
+    assert (
+        tooltip_text(True, 2, 142 * 1024 * 1024)
+        == "flashback-sampler — Recording (2 sources) · 142 MB"
+    )
+
+
 # -- controller behaviour -------------------------------------------------
 
 def test_record_action_reflects_and_toggles_state(qapp):
@@ -60,6 +69,45 @@ def test_checkout_invokes_action_and_opens_window(qapp):
     tray._checkout()
     assert fired["checkout"] == 1
     assert fired["open"] == 1  # checkout surfaces the new clip in the window
+
+
+def test_notifications_toggle_invokes_callback_and_updates_state(qapp):
+    changes = []
+    tray = SystemTray(
+        is_recording=lambda: False, source_count=lambda: 0,
+        on_open=lambda: None, on_quit=lambda: None,
+        on_toggle_notifications=lambda v: changes.append(v),
+        show_toasts=True,
+    )
+    assert tray._act_notify.isChecked() is True
+    tray._act_notify.trigger()  # checkable → toggles to False
+    assert changes == [False]
+    assert tray._show_toasts is False
+
+
+def test_set_notifications_enabled_syncs_menu_without_loop(qapp):
+    changes = []
+    tray = SystemTray(
+        is_recording=lambda: False, source_count=lambda: 0,
+        on_open=lambda: None, on_quit=lambda: None,
+        on_toggle_notifications=lambda v: changes.append(v),
+        show_toasts=True,
+    )
+    tray.set_notifications_enabled(False)
+    assert tray._act_notify.isChecked() is False
+    assert tray._show_toasts is False
+    # setting it programmatically should NOT re-fire the user-toggle callback
+    assert changes == []
+
+
+def test_memory_callback_appears_in_tooltip(qapp):
+    tray = SystemTray(
+        is_recording=lambda: False, source_count=lambda: 0,
+        on_open=lambda: None, on_quit=lambda: None,
+        memory_bytes=lambda: 64 * 1024 * 1024, show_toasts=False,
+    )
+    tray.update_tooltip()
+    assert "64 MB" in tray._tray.toolTip()
 
 
 def test_quit_callback_fires(qapp):

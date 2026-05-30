@@ -38,11 +38,20 @@ def record_action_label(is_recording: bool) -> str:
     return "Stop Recording" if is_recording else "Start Recording (All Sources)"
 
 
-def tooltip_text(is_recording: bool, source_count: int) -> str:
+def _fmt_mem(memory_bytes: int | None) -> str:
+    if not memory_bytes:
+        return ""
+    return f" · {memory_bytes / (1024 * 1024):.0f} MB"
+
+
+def tooltip_text(
+    is_recording: bool, source_count: int, memory_bytes: int | None = None
+) -> str:
+    mem = _fmt_mem(memory_bytes)
     if not is_recording:
-        return f"{APP_NAME} — Idle"
+        return f"{APP_NAME} — Idle{mem}"
     plural = "s" if source_count != 1 else ""
-    return f"{APP_NAME} — Recording ({source_count} source{plural})"
+    return f"{APP_NAME} — Recording ({source_count} source{plural}){mem}"
 
 
 def _disc_icon(recording: bool) -> QIcon:
@@ -86,6 +95,8 @@ class SystemTray(QObject):
         on_open: Callable[[], None],
         on_quit: Callable[[], None],
         on_settings: Callable[[], None] | None = None,
+        on_toggle_notifications: Callable[[bool], None] | None = None,
+        memory_bytes: Callable[[], int] | None = None,
         show_toasts: bool = True,
         parent: QObject | None = None,
     ) -> None:
@@ -95,6 +106,8 @@ class SystemTray(QObject):
         self._on_open = on_open
         self._on_quit = on_quit
         self._on_settings = on_settings
+        self._on_toggle_notifications = on_toggle_notifications
+        self._memory_bytes = memory_bytes
         self._show_toasts = show_toasts
 
         self._tray = QSystemTrayIcon(parent)
@@ -139,6 +152,14 @@ class SystemTray(QObject):
 
         self._menu.addSeparator()
 
+        self._act_notify = QAction("Show notifications", self)
+        self._act_notify.setCheckable(True)
+        self._act_notify.setChecked(self._show_toasts)
+        self._act_notify.toggled.connect(self._on_notify_toggled)
+        self._menu.addAction(self._act_notify)
+
+        self._menu.addSeparator()
+
         if self._on_settings is not None:
             act_settings = QAction("Settings…", self)
             act_settings.triggered.connect(lambda: self._on_settings())
@@ -155,7 +176,31 @@ class SystemTray(QObject):
         recording = self._is_recording()
         self._act_record.setText(record_action_label(recording))
         self._tray.setIcon(_disc_icon(recording))
-        self._tray.setToolTip(tooltip_text(recording, self._source_count()))
+        self.update_tooltip()
+
+    def update_tooltip(self) -> None:
+        """Refresh just the tooltip (cheap — called periodically for live
+        memory readout, without rebuilding the icon)."""
+        mem = self._memory_bytes() if self._memory_bytes is not None else None
+        self._tray.setToolTip(
+            tooltip_text(self._is_recording(), self._source_count(), mem)
+        )
+
+    def set_notifications_enabled(self, enabled: bool) -> None:
+        """Reflect a notifications-pref change from elsewhere (e.g. the
+        Preferences page) onto the menu toggle and toast behaviour."""
+        self._show_toasts = enabled
+        if self._act_notify.isChecked() != enabled:
+            # Programmatic sync — block signals so this doesn't re-fire the
+            # user-toggle callback (which would double-persist / loop).
+            self._act_notify.blockSignals(True)
+            self._act_notify.setChecked(enabled)
+            self._act_notify.blockSignals(False)
+
+    def _on_notify_toggled(self, checked: bool) -> None:
+        self._show_toasts = checked
+        if self._on_toggle_notifications is not None:
+            self._on_toggle_notifications(checked)
 
     # -- handlers ---------------------------------------------------------
 

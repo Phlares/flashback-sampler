@@ -22,7 +22,12 @@ from PySide6.QtWidgets import (
 from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
 from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
-from flashback_sampler.app.config import config_dir
+from flashback_sampler.app.config import (
+    config_dir,
+    load_show_notifications,
+    save_show_notifications,
+)
+from flashback_sampler.app.preferences_dialog import PreferencesDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
@@ -248,6 +253,8 @@ class TurntableWindow(QMainWindow):
 
         # ── Menu bar ─────────────────────────────────────────────────
         settings_menu = self.menuBar().addMenu("Settings")
+        prefs_act = settings_menu.addAction("Preferences…")
+        prefs_act.triggered.connect(self._open_preferences_dialog)
         keybindings_act = settings_menu.addAction("Keybindings…")
         keybindings_act.triggered.connect(self._open_keybindings_dialog)
 
@@ -263,6 +270,7 @@ class TurntableWindow(QMainWindow):
         self._quitting = False
         self._close_to_tray = True
         self._bg_notice_shown = False
+        self._show_notifications = load_show_notifications()
         self._tray: SystemTray | None = None
         if tray_supported():
             self._tray = SystemTray(
@@ -270,12 +278,19 @@ class TurntableWindow(QMainWindow):
                 source_count=self._recording_source_count,
                 on_open=self._restore_window,
                 on_quit=self._request_quit,
-                on_settings=self._open_keybindings_dialog,
+                on_settings=self._open_preferences_dialog,
+                on_toggle_notifications=self._set_notifications_enabled,
+                memory_bytes=self._state.total_project_ram_bytes,
+                show_toasts=self._show_notifications,
                 parent=self,
             )
             self._tray.show()
             # Keep capture alive when the last window is hidden/closed.
             QApplication.instance().setQuitOnLastWindowClosed(False)
+            # Refresh the tooltip's live memory readout once a second.
+            self._tray_tooltip_timer = QTimer(self)
+            self._tray_tooltip_timer.timeout.connect(self._tray.update_tooltip)
+            self._tray_tooltip_timer.start(1000)
 
     # ------------------------------------------------------------------
     # System-tray helpers
@@ -303,6 +318,24 @@ class TurntableWindow(QMainWindow):
     def _sync_tray(self) -> None:
         if self._tray is not None:
             self._tray.refresh()
+
+    def _set_notifications_enabled(self, enabled: bool) -> None:
+        """Single source of truth for the notifications pref — persists it
+        and keeps the tray menu toggle in sync, whether the change came from
+        the tray menu or the Preferences page."""
+        enabled = bool(enabled)
+        self._show_notifications = enabled
+        save_show_notifications(enabled)
+        if self._tray is not None:
+            self._tray.set_notifications_enabled(enabled)
+
+    def _open_preferences_dialog(self) -> None:
+        dlg = PreferencesDialog(
+            show_notifications=self._show_notifications,
+            on_notifications_changed=self._set_notifications_enabled,
+            parent=self,
+        )
+        dlg.exec()
 
     def _wire_selection_sync(self) -> None:
         """When the user drags a selection on a waveform, snapshot the

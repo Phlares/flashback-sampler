@@ -7,12 +7,38 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flashback_sampler.app.config import load_config, save_config
+from flashback_sampler.app.config import (
+    load_config,
+    load_show_notifications,
+    save_config,
+    save_show_notifications,
+)
 
 
 def test_load_missing_config_returns_empty(tmp_path: Path):
     p = tmp_path / "config.json"
     assert load_config(p) == {}
+
+
+def test_show_notifications_defaults_true_when_unset(tmp_path: Path):
+    assert load_show_notifications(tmp_path / "config.json") is True
+
+
+def test_show_notifications_roundtrip(tmp_path: Path):
+    p = tmp_path / "config.json"
+    save_show_notifications(False, p)
+    assert load_show_notifications(p) is False
+    save_show_notifications(True, p)
+    assert load_show_notifications(p) is True
+
+
+def test_show_notifications_save_preserves_other_keys(tmp_path: Path):
+    p = tmp_path / "config.json"
+    save_config({"capture_source": {"id": "X"}}, p)
+    save_show_notifications(False, p)
+    data = load_config(p)
+    assert data["capture_source"] == {"id": "X"}  # not clobbered
+    assert data["show_notifications"] is False
 
 
 def test_save_and_load_roundtrip(tmp_path: Path):

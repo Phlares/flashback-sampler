@@ -52,3 +52,17 @@ def save_config(data: dict[str, Any], path: Path | None = None) -> None:
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
     tmp.replace(p)
+
+
+SHOW_NOTIFICATIONS_KEY = "show_notifications"
+
+
+def load_show_notifications(path: Path | None = None) -> bool:
+    """Whether tray toast notifications are enabled (default True)."""
+    return bool(load_config(path).get(SHOW_NOTIFICATIONS_KEY, True))
+
+
+def save_show_notifications(enabled: bool, path: Path | None = None) -> None:
+    data = load_config(path)
+    data[SHOW_NOTIFICATIONS_KEY] = bool(enabled)
+    save_config(data, path)
