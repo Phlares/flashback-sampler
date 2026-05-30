@@ -41,7 +41,6 @@ class PreferencesDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
         root.addWidget(buttons)
 
     def _on_toggled(self, checked: bool) -> None:

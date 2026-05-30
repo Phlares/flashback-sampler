@@ -28,6 +28,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
+from flashback_sampler.core.quality_presets import MB
 from flashback_sampler.input.core import invoke
 
 APP_NAME = "flashback-sampler"
@@ -41,7 +42,7 @@ def record_action_label(is_recording: bool) -> str:
 def _fmt_mem(memory_bytes: int | None) -> str:
     if not memory_bytes:
         return ""
-    return f" · {memory_bytes / (1024 * 1024):.0f} MB"
+    return f" · {memory_bytes / MB:.0f} MB"
 
 
 def tooltip_text(

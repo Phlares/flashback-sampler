@@ -54,15 +54,25 @@ def save_config(data: dict[str, Any], path: Path | None = None) -> None:
     tmp.replace(p)
 
 
+def get_pref(key: str, default: Any, path: Path | None = None) -> Any:
+    """Read a single top-level preference, falling back to `default`."""
+    return load_config(path).get(key, default)
+
+
+def set_pref(key: str, value: Any, path: Path | None = None) -> None:
+    """Persist a single top-level preference (read-modify-write)."""
+    data = load_config(path)
+    data[key] = value
+    save_config(data, path)
+
+
 SHOW_NOTIFICATIONS_KEY = "show_notifications"
 
 
 def load_show_notifications(path: Path | None = None) -> bool:
     """Whether tray toast notifications are enabled (default True)."""
-    return bool(load_config(path).get(SHOW_NOTIFICATIONS_KEY, True))
+    return bool(get_pref(SHOW_NOTIFICATIONS_KEY, True, path))
 
 
 def save_show_notifications(enabled: bool, path: Path | None = None) -> None:
-    data = load_config(path)
-    data[SHOW_NOTIFICATIONS_KEY] = bool(enabled)
-    save_config(data, path)
+    set_pref(SHOW_NOTIFICATIONS_KEY, bool(enabled), path)
