@@ -26,7 +26,9 @@ from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
+    load_global_hotkeys_enabled,
     load_show_notifications,
+    save_global_hotkeys_enabled,
     save_show_notifications,
 )
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
@@ -47,12 +49,25 @@ from flashback_sampler.core.source_status import (
     worst,
 )
 from flashback_sampler.input.core import Action, BindingTable, invoke, register
+from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
 from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
+from flashback_sampler.platform.capabilities import (
+    global_hotkeys_supported,
+    tray_supported,
+)
+from flashback_sampler.platform.tray import SystemTray
 
 # Linear magnitude of the silence floor, for the per-source silent-duration tally.
 _SILENCE_MAG = 10.0 ** (SILENCE_DBFS / 20.0)
-from flashback_sampler.platform.capabilities import tray_supported
-from flashback_sampler.platform.tray import SystemTray
+
+# Curated global hotkeys (modifier-qualified — Windows can't register a bare
+# key). Only the "grab it from another app" actions go global; fine-grained UI
+# keys stay window-scoped. Fire even while minimized/hidden when enabled.
+GLOBAL_HOTKEYS = {
+    "Ctrl+Alt+O": "clip.checkout",
+    "Alt+R": "transport.start_recording",
+    "Alt+S": "transport.stop_recording",
+}
 from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
 
 SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
@@ -273,6 +288,11 @@ class TurntableWindow(QMainWindow):
 
         self._binding_table.load()
 
+        # Global hotkeys (fire while minimized) — opt-in, Windows-only for now.
+        self._global_hotkeys_enabled = load_global_hotkeys_enabled()
+        self._global_hotkeys: GlobalHotkeySource | None = None
+        self._apply_global_hotkeys(self._global_hotkeys_enabled)
+
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
 
@@ -447,10 +467,27 @@ class TurntableWindow(QMainWindow):
         if self._tray is not None:
             self._tray.set_notifications_enabled(enabled)
 
+    def _apply_global_hotkeys(self, enabled: bool) -> None:
+        """(Re)build or tear down the global-hotkey source to match the pref."""
+        if self._global_hotkeys is not None:
+            self._global_hotkeys.close()
+            self._global_hotkeys = None
+        if enabled and global_hotkeys_supported():
+            self._global_hotkeys = GlobalHotkeySource(GLOBAL_HOTKEYS, self)
+
+    def _set_global_hotkeys_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._global_hotkeys_enabled = enabled
+        save_global_hotkeys_enabled(enabled)
+        self._apply_global_hotkeys(enabled)
+
     def _open_preferences_dialog(self) -> None:
         dlg = PreferencesDialog(
             show_notifications=self._show_notifications,
             on_notifications_changed=self._set_notifications_enabled,
+            global_hotkeys_enabled=self._global_hotkeys_enabled,
+            on_global_hotkeys_changed=self._set_global_hotkeys_enabled,
+            global_hotkeys_supported=global_hotkeys_supported(),
             parent=self,
         )
         dlg.exec()
@@ -1463,6 +1500,8 @@ class TurntableWindow(QMainWindow):
             return
         self._tick_timer.stop()
         self._status_timer.stop()  # stop polling source health before teardown
+        if self._global_hotkeys is not None:
+            self._global_hotkeys.close()  # release OS hotkey registrations
         try:
             self._state.scrub_player.pause()
         except Exception:
