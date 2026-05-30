@@ -392,7 +392,10 @@ class TurntableWindow(QMainWindow):
                 level = float(max(levels)) if len(levels) else 0.0
             except Exception:
                 level = 0.0
-        if capturing and level < _SILENCE_MAG:
+        # A deliberately-muted source (record gain 0) is silent on purpose —
+        # don't raise a "No signal" warning for it.
+        muted = slot.buffer.gain == 0.0
+        if capturing and not muted and level < _SILENCE_MAG:
             self._silent_secs[key] = self._silent_secs.get(key, 0.0) + dt
         else:
             self._silent_secs[key] = 0.0
