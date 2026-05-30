@@ -495,3 +495,40 @@ def test_get_peak_bins_stable_under_rolling_window():
         f"bin heights drifted by avg {ratio*100:.1f}% across small writer "
         f"advances — stride sampling is not abs-aligned (flicker regression)"
     )
+
+
+# ── Per-source record gain (applied at the write boundary) ──────────────
+
+def test_buffer_gain_defaults_to_unity():
+    import numpy as np
+    from flashback_sampler.core.buffer import AudioCircularBuffer
+    buf = AudioCircularBuffer(duration_seconds=1, sample_rate=1000, channels=1)
+    assert buf.gain == 1.0
+    assert buf.gain_db == 0.0
+    buf.write(np.full((100, 1), 0.25, dtype=np.float32))
+    out = buf.get_latest(0.05)
+    assert abs(float(out.max()) - 0.25) < 1e-6  # unchanged at unity
+
+
+def test_buffer_gain_boost_scales_written_frames():
+    import math
+    import numpy as np
+    from flashback_sampler.core.buffer import AudioCircularBuffer
+    buf = AudioCircularBuffer(duration_seconds=1, sample_rate=1000, channels=1)
+    buf.gain_db = 6.0  # ~2x
+    assert abs(buf.gain - 10 ** (6.0 / 20.0)) < 1e-6
+    buf.write(np.full((100, 1), 0.25, dtype=np.float32))
+    out = buf.get_latest(0.05)
+    assert abs(float(out.max()) - 0.25 * (10 ** (6.0 / 20.0))) < 1e-4
+    assert out.dtype == np.float32  # gain must not upcast
+
+
+def test_buffer_gain_db_roundtrips_and_mutes():
+    import math
+    from flashback_sampler.core.buffer import AudioCircularBuffer
+    buf = AudioCircularBuffer(duration_seconds=1, sample_rate=1000, channels=1)
+    buf.gain_db = -6.0
+    assert abs(buf.gain_db - (-6.0)) < 1e-6
+    buf.gain_db = float("-inf")  # mute
+    assert buf.gain == 0.0
+    assert buf.gain_db == float("-inf")
