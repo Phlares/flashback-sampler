@@ -75,8 +75,9 @@ class AudioCircularBuffer:
 
     @property
     def gain_db(self) -> float:
-        """Record gain in dBFS-relative dB; -inf when muted."""
-        return -math.inf if self.gain <= 0.0 else 20.0 * math.log10(self.gain)
+        """Record gain in dB; -inf when muted."""
+        from flashback_sampler.core.source_status import dbfs
+        return dbfs(self.gain)
 
     @gain_db.setter
     def gain_db(self, db: float) -> None:
