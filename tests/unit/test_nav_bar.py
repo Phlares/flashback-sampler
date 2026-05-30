@@ -89,3 +89,22 @@ def test_source_indicator_left_click_only_emits_clicked(qapp):
     )
     ind.mousePressEvent(ev)
     assert len(clicks) == 1 and len(ctx) == 0
+
+
+def test_source_indicator_set_severity(qapp):
+    from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+    chip = SourceIndicator(0, "SOURCE 1")
+    assert chip._severity == 0
+    chip.set_severity(3)
+    assert chip._severity == 3
+
+
+def test_nav_bar_set_source_severities(qapp):
+    bar = NavBar()
+    bar.set_source_names(["A", "B"])
+    bar.set_source_severities([2, 3])
+    assert bar.source_slots[0]._severity == 2
+    assert bar.source_slots[1]._severity == 3
+    # extra chips default to OK (0)
+    bar.set_source_severities([3])
+    assert bar.source_slots[1]._severity == 0
