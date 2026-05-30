@@ -29,7 +29,9 @@ class CaptureDevice:
     `kind`:
         "loopback" — Windows WASAPI loopback on a speaker (captures
             what that speaker is playing). `id` is the soundcard
-            speaker name.
+            speaker name. The DEFAULT_LOOPBACK sentinel sets
+            `follow_default=True` to track the live OS default output
+            instead of pinning a specific speaker.
         "input" — a normal sounddevice input (mic, line-in, virtual
             cable). `id` is the sounddevice device index as a string.
         "process_loopback" — Windows 10 2004+ per-process WASAPI
@@ -42,6 +44,21 @@ class CaptureDevice:
     sample_rate: int = 48_000
     channels: int = 2
     is_default: bool = False
+    # Loopback only: track the live OS default output rather than pinning
+    # `id` to a specific speaker. Set on the DEFAULT_LOOPBACK sentinel.
+    follow_default: bool = False
+
+
+# Sentinel loopback device that follows the LIVE OS default output. Its empty
+# `id` maps to LoopbackCapture(speaker_name=None), which resolves
+# sc.default_speaker() at start — so capture follows whatever the user is
+# actually hearing, even if the default output changes after launch. Pinning a
+# specific named speaker (the old default behaviour) silently records nothing
+# when that endpoint isn't the one playing audio.
+DEFAULT_LOOPBACK = CaptureDevice(
+    kind="loopback", name="Default output  [loopback]", id="",
+    is_default=True, follow_default=True,
+)
 
 
 @dataclass(frozen=True)
@@ -185,10 +202,14 @@ def list_output_devices() -> list[OutputDevice]:
 
 
 def default_capture_device() -> CaptureDevice | None:
-    for d in list_capture_devices():
-        if d.is_default:
-            return d
+    # Prefer following the live OS default output (dynamic) over pinning a
+    # specific speaker name that can go silent when the default changes — but
+    # only when loopback is actually usable (a real loopback device exists).
+    # Otherwise fall back to the first available device (e.g. a mic) so a
+    # Windows box with no working loopback still gets a usable default.
     devices = list_capture_devices()
+    if any(d.kind == "loopback" for d in devices):
+        return DEFAULT_LOOPBACK
     return devices[0] if devices else None
 
 
@@ -215,7 +236,9 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
 
         return LoopbackCapture(
             buffer=buffer,
-            speaker_name=device.id,
+            # follow_default → None → LoopbackCapture resolves the live OS
+            # default speaker at start; otherwise pin to the named speaker.
+            speaker_name=None if device.follow_default else device.id,
             sample_rate=sample_rate,
             channels=channels,
         )

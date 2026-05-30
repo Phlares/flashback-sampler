@@ -14,12 +14,19 @@ from __future__ import annotations
 import pytest
 
 from flashback_sampler.app.audio_devices import (
+    DEFAULT_LOOPBACK,
     CaptureDevice,
     OutputDevice,
     build_capture_source,
+    default_capture_device,
     list_capture_devices,
     list_output_devices,
 )
+
+
+class _FakeBuffer:
+    sample_rate = 48_000
+    channels = 2
 
 
 def test_capture_device_is_frozen():
@@ -49,24 +56,73 @@ def test_list_output_devices_does_not_raise():
 
 
 def test_build_capture_source_input_kind_requires_integer_id():
-    # Fake buffer object — only needs to exist; build_capture_source
-    # passes it through to the source constructor unchanged.
-    class FakeBuffer:
-        sample_rate = 48_000
-        channels = 2
-
     dev = CaptureDevice(kind="input", name="Mic", id="not_an_int")
     with pytest.raises(ValueError, match="integer"):
-        build_capture_source(dev, buffer=FakeBuffer(), sample_rate=48_000, channels=2)
+        build_capture_source(dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2)
 
 
 def test_build_capture_source_rejects_unknown_kind():
-    class FakeBuffer:
-        sample_rate = 48_000
-        channels = 2
-
     # Use object.__setattr__ to bypass frozen dataclass
     dev = CaptureDevice(kind="loopback", name="x", id="x")
     object.__setattr__(dev, "kind", "wtf")
     with pytest.raises(ValueError, match="unknown"):
-        build_capture_source(dev, buffer=FakeBuffer(), sample_rate=48_000, channels=2)
+        build_capture_source(dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# "Follow the OS default output" loopback (the silent-Realtek-endpoint fix)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_default_loopback_sentinel_follows_live_os_default():
+    """The default-output loopback (empty id) must build a LoopbackCapture
+    with speaker_name=None so it resolves sc.default_speaker() at start —
+    NOT a frozen device name that goes silent when the default changes."""
+    cap = build_capture_source(
+        DEFAULT_LOOPBACK, buffer=_FakeBuffer(), sample_rate=48_000, channels=2
+    )
+    assert cap.speaker_name is None
+
+
+def test_named_loopback_still_pins_to_that_speaker():
+    dev = CaptureDevice(kind="loopback", name="Speakers (X)  [loopback]", id="Speakers (X)")
+    cap = build_capture_source(
+        dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2
+    )
+    assert cap.speaker_name == "Speakers (X)"
+
+
+def test_default_capture_device_matches_available_devices():
+    # Precise (non-vacuous) on every platform: the choice depends on what's
+    # actually enumerable, not just sys.platform.
+    devices = list_capture_devices()
+    dev = default_capture_device()
+    if any(d.kind == "loopback" for d in devices):
+        assert dev is DEFAULT_LOOPBACK and dev.follow_default
+    elif devices:
+        assert dev == devices[0]
+    else:
+        assert dev is None
+
+
+def test_default_prefers_dynamic_loopback_when_present(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+    lb = CaptureDevice(kind="loopback", name="Spk  [loopback]", id="Spk")
+    mic = CaptureDevice(kind="input", name="Mic", id="0")
+    monkeypatch.setattr(ad, "list_capture_devices", lambda: [lb, mic])
+    assert ad.default_capture_device() is ad.DEFAULT_LOOPBACK
+
+
+def test_default_falls_back_to_first_device_when_no_loopback(monkeypatch):
+    # Windows-with-no-working-loopback (or any no-loopback host) must not hand
+    # back an unopenable sentinel — fall back to the first real device.
+    import flashback_sampler.app.audio_devices as ad
+    mic = CaptureDevice(kind="input", name="Mic", id="0", is_default=True)
+    monkeypatch.setattr(ad, "list_capture_devices", lambda: [mic])
+    assert ad.default_capture_device() == mic
+
+
+def test_default_returns_none_when_no_devices(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+    monkeypatch.setattr(ad, "list_capture_devices", lambda: [])
+    assert ad.default_capture_device() is None
