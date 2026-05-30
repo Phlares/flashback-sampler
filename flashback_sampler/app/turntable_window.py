@@ -1344,6 +1344,8 @@ class TurntableWindow(QMainWindow):
                 )
             return
         self._tick_timer.stop()
+        if self._tray is not None:
+            self._tray_tooltip_timer.stop()  # don't fire update_tooltip() after shutdown
         try:
             self._state.scrub_player.pause()
         except Exception:
