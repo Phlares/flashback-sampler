@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -284,9 +285,10 @@ class TurntableWindow(QMainWindow):
         self._show_notifications = load_show_notifications()
         # Per-source defensive-heal status, polled once a second.
         self._worst_sev = Severity.OK
-        self._silent_secs: dict[int, float] = {}
-        self._prev_xrun: dict[int, int] = {}
-        self._prev_source_sev: dict[int, Severity] = {}
+        self._silent_secs: dict[str, float] = {}
+        self._prev_xrun: dict[str, int] = {}
+        self._prev_source_sev: dict[str, Severity] = {}
+        self._last_poll_t: float | None = None
         self._tray: SystemTray | None = None
         if tray_supported():
             self._tray = SystemTray(
@@ -337,12 +339,12 @@ class TurntableWindow(QMainWindow):
         if self._tray is not None:
             self._tray.refresh()
 
-    def _evaluate_slot(self, slot) -> SourceStatus:
+    def _evaluate_slot(self, slot, dt: float) -> SourceStatus:
         """Build a snapshot for one slot and evaluate its health. Advances the
-        per-slot silent-duration / xrun trackers (keyed by slot identity, so
-        removing a slot can't mis-attribute another's state). Call once per
-        poll tick."""
-        key = id(slot)
+        per-slot silent-duration / xrun trackers (keyed by the slot's stable
+        id so removing a slot can't mis-attribute another's state). `dt` is the
+        real elapsed seconds since the last poll. Call once per poll tick."""
+        key = slot.id
         capturing = slot.is_capturing()
         level = 0.0
         if capturing:
@@ -353,7 +355,7 @@ class TurntableWindow(QMainWindow):
             except Exception:
                 level = 0.0
         if capturing and level < _SILENCE_MAG:
-            self._silent_secs[key] = self._silent_secs.get(key, 0.0) + 1.0
+            self._silent_secs[key] = self._silent_secs.get(key, 0.0) + dt
         else:
             self._silent_secs[key] = 0.0
         dur = slot.buffer.duration
@@ -371,15 +373,19 @@ class TurntableWindow(QMainWindow):
         """1 Hz: evaluate every source, drive the in-app chip badges, roll up
         the worst severity for the tray, and toast when a source enters an
         error. Trackers are pruned to live slots so they can't go stale."""
+        now = time.monotonic()
+        dt = (now - self._last_poll_t) if self._last_poll_t is not None else 1.0
+        self._last_poll_t = now
+
         slots = self._state.slots
-        live = {id(s) for s in slots}
+        live = {s.id for s in slots}
         for tracker in (self._silent_secs, self._prev_xrun, self._prev_source_sev):
             for stale in [k for k in tracker if k not in live]:
                 del tracker[stale]
 
-        statuses = [self._evaluate_slot(s) for s in slots]
+        statuses = [self._evaluate_slot(s, dt) for s in slots]
         for slot, st in zip(slots, statuses):
-            key = id(slot)
+            key = slot.id
             prev = self._prev_source_sev.get(key, Severity.OK)
             if st.severity is Severity.ERROR and prev is not Severity.ERROR and self._tray:
                 self._tray.notify(st.message, f"{slot.name}: {st.message}")
