@@ -26,7 +26,9 @@ from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
+    load_global_hotkeys_enabled,
     load_show_notifications,
+    save_global_hotkeys_enabled,
     save_show_notifications,
 )
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
@@ -47,13 +49,20 @@ from flashback_sampler.core.source_status import (
     worst,
 )
 from flashback_sampler.input.core import Action, BindingTable, invoke, register
+from flashback_sampler.input.sources.global_hotkey import (
+    GlobalHotkeySource,
+    build_global_bindings,
+)
 from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
+from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
+from flashback_sampler.platform.capabilities import (
+    global_hotkeys_supported,
+    tray_supported,
+)
+from flashback_sampler.platform.tray import SystemTray
 
 # Linear magnitude of the silence floor, for the per-source silent-duration tally.
 _SILENCE_MAG = 10.0 ** (SILENCE_DBFS / 20.0)
-from flashback_sampler.platform.capabilities import tray_supported
-from flashback_sampler.platform.tray import SystemTray
-from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
 
 SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
 SELECTION_COLOR_CLIP = "#FF9500"     # orange
@@ -233,13 +242,22 @@ class TurntableWindow(QMainWindow):
         # first time the user asks to mux within this session.
         self._mux_warning_shown: bool = False
 
+        # Explicit start/stop primitives drive the center buttons and the tray
+        # menu; they're not directly rebindable (bindable=False) — the user-facing
+        # record key is the single toggle below, so one key works the same
+        # focused or minimized.
         register(Action(id="transport.start_recording", name="Start Recording",
                         category="Transport",
                         callable=self._on_start_clicked,
-                        repeat_policy="ignore_repeat"))
+                        repeat_policy="ignore_repeat", bindable=False))
         register(Action(id="transport.stop_recording", name="Stop Recording",
                         category="Transport",
                         callable=self._on_stop_clicked,
+                        repeat_policy="ignore_repeat", bindable=False))
+        register(Action(id="transport.toggle_recording", name="Toggle Recording",
+                        category="Transport",
+                        callable=self._on_toggle_recording,
+                        default_binding="Ctrl+Alt+R", is_global=True,
                         repeat_policy="ignore_repeat"))
         register(Action(id="transport.play_clip", name="Play Clip",
                         category="Transport",
@@ -272,6 +290,20 @@ class TurntableWindow(QMainWindow):
         keybindings_act.triggered.connect(self._open_keybindings_dialog)
 
         self._binding_table.load()
+        # Migrate retired action ids: the explicit start/stop record actions are
+        # no longer directly bindable, so fold any saved override onto the single
+        # toggle (a user's old in-focus record key keeps working, now as a toggle
+        # and visible in the dialog). Persist so the file stops carrying dead ids.
+        if self._binding_table.remap_actions({
+            "transport.start_recording": "transport.toggle_recording",
+            "transport.stop_recording": "transport.toggle_recording",
+        }):
+            self._binding_table.save()
+
+        # Global hotkeys (fire while minimized) — opt-in, Windows-only for now.
+        self._global_hotkeys_enabled = load_global_hotkeys_enabled()
+        self._global_hotkeys: GlobalHotkeySource | None = None
+        self._apply_global_hotkeys(self._global_hotkeys_enabled)
 
         # Lazy-create status bar for surfacing non-modal messages.
         self.statusBar().showMessage("Ready", 0)
@@ -447,10 +479,41 @@ class TurntableWindow(QMainWindow):
         if self._tray is not None:
             self._tray.set_notifications_enabled(enabled)
 
+    def _apply_global_hotkeys(self, enabled: bool) -> None:
+        """(Re)build or tear down the global-hotkey source to match the pref."""
+        if self._global_hotkeys is not None:
+            self._global_hotkeys.close()  # removes native filter + OS registrations
+            self._global_hotkeys = None
+        if enabled and global_hotkeys_supported():
+            # Bindings are derived from the live BindingTable so a record/checkout
+            # key the user rebinds tracks here too. Register to this window's HWND
+            # so WM_HOTKEY is delivered reliably (thread-queue NULL-hwnd messages
+            # don't reach Qt's native filter).
+            bindings = build_global_bindings(self._binding_table)
+            self._global_hotkeys = GlobalHotkeySource(bindings, int(self.winId()))
+            n = self._global_hotkeys.registered_count
+            total = len(bindings)
+            if not total:
+                msg = "Global hotkeys: no global-capable key is bound"
+            elif not n:
+                msg = "Global hotkeys: none registered (combo already in use?)"
+            else:
+                msg = f"Global hotkeys active ({n}/{total})"
+            self.statusBar().showMessage(msg, 6000)
+
+    def _set_global_hotkeys_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._global_hotkeys_enabled = enabled
+        save_global_hotkeys_enabled(enabled)
+        self._apply_global_hotkeys(enabled)
+
     def _open_preferences_dialog(self) -> None:
         dlg = PreferencesDialog(
             show_notifications=self._show_notifications,
             on_notifications_changed=self._set_notifications_enabled,
+            global_hotkeys_enabled=self._global_hotkeys_enabled,
+            on_global_hotkeys_changed=self._set_global_hotkeys_enabled,
+            global_hotkeys_supported=global_hotkeys_supported(),
             parent=self,
         )
         dlg.exec()
@@ -528,6 +591,7 @@ class TurntableWindow(QMainWindow):
         register(Action(id="clip.checkout", name="Checkout",
                         category="Clip",
                         callable=self._on_checkout_clicked,
+                        default_binding="Ctrl+Alt+O", is_global=True,
                         repeat_policy="ignore_repeat"))
         self.out_btn.clicked.connect(lambda: invoke("clip.checkout"))
 
@@ -646,7 +710,12 @@ class TurntableWindow(QMainWindow):
 
     def _open_keybindings_dialog(self) -> None:
         dialog = KeybindingsDialog(self._binding_table)
-        dialog.exec()
+        if dialog.exec():
+            # Rebind may have moved a global action's key — resync so the global
+            # hotkeys stay in lockstep with the in-focus bindings. Pass the live
+            # pref state; _apply_global_hotkeys no-ops cleanly when disabled, so
+            # the resync invariant is "rebuild after any binding change", full stop.
+            self._apply_global_hotkeys(self._global_hotkeys_enabled)
 
     def _on_start_clicked(self) -> None:
         started, err = self._state.start_rolling()
@@ -660,6 +729,14 @@ class TurntableWindow(QMainWindow):
         self._state.stop_rolling()
         self._refresh_source_indicators()
         self._sync_tray()
+
+    def _on_toggle_recording(self) -> None:
+        """One key to start/stop — stops if anything is rolling, else starts.
+        This is the bindable, global-capable record action."""
+        if self._any_recording():
+            self._on_stop_clicked()
+        else:
+            self._on_start_clicked()
 
     # ------------------------------------------------------------------
     # Buffer-side transport controls (− / + / ◀ / ▶ / FLUSH)
@@ -1463,6 +1540,8 @@ class TurntableWindow(QMainWindow):
             return
         self._tick_timer.stop()
         self._status_timer.stop()  # stop polling source health before teardown
+        if self._global_hotkeys is not None:
+            self._global_hotkeys.close()  # release OS hotkey registrations
         try:
             self._state.scrub_player.pause()
         except Exception:

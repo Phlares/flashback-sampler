@@ -48,6 +48,13 @@ def loopback_supported() -> bool:
     return current_os() == WINDOWS
 
 
+def global_hotkeys_supported() -> bool:
+    """True if OS-level global hotkeys (fire while unfocused/minimized) are
+    available. Today only Windows (Win32 RegisterHotKey); macOS/Linux backends
+    are the open seam — see PLATFORM.md."""
+    return current_os() == WINDOWS
+
+
 def tray_supported() -> bool:
     """True if a system tray / notification area is usable right now.
 
