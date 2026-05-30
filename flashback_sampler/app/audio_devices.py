@@ -44,6 +44,17 @@ class CaptureDevice:
     is_default: bool = False
 
 
+# Sentinel loopback device that follows the LIVE OS default output. Its empty
+# `id` maps to LoopbackCapture(speaker_name=None), which resolves
+# sc.default_speaker() at start — so capture follows whatever the user is
+# actually hearing, even if the default output changes after launch. Pinning a
+# specific named speaker (the old default behaviour) silently records nothing
+# when that endpoint isn't the one playing audio.
+DEFAULT_LOOPBACK = CaptureDevice(
+    kind="loopback", name="Default output  [loopback]", id="", is_default=True
+)
+
+
 @dataclass(frozen=True)
 class OutputDevice:
     """A sounddevice output device used for preview playback."""
@@ -185,9 +196,10 @@ def list_output_devices() -> list[OutputDevice]:
 
 
 def default_capture_device() -> CaptureDevice | None:
-    for d in list_capture_devices():
-        if d.is_default:
-            return d
+    # Prefer following the live OS default output (dynamic) over pinning a
+    # specific speaker name that can go silent when the default changes.
+    if loopback_supported():
+        return DEFAULT_LOOPBACK
     devices = list_capture_devices()
     return devices[0] if devices else None
 
@@ -215,7 +227,9 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
 
         return LoopbackCapture(
             buffer=buffer,
-            speaker_name=device.id,
+            # Empty id = the DEFAULT_LOOPBACK sentinel → None → follow the
+            # live OS default speaker; a real name pins to that speaker.
+            speaker_name=device.id or None,
             sample_rate=sample_rate,
             channels=channels,
         )
