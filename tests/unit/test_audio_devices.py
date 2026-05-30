@@ -21,7 +21,6 @@ from flashback_sampler.app.audio_devices import (
     default_capture_device,
     list_capture_devices,
     list_output_devices,
-    loopback_supported,
 )
 
 
@@ -93,10 +92,37 @@ def test_named_loopback_still_pins_to_that_speaker():
     assert cap.speaker_name == "Speakers (X)"
 
 
-def test_default_capture_device_is_dynamic_when_loopback_supported():
+def test_default_capture_device_matches_available_devices():
+    # Precise (non-vacuous) on every platform: the choice depends on what's
+    # actually enumerable, not just sys.platform.
+    devices = list_capture_devices()
     dev = default_capture_device()
-    if loopback_supported():
-        # The dynamic "follow OS default" sentinel, not a frozen speaker name.
-        assert dev is not None
-        assert dev.kind == "loopback"
-        assert dev.id == ""
+    if any(d.kind == "loopback" for d in devices):
+        assert dev is DEFAULT_LOOPBACK and dev.follow_default
+    elif devices:
+        assert dev == devices[0]
+    else:
+        assert dev is None
+
+
+def test_default_prefers_dynamic_loopback_when_present(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+    lb = CaptureDevice(kind="loopback", name="Spk  [loopback]", id="Spk")
+    mic = CaptureDevice(kind="input", name="Mic", id="0")
+    monkeypatch.setattr(ad, "list_capture_devices", lambda: [lb, mic])
+    assert ad.default_capture_device() is ad.DEFAULT_LOOPBACK
+
+
+def test_default_falls_back_to_first_device_when_no_loopback(monkeypatch):
+    # Windows-with-no-working-loopback (or any no-loopback host) must not hand
+    # back an unopenable sentinel — fall back to the first real device.
+    import flashback_sampler.app.audio_devices as ad
+    mic = CaptureDevice(kind="input", name="Mic", id="0", is_default=True)
+    monkeypatch.setattr(ad, "list_capture_devices", lambda: [mic])
+    assert ad.default_capture_device() == mic
+
+
+def test_default_returns_none_when_no_devices(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+    monkeypatch.setattr(ad, "list_capture_devices", lambda: [])
+    assert ad.default_capture_device() is None
