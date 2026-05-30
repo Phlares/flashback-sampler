@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -339,6 +340,43 @@ class TurntableWindow(QMainWindow):
         if self._tray is not None:
             self._tray.refresh()
 
+    def _rename_slot(self, slot_index: int) -> None:
+        if not (0 <= slot_index < len(self._state.slots)):
+            return
+        slot = self._state.slots[slot_index]
+        name, ok = QInputDialog.getText(
+            self, "Rename source", "Source name:", text=slot.name
+        )
+        if ok and name.strip():
+            slot.name = name.strip()
+            self._refresh_source_names()
+
+    # Per-source record gain — discrete dB steps (a slider can come with the
+    # UX overhaul). Applied to slot.buffer.gain so it takes effect live and
+    # the level meter / clip badge reflect the post-gain signal.
+    _GAIN_STEPS = [
+        ("Mute", float("-inf")), ("−12 dB", -12.0), ("−6 dB", -6.0),
+        ("−3 dB", -3.0), ("0 dB (unity)", 0.0), ("+3 dB", 3.0),
+        ("+6 dB", 6.0), ("+12 dB", 12.0),
+    ]
+
+    def _populate_gain_menu(self, menu: QMenu, slot) -> None:
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        current = slot.buffer.gain_db
+        for label, db in self._GAIN_STEPS:
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            if db == float("-inf"):
+                act.setChecked(current == float("-inf"))
+            else:
+                act.setChecked(abs(current - db) < 0.5)
+            act.triggered.connect(
+                lambda _c=False, d=db, s=slot: setattr(s.buffer, "gain_db", d)
+            )
+            group.addAction(act)
+            menu.addAction(act)
+
     def _evaluate_slot(self, slot, dt: float) -> SourceStatus:
         """Build a snapshot for one slot and evaluate its health. Advances the
         per-slot silent-duration / xrun trackers (keyed by the slot's stable
@@ -354,7 +392,10 @@ class TurntableWindow(QMainWindow):
                 level = float(max(levels)) if len(levels) else 0.0
             except Exception:
                 level = 0.0
-        if capturing and level < _SILENCE_MAG:
+        # A deliberately-muted source (record gain 0) is silent on purpose —
+        # don't raise a "No signal" warning for it.
+        muted = slot.buffer.gain == 0.0
+        if capturing and not muted and level < _SILENCE_MAG:
             self._silent_secs[key] = self._silent_secs.get(key, 0.0) + dt
         else:
             self._silent_secs[key] = 0.0
@@ -1479,6 +1520,12 @@ class TurntableWindow(QMainWindow):
         )
         menu.addAction(prime_act)
 
+        rename_act = QAction("Rename…", self)
+        rename_act.triggered.connect(
+            lambda _c=False, i=slot_index: self._rename_slot(i)
+        )
+        menu.addAction(rename_act)
+
         menu.addSeparator()
 
         # Select Source Input(s) — mirrors the AddSourceDialog's
@@ -1488,6 +1535,9 @@ class TurntableWindow(QMainWindow):
         # of inlined so the top-level stays short.
         src_menu = menu.addMenu("Select Source Input(s)")
         self._populate_slot_capture_source_menu(src_menu, slot_index)
+
+        gain_menu = menu.addMenu("Record Gain")
+        self._populate_gain_menu(gain_menu, slot)
 
         menu.addSeparator()
 

@@ -18,7 +18,7 @@ from enum import IntEnum
 
 __all__ = [
     "Severity", "SourceSnapshot", "SourceStatus", "evaluate", "worst",
-    "SILENCE_DBFS", "SEVERITY_RING_COLOR", "SEVERITY_GLYPH",
+    "SILENCE_DBFS", "SEVERITY_RING_COLOR", "SEVERITY_GLYPH", "dbfs",
 ]
 
 
@@ -71,7 +71,9 @@ class SourceStatus:
     message: str
 
 
-def _dbfs(mag: float) -> float:
+def dbfs(mag: float) -> float:
+    """Linear magnitude → dBFS (−inf at/below zero). Single source of truth
+    for the dB convention used by the level meter and the record-gain control."""
     return -math.inf if mag <= 0.0 else 20.0 * math.log10(mag)
 
 
@@ -87,7 +89,7 @@ def evaluate(snap: SourceSnapshot) -> SourceStatus:
     if snap.buffer_fill >= BUFFER_FULL_FRAC:
         return SourceStatus(Severity.WARN, "buffer_high", "Buffer almost full")
 
-    peak_db = _dbfs(snap.peak)
+    peak_db = dbfs(snap.peak)
     if peak_db < SILENCE_DBFS:
         if snap.silent_seconds >= SILENCE_GRACE_S:
             return SourceStatus(Severity.WARN, "silent", "No signal")

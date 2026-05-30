@@ -5,6 +5,7 @@ Keeps the last N minutes of audio in memory, always.
 Write pointer advances continuously; old data is silently overwritten.
 """
 
+import math
 import numpy as np
 import threading
 import time
@@ -49,6 +50,10 @@ class AudioCircularBuffer:
         self.buffer = np.zeros((self.buffer_size, channels), dtype=np.float32)
         self.write_pos = 0          # next slot to write into
         self.total_written = 0      # ever-increasing, used to track fill level
+        # Per-source record gain (linear), applied to frames on write so the
+        # buffered/checked-out audio reflects it and the level meter / clip
+        # detector see the post-gain signal. 1.0 = unity (no change).
+        self.gain = 1.0
         self._lock = threading.Lock()
         self._created_at = time.time()
 
@@ -68,6 +73,16 @@ class AudioCircularBuffer:
     # Write path
     # ------------------------------------------------------------------
 
+    @property
+    def gain_db(self) -> float:
+        """Record gain in dB; -inf when muted."""
+        from flashback_sampler.core.source_status import dbfs
+        return dbfs(self.gain)
+
+    @gain_db.setter
+    def gain_db(self, db: float) -> None:
+        self.gain = 0.0 if db == -math.inf else float(10.0 ** (db / 20.0))
+
     def write(self, frames: np.ndarray) -> None:
         """
         Append `frames` (shape [N, channels]) to the ring buffer.
@@ -75,6 +90,11 @@ class AudioCircularBuffer:
         """
         if frames.ndim == 1:
             frames = frames[:, np.newaxis]  # mono -> [N,1]
+
+        if self.gain != 1.0:
+            # float32 * float32 stays float32 (no upcast); new array, so the
+            # caller's buffer is never mutated.
+            frames = frames * np.float32(self.gain)
 
         n = len(frames)
         with self._lock:

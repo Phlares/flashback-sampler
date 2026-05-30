@@ -392,6 +392,7 @@ class AppState:
             sample_rate=slot.sample_rate,
             channels=slot.channels,
         )
+        new_buf.gain = slot.buffer.gain  # preserve the source's record gain
         slot.buffer = new_buf
         slot.buffer_seconds = float(new_seconds)
         slot.checkout_manager._buffer = new_buf  # noqa: SLF001
