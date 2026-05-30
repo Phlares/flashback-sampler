@@ -474,7 +474,11 @@ class TurntableWindow(QMainWindow):
             self._global_hotkeys.deleteLater()  # don't leak the QObject child
             self._global_hotkeys = None
         if enabled and global_hotkeys_supported():
-            self._global_hotkeys = GlobalHotkeySource(GLOBAL_HOTKEYS, self)
+            # Register to this window's HWND so WM_HOTKEY is delivered reliably
+            # (thread-queue NULL-hwnd messages don't reach Qt's native filter).
+            self._global_hotkeys = GlobalHotkeySource(
+                GLOBAL_HOTKEYS, int(self.winId()), self
+            )
 
     def _set_global_hotkeys_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)

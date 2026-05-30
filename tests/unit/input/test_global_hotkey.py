@@ -67,11 +67,12 @@ def test_source_registers_only_parseable_bindings(qapp):
     calls = []
     src = GlobalHotkeySource(
         {"Ctrl+Alt+O": "clip.checkout", "Space": "x"},  # Space can't be global
-        register_fn=lambda hid, mods, vk: calls.append((mods, vk)) or True,
-        unregister_fn=lambda hid: None,
+        hwnd=4242,
+        register_fn=lambda hwnd, hid, mods, vk: calls.append((hwnd, mods, vk)) or True,
+        unregister_fn=lambda hwnd, hid: None,
     )
     assert len(calls) == 1
-    assert calls[0] == (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("O"))
+    assert calls[0] == (4242, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("O"))
     assert len(src._registered) == 1
 
 
@@ -82,8 +83,8 @@ def test_source_dispatch_invokes_bound_action(qapp):
     register(Action(id="clip.checkout", name="C", category="Clip",
                     callable=lambda: fired.append(1)))
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"},
-        register_fn=lambda *a: True, unregister_fn=lambda h: None,
+        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=1,
+        register_fn=lambda *a: True, unregister_fn=lambda *a: None,
     )
     hid = next(iter(src._registered))
     assert src._dispatch(hid) is True
@@ -97,12 +98,13 @@ def test_source_close_unregisters_all(qapp):
     register(Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None))
     removed = []
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"},
-        register_fn=lambda *a: True, unregister_fn=lambda h: removed.append(h),
+        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=7,
+        register_fn=lambda *a: True, unregister_fn=lambda hwnd, hid: removed.append((hwnd, hid)),
     )
     n = len(src._registered)
     src.close()
     assert len(removed) == n and not src._registered
+    assert removed[0][0] == 7  # unregistered against the same hwnd
 
 
 def test_failed_registration_is_skipped(qapp):
@@ -110,8 +112,8 @@ def test_failed_registration_is_skipped(qapp):
     from flashback_sampler.input.core import Action, register
     register(Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None))
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"},
+        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=0,
         register_fn=lambda *a: False,  # combo already taken by another app
-        unregister_fn=lambda h: None,
+        unregister_fn=lambda *a: None,
     )
     assert src._registered == {}  # nothing registered, no crash
