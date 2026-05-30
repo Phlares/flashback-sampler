@@ -493,3 +493,47 @@ def test_drag_in_progress_not_overwritten_by_tick(qapp, state):
     # _tick should have left the widget's manual selection alone.
     assert abs(s - 0.42) < 1e-6
     assert abs(e - 0.77) < 1e-6
+
+
+# ── Record gain + source rename (PR B) ─────────────────────────────────
+
+def test_gain_menu_builds_with_unity_checked(qapp, state):
+    from PySide6.QtWidgets import QMenu
+    win = TurntableWindow(state)
+    menu = QMenu()
+    win._populate_gain_menu(menu, state.slots[0])
+    acts = menu.actions()
+    assert len(acts) == 8
+    checked = [a.text() for a in acts if a.isChecked()]
+    assert checked == ["0 dB (unity)"]  # defaults to unity
+
+
+def test_gain_menu_action_sets_slot_gain(qapp, state):
+    from PySide6.QtWidgets import QMenu
+    win = TurntableWindow(state)
+    menu = QMenu()
+    win._populate_gain_menu(menu, state.slots[0])
+    plus6 = next(a for a in menu.actions() if a.text() == "+6 dB")
+    plus6.trigger()
+    assert abs(state.slots[0].buffer.gain - 10 ** (6.0 / 20.0)) < 1e-3
+    mute = next(a for a in menu.actions() if a.text() == "Mute")
+    mute.trigger()
+    assert state.slots[0].buffer.gain == 0.0
+
+
+def test_rename_slot_updates_name_and_nav(qapp, state, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    win = TurntableWindow(state)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Chrome", True)))
+    win._rename_slot(0)
+    assert state.slots[0].name == "Chrome"
+    assert win.nav_bar.source_slots[0]._name == "CHROME"  # nav uppercases
+
+
+def test_rename_slot_cancel_keeps_name(qapp, state, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    win = TurntableWindow(state)
+    original = state.slots[0].name
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+    win._rename_slot(0)
+    assert state.slots[0].name == original

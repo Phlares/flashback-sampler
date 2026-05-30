@@ -377,3 +377,16 @@ def test_cli_mono_override():
     args = _parse_args(["--channels", "1", "--sample-rate", "16000"])
     assert args.channels == 1
     assert args.sample_rate == 16_000
+
+
+def test_rebuild_buffer_preserves_record_gain():
+    """Changing buffer duration must not silently reset a source's gain/mute."""
+    from flashback_sampler.app.state import AppState
+    s = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1)
+    try:
+        s.active_slot.buffer.gain_db = -6.0
+        prev = s.active_slot.buffer.gain
+        s.rebuild_buffer(1.0)
+        assert abs(s.active_slot.buffer.gain - prev) < 1e-9
+    finally:
+        s.shutdown()
