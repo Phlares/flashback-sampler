@@ -1,6 +1,7 @@
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from flashback_sampler.core.source_status import Severity
 from flashback_sampler.input.core import Action, register
 from flashback_sampler.platform.tray import (
     SystemTray,
@@ -108,6 +109,27 @@ def test_memory_callback_appears_in_tooltip(qapp):
     )
     tray.update_tooltip()
     assert "64 MB" in tray._tray.toolTip()
+
+
+def test_icon_rebuilds_only_when_state_changes(qapp):
+    sev = {"v": Severity.OK}
+    tray = SystemTray(
+        is_recording=lambda: True, source_count=lambda: 1,
+        on_open=lambda: None, on_quit=lambda: None,
+        worst_severity=lambda: sev["v"], show_toasts=False,
+    )
+    assert tray._icon_key == (True, Severity.OK)
+    sev["v"] = Severity.WARN
+    tray.refresh()
+    assert tray._icon_key == (True, Severity.WARN)  # ring follows severity
+
+
+def test_severity_defaults_ok_without_callback(qapp):
+    tray = SystemTray(
+        is_recording=lambda: False, source_count=lambda: 0,
+        on_open=lambda: None, on_quit=lambda: None, show_toasts=False,
+    )
+    assert tray._icon_key == (False, Severity.OK)
 
 
 def test_quit_callback_fires(qapp):

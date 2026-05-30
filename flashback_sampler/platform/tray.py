@@ -25,10 +25,11 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import QObject
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
 from flashback_sampler.core.quality_presets import MB
+from flashback_sampler.core.source_status import SEVERITY_RING_COLOR, Severity
 from flashback_sampler.input.core import invoke
 
 APP_NAME = "flashback-sampler"
@@ -55,24 +56,31 @@ def tooltip_text(
     return f"{APP_NAME} — Recording ({source_count} source{plural}){mem}"
 
 
-def _disc_icon(recording: bool) -> QIcon:
-    """Paint a small turntable-disc tray icon; add a red rec-dot when live."""
+def _disc_icon(recording: bool, severity: Severity = Severity.OK) -> QIcon:
+    """Edge-to-edge two-ring tray icon.
+
+    Outer ring carries the status colour; the centre shows a red dot while
+    recording, or pause bars when idle.
+    """
     px = QPixmap(32, 32)
     px.fill(QColor(0, 0, 0, 0))
     p = QPainter(px)
     p.setRenderHint(QPainter.Antialiasing, True)
-    # disc body + cream rim
-    p.setPen(QColor("#e8e6df"))
+    # Disc fill + status ring, run right up to the edge.
     p.setBrush(QColor("#15151a"))
-    p.drawEllipse(3, 3, 26, 26)
-    # ember spindle
+    pen = QPen(QColor(SEVERITY_RING_COLOR.get(severity, SEVERITY_RING_COLOR[Severity.OK])))
+    pen.setWidthF(2.7)
+    p.setPen(pen)
+    p.drawEllipse(2.0, 2.0, 28.0, 28.0)
+    # Centre: red dot while recording, pause bars when idle.
     p.setPen(QColor(0, 0, 0, 0))
-    p.setBrush(QColor("#e2632a"))
-    p.drawEllipse(14, 14, 4, 4)
     if recording:
         p.setBrush(QColor("#ff3b30"))
-        p.setPen(QColor("#15151a"))
-        p.drawEllipse(20, 20, 10, 10)
+        p.drawEllipse(11.0, 11.0, 10.0, 10.0)
+    else:
+        p.setBrush(QColor("#cfc9ba"))
+        p.drawRoundedRect(11.4, 9.5, 3.4, 13.0, 1.3, 1.3)
+        p.drawRoundedRect(17.2, 9.5, 3.4, 13.0, 1.3, 1.3)
     p.end()
     return QIcon(px)
 
@@ -98,6 +106,7 @@ class SystemTray(QObject):
         on_settings: Callable[[], None] | None = None,
         on_toggle_notifications: Callable[[bool], None] | None = None,
         memory_bytes: Callable[[], int] | None = None,
+        worst_severity: Callable[[], Severity] | None = None,
         show_toasts: bool = True,
         parent: QObject | None = None,
     ) -> None:
@@ -109,7 +118,9 @@ class SystemTray(QObject):
         self._on_settings = on_settings
         self._on_toggle_notifications = on_toggle_notifications
         self._memory_bytes = memory_bytes
+        self._worst_severity = worst_severity
         self._show_toasts = show_toasts
+        self._icon_key: tuple[bool, Severity] | None = None  # cache to avoid rebuilds
 
         self._tray = QSystemTrayIcon(parent)
         self._menu = QMenu()
@@ -128,7 +139,9 @@ class SystemTray(QObject):
 
     def notify(self, title: str, message: str) -> None:
         if self._show_toasts and self._tray.supportsMessages():
-            self._tray.showMessage(title, message, _disc_icon(self._is_recording()))
+            self._tray.showMessage(
+                title, message, _disc_icon(self._is_recording(), self._severity())
+            )
 
     # -- menu -------------------------------------------------------------
 
@@ -172,11 +185,20 @@ class SystemTray(QObject):
 
     # -- state sync -------------------------------------------------------
 
+    def _severity(self) -> Severity:
+        return self._worst_severity() if self._worst_severity is not None else Severity.OK
+
     def refresh(self) -> None:
-        """Re-read state and update the record label, icon, and tooltip."""
+        """Re-read state and update the record label, icon, and tooltip.
+
+        Safe to call at ~1 Hz: the icon is only repainted when the
+        (recording, severity) pair actually changes."""
         recording = self._is_recording()
         self._act_record.setText(record_action_label(recording))
-        self._tray.setIcon(_disc_icon(recording))
+        key = (recording, self._severity())
+        if key != self._icon_key:
+            self._icon_key = key
+            self._tray.setIcon(_disc_icon(recording, key[1]))
         self.update_tooltip()
 
     def update_tooltip(self) -> None:

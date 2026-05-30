@@ -6,6 +6,11 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 
 from flashback_sampler.app.theme import EREBUS, font_family
+from flashback_sampler.core.source_status import (
+    SEVERITY_GLYPH,
+    SEVERITY_RING_COLOR,
+    Severity,
+)
 
 TRACK_COLORS = [
     "#EDF9B8",  # Source 1 — yellow-green
@@ -30,6 +35,7 @@ class SourceIndicator(QWidget):
         self._name = name
         self._color = QColor(TRACK_COLORS[index % len(TRACK_COLORS)])
         self._status = "armed"
+        self._severity = 0  # defensive-heal severity (0 OK/INFO · 2 WARN · 3 ERROR)
         self.setFixedHeight(16)
         self.setMinimumWidth(60)
         self.setCursor(Qt.PointingHandCursor)
@@ -41,6 +47,11 @@ class SourceIndicator(QWidget):
     def set_name(self, name: str) -> None:
         self._name = name
         self.update()
+
+    def set_severity(self, severity: int) -> None:
+        if severity != self._severity:
+            self._severity = severity
+            self.update()
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
@@ -57,13 +68,29 @@ class SourceIndicator(QWidget):
         p.setPen(Qt.NoPen)
         y_center = h // 2
         p.drawRect(2, y_center - indicator_size // 2, indicator_size, indicator_size)
+        # Health glyph — only shown when there's a problem (warning/error),
+        # carved into the chip at the right edge so it never clashes with the
+        # left arm-state square. Healthy/INFO sources show no badge.
+        show_glyph = self._severity >= Severity.WARN
+        name_w = w - indicator_size - 8 - (12 if show_glyph else 0)
+        if show_glyph:
+            sev = Severity.ERROR if self._severity >= Severity.ERROR else Severity.WARN
+            gfont = p.font()
+            gfont.setPointSize(9)
+            gfont.setBold(True)
+            p.setFont(gfont)
+            p.setPen(QColor(0, 0, 0, 170))  # carved: shadow first
+            p.drawText(w - 13, 2, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev])
+            p.setPen(QColor(SEVERITY_RING_COLOR[sev]))
+            p.drawText(w - 13, 1, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev])
         p.setPen(QColor(self._color))
         fam = font_family("label").split(",")[0].strip().strip('"')
         font = p.font()
         font.setFamily(fam)
         font.setPointSize(7)
+        font.setBold(False)
         p.setFont(font)
-        p.drawText(indicator_size + 6, 0, w - indicator_size - 8, h, Qt.AlignVCenter, self._name)
+        p.drawText(indicator_size + 6, 0, name_w, h, Qt.AlignVCenter, self._name)
         p.end()
 
 
@@ -140,6 +167,12 @@ class NavBar(QWidget):
                 chip.setVisible(True)
             else:
                 chip.setVisible(False)
+
+    def set_source_severities(self, severities: list[int]) -> None:
+        """Push per-source defensive-heal severity to each chip (a chip shows
+        a carved !/✕ only when its source is in warning/error)."""
+        for i, chip in enumerate(self.source_slots):
+            chip.set_severity(severities[i] if i < len(severities) else 0)
 
     def _create_chip(self) -> SourceIndicator:
         """Create and wire one more source chip, inserted into the
