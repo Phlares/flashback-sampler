@@ -51,6 +51,7 @@ from flashback_sampler.core.source_status import (
 from flashback_sampler.input.core import Action, BindingTable, invoke, register
 from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
 from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
+from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
 from flashback_sampler.platform.capabilities import (
     global_hotkeys_supported,
     tray_supported,
@@ -68,7 +69,6 @@ GLOBAL_HOTKEYS = {
     "Alt+R": "transport.start_recording",
     "Alt+S": "transport.stop_recording",
 }
-from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
 
 SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
 SELECTION_COLOR_CLIP = "#FF9500"     # orange
