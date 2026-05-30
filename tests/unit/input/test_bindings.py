@@ -180,3 +180,68 @@ def test_resolve_returns_default_action_for_unbound_code():
 def test_resolve_returns_none_for_free_code():
     table = BindingTable()
     assert table.resolve(_key("F20")) is None
+
+
+# --- binding_for: the inverse of resolve (action_id -> active code) ----------
+
+def test_binding_for_returns_intact_default():
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    assert BindingTable().binding_for("t.a") == "F13"
+
+
+def test_binding_for_returns_user_override():
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    table = BindingTable()
+    table.bind("Ctrl+R", "t.a")
+    assert table.binding_for("t.a") == "Ctrl+R"
+
+
+def test_binding_for_none_when_default_suppressed():
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    table = BindingTable()
+    table.unbind("F13")  # explicit null on the default code
+    assert table.binding_for("t.a") is None
+
+
+def test_binding_for_none_when_default_code_claimed_by_other_action():
+    # t.b steals t.a's default code; t.a is then effectively unbound, even
+    # though no null was recorded for it. Must agree with resolve().
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    register(Action(id="t.b", name="B", category="T", callable=lambda: None))
+    table = BindingTable()
+    table.bind("F13", "t.b")
+    assert table.resolve(_key("F13")) == "t.b"
+    assert table.binding_for("t.a") is None
+    assert table.binding_for("t.b") == "F13"
+
+
+def test_binding_for_none_for_unbound_action():
+    register(Action(id="t.a", name="A", category="T", callable=lambda: None))
+    assert BindingTable().binding_for("t.a") is None
+
+
+# --- remap_actions: migrate overrides off retired action ids -----------------
+
+def test_remap_actions_rewrites_retired_targets():
+    register(Action(id="t.new", name="New", category="T", callable=lambda: None))
+    table = BindingTable()
+    table.bind("Alt+P", "t.new")  # pre-register a valid target to mutate below
+    # Simulate a saved override pointing at a now-retired action id.
+    table.replace_overrides({"Alt+P": "t.old", "Ctrl+X": None})
+    changed = table.remap_actions({"t.old": "t.new"})
+    assert changed is True
+    assert table.resolve(_key("Alt+P")) == "t.new"
+    assert table.resolve(_key("Ctrl+X")) is None  # null override preserved
+
+
+def test_remap_actions_noop_when_nothing_matches():
+    register(Action(id="t.a", name="A", category="T",
+                    callable=lambda: None, default_binding="F13"))
+    table = BindingTable()
+    table.replace_overrides({"Alt+P": "t.a"})
+    assert table.remap_actions({"t.retired": "t.other"}) is False
+    assert table.resolve(_key("Alt+P")) == "t.a"  # untouched

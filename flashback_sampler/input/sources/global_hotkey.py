@@ -16,7 +16,7 @@ from __future__ import annotations
 import ctypes
 from typing import Callable
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QObject
+from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.input.core import invoke
@@ -79,6 +79,28 @@ def parse_hotkey(chord: str) -> tuple[int, int] | None:
     return (mask | MOD_NOREPEAT, vk)
 
 
+def build_global_bindings(table) -> dict[str, str]:
+    """``{chord: action_id}`` for every global-capable action whose CURRENT
+    binding (user override or default) is a modifier-qualified chord.
+
+    Deriving this from the live ``BindingTable`` — instead of a static map —
+    means a record/checkout key the user rebinds in the Keybindings dialog
+    moves its global hotkey to match, so the same key behaves identically
+    whether the window is focused or minimized. Bare-key bindings are skipped
+    (Win32 can't register a global hotkey without a modifier).
+    """
+    from flashback_sampler.input.core import all_actions  # local: avoid cycle
+
+    out: dict[str, str] = {}
+    for a in all_actions():
+        if not a.is_global:
+            continue
+        code = table.binding_for(a.id)
+        if code and parse_hotkey(code) is not None:
+            out[code] = a.id
+    return out
+
+
 def _win_register(hwnd: int, hotkey_id: int, mods: int, vk: int) -> bool:
     # Register to a real window HWND (not NULL): WM_HOTKEY is then a window
     # message Qt delivers reliably via the native filter, even while the window
@@ -98,20 +120,27 @@ def _win_unregister(hwnd: int, hotkey_id: int) -> None:
     user32.UnregisterHotKey(_wintypes.HWND(hwnd), hotkey_id)
 
 
-class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
+class GlobalHotkeySource(QAbstractNativeEventFilter):
     """Registers global hotkeys for ``{chord: action_id}`` and routes WM_HOTKEY
-    back through ``invoke``. OS calls are injectable for testing."""
+    back through ``invoke``. OS calls are injectable for testing.
+
+    NOTE: single inheritance is load-bearing. PySide6 silently drops the
+    ``nativeEventFilter`` override if this also inherits ``QObject`` (multiple
+    inheritance with QObject primary) — the C++ loop then never calls back into
+    Python and hotkeys register but never fire. Lifetime is managed explicitly
+    via ``close()`` (removes the filter + releases OS registrations), so no
+    QObject parenting is needed.
+    """
 
     def __init__(
         self,
         bindings: dict[str, str],
         hwnd: int,
-        parent: QObject | None = None,
         *,
         register_fn: Callable[[int, int, int, int], bool] = _win_register,
         unregister_fn: Callable[[int, int], None] = _win_unregister,
     ) -> None:
-        super().__init__(parent)
+        super().__init__()
         self._hwnd = hwnd
         self._register_fn = register_fn
         self._unregister_fn = unregister_fn
@@ -133,6 +162,13 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
         if app is not None and self._registered:
             app.installNativeEventFilter(self)
 
+    @property
+    def registered_count(self) -> int:
+        """Number of hotkeys successfully registered with the OS. A named
+        property rather than ``__len__`` so the object's truthiness stays a
+        plain 'does it exist' check (callers use ``is not None``)."""
+        return len(self._registered)
+
     def _dispatch(self, hotkey_id: int) -> bool:
         """Invoke the action bound to a fired hotkey id. Returns True if handled."""
         action_id = self._registered.get(hotkey_id)
@@ -148,7 +184,11 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
 
     def nativeEventFilter(self, event_type, message):  # noqa: N802
         # Runs for every native message — keep it allocation-light and early-out.
-        if not message or _wintypes is None or event_type not in self._MSG_TYPES:
+        # NOTE: do NOT guard on `not message` — PySide6 hands us a sip.voidptr
+        # that is falsy even when it wraps a valid non-null pointer, so that
+        # check would drop every event. A bad/null pointer is caught by the
+        # from_address try/except below instead.
+        if _wintypes is None or event_type not in self._MSG_TYPES:
             return False, 0
         try:
             msg = _wintypes.MSG.from_address(int(message))

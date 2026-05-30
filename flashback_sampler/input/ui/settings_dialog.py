@@ -19,7 +19,9 @@ from flashback_sampler.input.core import (
     Action,
     BindingTable,
     all_actions,
+    get,
 )
+from flashback_sampler.input.sources.global_hotkey import parse_hotkey
 
 
 @dataclass
@@ -89,9 +91,12 @@ class KeybindingsDialog(QDialog):
         scroll.setWidget(inner)
         root.addWidget(scroll, stretch=1)
 
-        # Populate grouped by category
+        # Populate grouped by category (only user-rebindable actions; internal
+        # primitives like explicit start/stop are driven by buttons/tray).
         by_category: dict[str, list[Action]] = {}
         for a in sorted(all_actions(), key=lambda a: (a.category, a.name)):
+            if not a.bindable:
+                continue
             by_category.setdefault(a.category, []).append(a)
 
         for category, acts in by_category.items():
@@ -167,6 +172,12 @@ class KeybindingsDialog(QDialog):
         default), prompts the user via ``_confirm_conflict_replace``. Applies
         the rebind only if no conflict or the user confirms.
         """
+        # Global-capable actions must keep a modifier so they can register as a
+        # Win32 global hotkey — refuse a bare-key rebind up front.
+        action = get(action_id)
+        if action is not None and action.is_global and parse_hotkey(code) is None:
+            self._warn_modifier_required(code)
+            return
         # Compute the current owner of ``code`` using the edit buffer + defaults
         current_owner: str | None = None
         if code in self._edit_buffer:
@@ -197,6 +208,18 @@ class KeybindingsDialog(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         return reply == QMessageBox.StandardButton.Yes
+
+    def _warn_modifier_required(self, code: str) -> None:
+        """Shown when a global action is rebound to a bare key. Separate method
+        so tests can override without invoking QMessageBox."""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            self,
+            "Can't use as a global hotkey",
+            f"'{code}' can't fire while the app is minimized. A global hotkey "
+            "needs a Ctrl/Alt/Shift/Win modifier plus a standard key — e.g. "
+            f"Ctrl+Alt+{code}.",
+        )
 
     def _apply_rebind(self, action_id: str, code: str) -> None:
         # Evict any existing owner of this code and any previous override for this action
