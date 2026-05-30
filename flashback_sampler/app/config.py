@@ -76,3 +76,16 @@ def load_show_notifications(path: Path | None = None) -> bool:
 
 def save_show_notifications(enabled: bool, path: Path | None = None) -> None:
     set_pref(SHOW_NOTIFICATIONS_KEY, bool(enabled), path)
+
+
+GLOBAL_HOTKEYS_KEY = "global_hotkeys_enabled"
+
+
+def load_global_hotkeys_enabled(path: Path | None = None) -> bool:
+    """Whether keybindings fire while minimized (global hotkeys). Off by
+    default — opt-in, since global hotkeys claim OS-wide key combos."""
+    return bool(get_pref(GLOBAL_HOTKEYS_KEY, False, path))
+
+
+def save_global_hotkeys_enabled(enabled: bool, path: Path | None = None) -> None:
+    set_pref(GLOBAL_HOTKEYS_KEY, bool(enabled), path)
