@@ -79,14 +79,23 @@ def parse_hotkey(chord: str) -> tuple[int, int] | None:
     return (mask | MOD_NOREPEAT, vk)
 
 
-def _win_register(hotkey_id: int, mods: int, vk: int) -> bool:
-    import ctypes
-    return bool(ctypes.windll.user32.RegisterHotKey(None, hotkey_id, mods, vk))
+def _win_register(hwnd: int, hotkey_id: int, mods: int, vk: int) -> bool:
+    # Register to a real window HWND (not NULL): WM_HOTKEY is then a window
+    # message Qt delivers reliably via the native filter, even while the window
+    # is minimized/hidden. argtypes are mandatory — without HWND typing the
+    # 64-bit handle gets truncated to 32 bits and RegisterHotKey targets nothing.
+    user32 = ctypes.windll.user32
+    user32.RegisterHotKey.argtypes = [
+        _wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+    ]
+    user32.RegisterHotKey.restype = _wintypes.BOOL
+    return bool(user32.RegisterHotKey(_wintypes.HWND(hwnd), hotkey_id, mods, vk))
 
 
-def _win_unregister(hotkey_id: int) -> None:
-    import ctypes
-    ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+def _win_unregister(hwnd: int, hotkey_id: int) -> None:
+    user32 = ctypes.windll.user32
+    user32.UnregisterHotKey.argtypes = [_wintypes.HWND, ctypes.c_int]
+    user32.UnregisterHotKey(_wintypes.HWND(hwnd), hotkey_id)
 
 
 class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
@@ -96,12 +105,14 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
     def __init__(
         self,
         bindings: dict[str, str],
+        hwnd: int,
         parent: QObject | None = None,
         *,
-        register_fn: Callable[[int, int, int], bool] = _win_register,
-        unregister_fn: Callable[[int], None] = _win_unregister,
+        register_fn: Callable[[int, int, int, int], bool] = _win_register,
+        unregister_fn: Callable[[int, int], None] = _win_unregister,
     ) -> None:
         super().__init__(parent)
+        self._hwnd = hwnd
         self._register_fn = register_fn
         self._unregister_fn = unregister_fn
         self._registered: dict[int, str] = {}  # hotkey id -> action id
@@ -112,7 +123,7 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
                 continue
             mods, vk = parsed
             try:
-                ok = self._register_fn(next_id, mods, vk)
+                ok = self._register_fn(hwnd, next_id, mods, vk)
             except Exception:
                 ok = False
             if ok:
@@ -130,9 +141,9 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
         invoke(action_id)
         return True
 
-    # RegisterHotKey(NULL, …) posts a THREAD message, which Qt delivers as
-    # "windows_dispatcher_MSG" (not the window's "windows_generic_MSG"), so we
-    # must accept both or the hotkey registers but never fires.
+    # Registering to a real window HWND means WM_HOTKEY arrives as a window
+    # message, which Qt's event loop filters as "windows_generic_MSG"
+    # (dispatcher_MSG is kept too, harmlessly, for the NULL-hwnd path).
     _MSG_TYPES = (b"windows_generic_MSG", b"windows_dispatcher_MSG")
 
     def nativeEventFilter(self, event_type, message):  # noqa: N802
@@ -151,7 +162,7 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
     def close(self) -> None:
         for hotkey_id in list(self._registered):
             try:
-                self._unregister_fn(hotkey_id)
+                self._unregister_fn(self._hwnd, hotkey_id)
             except Exception:
                 pass
         self._registered.clear()
