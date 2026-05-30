@@ -130,9 +130,14 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
         invoke(action_id)
         return True
 
+    # RegisterHotKey(NULL, …) posts a THREAD message, which Qt delivers as
+    # "windows_dispatcher_MSG" (not the window's "windows_generic_MSG"), so we
+    # must accept both or the hotkey registers but never fires.
+    _MSG_TYPES = (b"windows_generic_MSG", b"windows_dispatcher_MSG")
+
     def nativeEventFilter(self, event_type, message):  # noqa: N802
         # Runs for every native message — keep it allocation-light and early-out.
-        if not message or _wintypes is None or event_type != b"windows_generic_MSG":
+        if not message or _wintypes is None or event_type not in self._MSG_TYPES:
             return False, 0
         try:
             msg = _wintypes.MSG.from_address(int(message))
