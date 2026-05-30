@@ -13,12 +13,18 @@ RegisterHotKey round-trip is testable on any platform.
 
 from __future__ import annotations
 
+import ctypes
 from typing import Callable
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QObject
 from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.input.core import invoke
+
+try:  # wintypes is import-safe everywhere in modern Python; guard just in case
+    from ctypes import wintypes as _wintypes
+except Exception:  # pragma: no cover - non-Windows fallback
+    _wintypes = None
 
 # Win32 modifier flags (winuser.h) + WM_HOTKEY.
 MOD_ALT = 0x0001
@@ -125,15 +131,16 @@ class GlobalHotkeySource(QObject, QAbstractNativeEventFilter):
         return True
 
     def nativeEventFilter(self, event_type, message):  # noqa: N802
+        # Runs for every native message — keep it allocation-light and early-out.
+        if not message or _wintypes is None or event_type != b"windows_generic_MSG":
+            return False, 0
         try:
-            if message and b"MSG" in bytes(event_type):
-                import ctypes
-                import ctypes.wintypes
-                msg = ctypes.wintypes.MSG.from_address(int(message))
-                if msg.message == WM_HOTKEY and self._dispatch(int(msg.wParam)):
-                    return True, 0
+            msg = _wintypes.MSG.from_address(int(message))
         except Exception:
-            pass
+            return False, 0
+        # _dispatch/invoke run outside the try so a real handler bug isn't swallowed.
+        if msg.message == WM_HOTKEY and self._dispatch(int(msg.wParam)):
+            return True, 0
         return False, 0
 
     def close(self) -> None:
