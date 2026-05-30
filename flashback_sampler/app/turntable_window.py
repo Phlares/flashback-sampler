@@ -304,10 +304,11 @@ class TurntableWindow(QMainWindow):
             self._tray.show()
             # Keep capture alive when the last window is hidden/closed.
             QApplication.instance().setQuitOnLastWindowClosed(False)
-            # Poll source health + refresh the tray (ring colour + tooltip) at 1 Hz.
-            self._status_timer = QTimer(self)
-            self._status_timer.timeout.connect(self._poll_source_status)
-            self._status_timer.start(1000)
+        # Poll source health at 1 Hz — drives the in-app chip badges always,
+        # and the tray ring/tooltip + error toasts when a tray exists.
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._poll_source_status)
+        self._status_timer.start(1000)
 
     # ------------------------------------------------------------------
     # System-tray helpers
@@ -381,6 +382,8 @@ class TurntableWindow(QMainWindow):
             if st.severity is Severity.ERROR and prev is not Severity.ERROR and self._tray:
                 self._tray.notify(st.message, f"{self._state.slots[i].name}: {st.message}")
             self._prev_source_sev[i] = st.severity
+        # In-app per-source badge (always); tray roll-up + tooltip (if present).
+        self.nav_bar.set_source_severities([int(s.severity) for s in statuses])
         self._worst_sev = worst(statuses).severity
         if self._tray is not None:
             self._tray.refresh()
@@ -1410,8 +1413,7 @@ class TurntableWindow(QMainWindow):
                 )
             return
         self._tick_timer.stop()
-        if self._tray is not None:
-            self._status_timer.stop()  # don't poll/refresh the tray after shutdown
+        self._status_timer.stop()  # stop polling source health before teardown
         try:
             self._state.scrub_player.pause()
         except Exception:
