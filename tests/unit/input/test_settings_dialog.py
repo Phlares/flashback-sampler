@@ -100,6 +100,37 @@ def test_attempt_rebind_with_conflict_asks_for_confirmation(qapp, tmp_path):
     assert dialog._edit_buffer.get("F13") == "t.b"
 
 
+def test_dialog_hides_non_bindable_actions(qapp, tmp_path):
+    # Internal primitives (bindable=False) must not clutter the dialog — only
+    # the user-facing rebindable actions appear.
+    register(Action(id="t.a", name="Alpha", category="T",
+                    callable=lambda: None, bindable=True))
+    register(Action(id="t.hidden", name="Hidden", category="T",
+                    callable=lambda: None, bindable=False))
+    table = BindingTable(storage_path=tmp_path / "b.json")
+    dialog = KeybindingsDialog(table)
+    assert {row.action.id for row in dialog._rows} == {"t.a"}
+
+
+def test_rebind_global_action_rejects_bare_key(qapp, tmp_path):
+    # A global-capable action must keep a modifier so it can register as a
+    # Win32 global hotkey. A bare-key rebind is refused, leaving the buffer
+    # untouched.
+    register(Action(id="rec", name="Toggle Recording", category="Transport",
+                    callable=lambda: None, default_binding="Ctrl+Alt+R",
+                    is_global=True))
+    table = BindingTable(storage_path=tmp_path / "b.json")
+    dialog = KeybindingsDialog(table)
+    warned = []
+    dialog._warn_modifier_required = lambda code: warned.append(code)
+    dialog._attempt_rebind("rec", "P")  # bare key — not allowed for global
+    assert warned == ["P"]
+    assert "P" not in dialog._edit_buffer
+    # A modifier-qualified chord is accepted.
+    dialog._attempt_rebind("rec", "Ctrl+Alt+P")
+    assert dialog._edit_buffer.get("Ctrl+Alt+P") == "rec"
+
+
 def test_reset_all_clears_edit_buffer(qapp, tmp_path):
     register(Action(id="t.a", name="A", category="T",
                     callable=lambda: None, default_binding="F13"))

@@ -12,6 +12,14 @@ class Action:
     callable: Callable[[], None]
     default_binding: str | None = None
     repeat_policy: RepeatPolicy = "fire"
+    # Eligible to also fire while the app is minimized/hidden, via an OS-level
+    # global hotkey. Only true for "grab it from another app" actions; their
+    # binding must be modifier-qualified (Win32 can't register a bare key).
+    is_global: bool = False
+    # Shown in the Keybindings dialog as user-rebindable. False for internal
+    # primitives driven only by buttons/tray (e.g. explicit start/stop, where
+    # the user-facing rebindable action is a single toggle instead).
+    bindable: bool = True
 
 
 _registry: dict[str, Action] = {}
