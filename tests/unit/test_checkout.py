@@ -306,9 +306,9 @@ def test_checkout_create_does_not_stall_writer():
 
 def test_save_as_wav_writes_correct_samples(tmp_path: Path):
     """
-    WAV is written as PCM_16 by default (soundfile's default for WAV), so
-    the audio must be in [-1, 1]. We use a normalized sine wave so we can
-    assert approximate equality across the format's quantization.
+    WAV is written as 32-bit float by default, enabling bit-perfect round-trip
+    for float audio. We use a normalized sine wave and verify exact sample
+    equality (within floating-point precision).
     """
     buf = AudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=1)
     buf.write(sine_block(0, 24_000, freq_hz=440.0, sample_rate=48_000, channels=1))
@@ -322,8 +322,9 @@ def test_save_as_wav_writes_correct_samples(tmp_path: Path):
     data, sr = sf.read(str(target), dtype="float32", always_2d=True)
     assert sr == 48_000
     assert data.shape == (9600, 1)
-    # PCM_16 quantization error is ~1/32768 ≈ 3e-5. 1e-3 is very generous.
-    assert np.allclose(data, co.audio, atol=1e-3)
+    # WAV defaults to float32 subtype (bit-perfect round-trip)
+    assert sf.info(str(target)).subtype == "FLOAT"
+    assert np.allclose(data, co.audio, atol=1e-7)
     assert co.state == "saved"
 
 
