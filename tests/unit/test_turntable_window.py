@@ -537,3 +537,72 @@ def test_rename_slot_cancel_keeps_name(qapp, state, monkeypatch):
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
     win._rename_slot(0)
     assert state.slots[0].name == original
+
+
+def _write_one_second(state):
+    import numpy as np
+    state.active_slot.buffer.write(
+        np.zeros((state.active_slot.buffer.sample_rate, 2), dtype=np.float32)
+    )
+
+
+def test_clip_drag_full_exports_and_marks_saved(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_clip_drag_full()
+        assert mgr.get(co.id).state == "saved"
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_clip_drag_cancel_deletes_file_and_keeps_clip(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: False,
+        )
+        win._on_clip_drag_full()
+        assert mgr.get(co.id).state == "pending"
+        assert list(tmp_path.glob("*.wav")) == []
+    finally:
+        win.close()
+
+
+def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
+    import soundfile as sf
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        n = co.audio.shape[0]
+        co.trim_in_samples = n // 4
+        co.trim_out_samples = n // 2
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_clip_drag_out(0.25, 0.5)
+        files = list(tmp_path.glob("*.wav"))
+        assert len(files) == 1
+        assert sf.info(str(files[0])).frames == n // 2 - n // 4
+    finally:
+        win.close()
