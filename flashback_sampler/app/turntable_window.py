@@ -26,11 +26,14 @@ from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
+    load_export_bit_depth,
+    load_export_pool_dir,
     load_global_hotkeys_enabled,
     load_show_notifications,
     save_global_hotkeys_enabled,
     save_show_notifications,
 )
+from flashback_sampler.app.drag_out import perform_file_drag
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
@@ -40,6 +43,7 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+from flashback_sampler.core.drag_export import render_drag_file
 from flashback_sampler.core.source_status import (
     SILENCE_DBFS,
     Severity,
@@ -299,6 +303,11 @@ class TurntableWindow(QMainWindow):
             "transport.stop_recording": "transport.toggle_recording",
         }):
             self._binding_table.save()
+
+        # Drag-out export prefs — pool dir + bit depth used when rendering
+        # a clip for an OS drag (see _render_for_drag).
+        self._export_pool_dir: Path = load_export_pool_dir()
+        self._export_bit_depth: str = load_export_bit_depth()
 
         # Global hotkeys (fire while minimized) — opt-in, Windows-only for now.
         self._global_hotkeys_enabled = load_global_hotkeys_enabled()
@@ -573,6 +582,9 @@ class TurntableWindow(QMainWindow):
         self.buffer_panel.waveform.manualSelectionCleared.connect(on_buffer_clear)
         self.clip_panel.waveform.manualSelectionChanged.connect(on_clip_sel)
         self.clip_panel.waveform.manualSelectionCleared.connect(on_clip_clear)
+
+        self.clip_panel.waveform.dragOutRequested.connect(self._on_clip_drag_out)
+        self.clip_panel.waveform.dragFullClipRequested.connect(self._on_clip_drag_full)
 
     def _wire_controls(self) -> None:
         # Transport
@@ -1140,6 +1152,48 @@ class TurntableWindow(QMainWindow):
             QMessageBox.warning(self, "Save failed", str(e))
             return
         self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
+
+    def _render_for_drag(self, slot, co, trimmed: bool):
+        """Render `co` into the export pool; returns the path or None on
+        failure (already reported to the user)."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return render_drag_file(
+                slot.checkout_manager,
+                co.id,
+                self._export_pool_dir,
+                slot.name,
+                bit_depth=self._export_bit_depth,
+                trimmed=trimmed,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Export failed", str(e))
+            return None
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _on_clip_drag_out(self, start_frac: float, end_frac: float) -> None:
+        # The clip selection IS the trim (kept in sync by on_clip_sel),
+        # so dragging the band exports the trimmed range.
+        self._drag_current_clip(trimmed=True)
+
+    def _on_clip_drag_full(self) -> None:
+        self._drag_current_clip(trimmed=False)
+
+    def _drag_current_clip(self, trimmed: bool) -> None:
+        co = self._currently_displayed_checkout()
+        if co is None:
+            return
+        slot = self._state.active_slot
+        path = self._render_for_drag(slot, co, trimmed)
+        if path is None:
+            return
+        if perform_file_drag(self.clip_panel.waveform, path):
+            slot.checkout_manager.mark_saved(co.id)
+            self.statusBar().showMessage(f"Exported {path.name}", 4000)
+            self._refresh_clip_side()
+        else:
+            path.unlink(missing_ok=True)
 
     def _discard_current_clip(self) -> None:
         co = self._currently_displayed_checkout()
