@@ -586,6 +586,10 @@ class TurntableWindow(QMainWindow):
         self.clip_panel.waveform.dragOutRequested.connect(self._on_clip_drag_out)
         self.clip_panel.waveform.dragFullClipRequested.connect(self._on_clip_drag_full)
 
+        # The buffer deck deliberately gets no dragFullClipRequested
+        # connection — "full clip" has no meaning on a rolling ring.
+        self.buffer_panel.waveform.dragOutRequested.connect(self._on_buffer_drag_out)
+
     def _wire_controls(self) -> None:
         # Transport
         self.center_bridge.start_btn.clicked.connect(lambda: invoke("transport.start_recording"))
@@ -1198,6 +1202,37 @@ class TurntableWindow(QMainWindow):
             self.statusBar().showMessage(f"Exported {path.name}", 4000)
             self._refresh_clip_side()
         else:
+            path.unlink(missing_ok=True)
+
+    def _on_buffer_drag_out(self, start_frac: float, end_frac: float) -> None:
+        """Snipe the current buffer selection straight out of the app:
+        implicit checkout → render → OS drag. On accept the checkout
+        stays on the clip deck as `saved` (the pool + deck form the
+        sample bank); on cancel it is discarded."""
+        slot = self._state.active_slot
+        sel_abs = getattr(self, "_buffer_sel_abs", None)
+        if getattr(self, "_buffer_sel_mode", None) != "user" or sel_abs is None:
+            return
+        try:
+            co = slot.checkout_manager.create_from_abs_range(*sel_abs)
+        except (RuntimeError, ValueError) as e:
+            self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
+            return
+        path = self._render_for_drag(slot, co, trimmed=True)
+        if path is None:
+            slot.checkout_manager.discard(co.id)
+            return
+        if perform_file_drag(self.buffer_panel.waveform, path):
+            try:
+                slot.checkout_manager.mark_saved(co.id)
+            except KeyError:
+                # Checkout was discarded while the drag loop ran; the
+                # exported file is still valid — nothing to flip.
+                pass
+            self._refresh_clip_side(auto_select_newest=True)
+            self.statusBar().showMessage(f"Exported {path.name}", 4000)
+        else:
+            slot.checkout_manager.discard(co.id)
             path.unlink(missing_ok=True)
 
     def _discard_current_clip(self) -> None:

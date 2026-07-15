@@ -606,3 +606,61 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         assert sf.info(str(files[0])).frames == n // 2 - n // 4
     finally:
         win.close()
+
+
+def test_buffer_drag_out_persists_saved_checkout_on_accept(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        cos = state.active_slot.checkout_manager.list()
+        assert len(cos) == 1
+        assert cos[0].state == "saved"
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_cancel_discards_checkout_and_file(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: False,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        assert state.active_slot.checkout_manager.list() == []
+        assert list(tmp_path.glob("*.wav")) == []
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_without_user_selection_is_noop(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_mode = "default"
+        called = []
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: called.append(path) or True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        assert called == []
+        assert state.active_slot.checkout_manager.list() == []
+    finally:
+        win.close()
