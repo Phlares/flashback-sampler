@@ -424,3 +424,64 @@ def test_ram_cap_refuses_new_checkouts_when_exceeded():
     mgr.discard(a.id)
     b = mgr.create(duration_s=10.0)
     assert b is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Save — subtype & mark_saved
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _mgr_with_checkout(tmp_path=None):
+    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 800, channels=1))
+    mgr = CheckoutManager(buffer=buf)
+    co = mgr.create(duration_s=0.5)
+    return mgr, co
+
+
+def test_save_wav_defaults_to_float32_subtype(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    target = mgr.save(co.id, tmp_path / "clip.wav")
+    assert sf.info(str(target)).subtype == "FLOAT"
+
+
+def test_save_flac_defaults_to_pcm_24(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
+    assert sf.info(str(target)).subtype == "PCM_24"
+
+
+def test_save_flac_coerces_float_to_pcm_24(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC", subtype="FLOAT")
+    assert sf.info(str(target)).subtype == "PCM_24"
+
+
+def test_save_explicit_pcm_16(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    target = mgr.save(co.id, tmp_path / "clip.wav", subtype="PCM_16")
+    assert sf.info(str(target)).subtype == "PCM_16"
+
+
+def test_save_rejects_unknown_subtype(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    with pytest.raises(ValueError):
+        mgr.save(co.id, tmp_path / "clip.wav", subtype="PCM_32_BANANA")
+
+
+def test_save_mark_saved_false_leaves_state(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    mgr.save(co.id, tmp_path / "clip.wav", mark_saved=False)
+    assert mgr.get(co.id).state == "pending"
+
+
+def test_mark_saved_sets_state():
+    mgr, co = _mgr_with_checkout()
+    mgr.mark_saved(co.id)
+    assert mgr.get(co.id).state == "saved"
+
+
+def test_mark_saved_unknown_id_raises():
+    mgr, _ = _mgr_with_checkout()
+    with pytest.raises(KeyError):
+        mgr.mark_saved("nope")
