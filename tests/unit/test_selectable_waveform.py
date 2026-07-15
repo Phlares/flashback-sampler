@@ -154,3 +154,110 @@ def test_drag_end_edge_cannot_cross_start(qapp):
 
     assert w._manual_end == pytest.approx(0.3 + epsilon)
     assert w._manual_start < w._manual_end
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Drag-out gesture
+# ─────────────────────────────────────────────────────────────────────────
+
+from PySide6.QtCore import QEvent, QPointF
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication as _QApp
+
+
+def _mouse_ev(kind, x, y=100.0, button=Qt.LeftButton,
+              buttons=Qt.LeftButton, mods=Qt.NoModifier):
+    return QMouseEvent(
+        kind, QPointF(x, y), QPointF(x, y), button, buttons, mods
+    )
+
+
+def _press(w, x, mods=Qt.NoModifier):
+    w.mousePressEvent(_mouse_ev(QEvent.MouseButtonPress, x, mods=mods))
+
+
+def _move(w, x, mods=Qt.NoModifier):
+    w.mouseMoveEvent(_mouse_ev(
+        QEvent.MouseMove, x, button=Qt.NoButton, mods=mods
+    ))
+
+
+def _release(w, x):
+    w.mouseReleaseEvent(_mouse_ev(
+        QEvent.MouseButtonRelease, x, buttons=Qt.NoButton
+    ))
+
+
+def test_press_inside_selection_and_drag_emits_drag_out(qapp):
+    w = _new_wave(qapp, width=1012)
+    w.set_manual_selection(0.25, 0.75)
+    got = []
+    w.dragOutRequested.connect(lambda s, e: got.append((s, e)))
+    _press(w, 500)  # mid-selection, far from both edges
+    _move(w, 500 + _QApp.startDragDistance() + 1)
+    assert got == [(0.25, 0.75)]
+    # selection untouched — the gesture must not repaint the band
+    assert w.manual_selection() == (0.25, 0.75)
+
+
+def test_press_inside_selection_without_move_is_a_noop_click(qapp):
+    w = _new_wave(qapp, width=1012)
+    w.set_manual_selection(0.25, 0.75)
+    got = []
+    w.dragOutRequested.connect(lambda s, e: got.append((s, e)))
+    _press(w, 500)
+    _release(w, 500)
+    assert got == []
+    assert w.manual_selection() == (0.25, 0.75)
+
+
+def test_drag_out_is_one_shot(qapp):
+    w = _new_wave(qapp, width=1012)
+    w.set_manual_selection(0.25, 0.75)
+    got = []
+    w.dragOutRequested.connect(lambda s, e: got.append((s, e)))
+    _press(w, 500)
+    far = 500 + _QApp.startDragDistance() + 1
+    _move(w, far)
+    _move(w, far + 50)
+    assert len(got) == 1
+
+
+def test_ctrl_press_and_drag_emits_full_clip(qapp):
+    w = _new_wave(qapp, width=1012)
+    got = []
+    w.dragFullClipRequested.connect(lambda: got.append(True))
+    _press(w, 300, mods=Qt.ControlModifier)
+    _move(w, 300 + _QApp.startDragDistance() + 1, mods=Qt.ControlModifier)
+    assert got == [True]
+
+
+def test_press_outside_selection_still_paints_new_selection(qapp):
+    w = _new_wave(qapp, width=1012)
+    w.set_manual_selection(0.6, 0.8)
+    _press(w, 100)  # well outside, not near an edge
+    _move(w, 200)
+    _release(w, 200)
+    sel = w.manual_selection()
+    assert sel is not None
+    assert sel[0] < 0.25 and sel[1] < 0.25
+
+
+def test_edge_grab_still_beats_drag_out(qapp):
+    w = _new_wave(qapp, width=1012)
+    w.set_manual_selection(0.25, 0.75)
+    inner_x, inner_w = w._inner_bounds()
+    got = []
+    w.dragOutRequested.connect(lambda s, e: got.append((s, e)))
+    _press(w, inner_x + 0.25 * inner_w)  # exactly on the start edge
+    assert w._dragging_edge == "start"
+    assert got == []
+
+
+def test_is_user_interacting_while_drag_out_armed(qapp):
+    w = _new_wave(qapp, width=1012)
+    w.set_manual_selection(0.25, 0.75)
+    _press(w, 500)
+    assert w.is_user_interacting() is True
+    _release(w, 500)
+    assert w.is_user_interacting() is False
