@@ -30,6 +30,8 @@ from flashback_sampler.app.config import (
     load_export_pool_dir,
     load_global_hotkeys_enabled,
     load_show_notifications,
+    save_export_bit_depth,
+    save_export_pool_dir,
     save_global_hotkeys_enabled,
     save_show_notifications,
 )
@@ -516,6 +518,14 @@ class TurntableWindow(QMainWindow):
         save_global_hotkeys_enabled(enabled)
         self._apply_global_hotkeys(enabled)
 
+    def _set_export_pool_dir(self, path_str: str) -> None:
+        self._export_pool_dir = Path(path_str)
+        save_export_pool_dir(path_str)
+
+    def _set_export_bit_depth(self, depth: str) -> None:
+        self._export_bit_depth = depth
+        save_export_bit_depth(depth)
+
     def _open_preferences_dialog(self) -> None:
         dlg = PreferencesDialog(
             show_notifications=self._show_notifications,
@@ -523,6 +533,10 @@ class TurntableWindow(QMainWindow):
             global_hotkeys_enabled=self._global_hotkeys_enabled,
             on_global_hotkeys_changed=self._set_global_hotkeys_enabled,
             global_hotkeys_supported=global_hotkeys_supported(),
+            export_pool_dir=str(self._export_pool_dir),
+            on_export_pool_dir_changed=self._set_export_pool_dir,
+            export_bit_depth=self._export_bit_depth,
+            on_export_bit_depth_changed=self._set_export_bit_depth,
             parent=self,
         )
         dlg.exec()

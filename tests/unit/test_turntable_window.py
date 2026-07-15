@@ -664,3 +664,23 @@ def test_buffer_drag_out_without_user_selection_is_noop(qapp, state, tmp_path, m
         assert state.active_slot.checkout_manager.list() == []
     finally:
         win.close()
+
+
+def test_set_export_prefs_persist_and_apply(qapp, state, tmp_path, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+    saved = {}
+    monkeypatch.setattr(
+        tw, "save_export_pool_dir", lambda p: saved.__setitem__("dir", str(p))
+    )
+    monkeypatch.setattr(
+        tw, "save_export_bit_depth", lambda d: saved.__setitem__("depth", d)
+    )
+    win = TurntableWindow(state)
+    try:
+        win._set_export_pool_dir(str(tmp_path / "pool"))
+        win._set_export_bit_depth("PCM_24")
+        assert win._export_pool_dir == tmp_path / "pool"
+        assert win._export_bit_depth == "PCM_24"
+        assert saved == {"dir": str(tmp_path / "pool"), "depth": "PCM_24"}
+    finally:
+        win.close()
