@@ -1189,7 +1189,12 @@ class TurntableWindow(QMainWindow):
         if path is None:
             return
         if perform_file_drag(self.clip_panel.waveform, path):
-            slot.checkout_manager.mark_saved(co.id)
+            try:
+                slot.checkout_manager.mark_saved(co.id)
+            except KeyError:
+                # Checkout was discarded while the drag loop ran; the
+                # exported file is still valid — nothing to flip.
+                pass
             self.statusBar().showMessage(f"Exported {path.name}", 4000)
             self._refresh_clip_side()
         else:
