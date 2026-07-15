@@ -47,3 +47,42 @@ def test_global_hotkeys_checkbox_disabled_when_unsupported(qapp):
     )
     assert dlg.global_hotkeys_check.isEnabled() is False
     assert dlg.global_hotkeys_check.isChecked() is False  # forced off when unsupported
+
+
+def test_export_section_reflects_initial_values(qapp):
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda v: None,
+        export_pool_dir="D:/pool",
+        export_bit_depth="PCM_24",
+    )
+    assert dlg.export_dir_edit.text() == "D:/pool"
+    assert dlg.export_dir_edit.isReadOnly()
+    assert dlg.export_depth_combo.currentData() == "PCM_24"
+
+
+def test_export_depth_change_fires_callback(qapp):
+    got = []
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda v: None,
+        export_bit_depth="FLOAT",
+        on_export_bit_depth_changed=got.append,
+    )
+    idx = dlg.export_depth_combo.findData("PCM_16")
+    dlg.export_depth_combo.setCurrentIndex(idx)
+    assert got == ["PCM_16"]
+
+
+def test_export_dir_browse_cancel_changes_nothing(qapp):
+    # conftest stubs QFileDialog.getExistingDirectory to return "" (cancel)
+    got = []
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda v: None,
+        export_pool_dir="D:/pool",
+        on_export_pool_dir_changed=got.append,
+    )
+    dlg.export_dir_btn.click()
+    assert got == []
+    assert dlg.export_dir_edit.text() == "D:/pool"
