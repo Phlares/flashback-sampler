@@ -999,33 +999,45 @@ class TurntableWindow(QMainWindow):
         # Refresh clip side to show the new slot's checkouts
         self._refresh_clip_side()
 
-    def _on_checkout_clicked(self) -> None:
-        if not self._state.slots:
-            return
-        slot = self._state.active_slot
+    def _resolve_buffer_selection_abs(self, slot) -> tuple[int, int] | None:
+        """Resolve the buffer deck's current selection — a manually drawn
+        band ("user" mode) or the automatic anchor/duration window
+        ("default" mode) — to an absolute sample range, clamped to what
+        the ring still holds. Returns None when the range is empty or has
+        scrolled out entirely. Shared by the OUT button and the buffer
+        drag-out so both accept exactly the same selections."""
         buf = slot.buffer
         total = int(buf.total_written)
         sr = int(buf.sample_rate)
-
-        # Determine abs range from current selection mode
         if self._buffer_sel_mode == "user" and self._buffer_sel_abs is not None:
             abs_start, abs_end = self._buffer_sel_abs
         else:
-            # Default mode — use slot.duration_preset_idx + anchor_offset_s from "now"
+            # Default mode — slot.duration_preset_idx + anchor_offset_s
+            # from "now"
             duration_s = self._active_duration_s(slot)
             anchor_s = max(0.0, slot.anchor_offset_s)
             abs_end = total - int(anchor_s * sr)
             abs_start = abs_end - int(duration_s * sr)
-
         # Clamp abs_start to what's still in the ring
         oldest_available = max(0, total - buf.buffer_size)
         abs_start = max(abs_start, oldest_available)
         if abs_end <= abs_start:
+            return None
+        return (abs_start, abs_end)
+
+    def _on_checkout_clicked(self) -> None:
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+
+        sel_abs = self._resolve_buffer_selection_abs(slot)
+        if sel_abs is None:
             QMessageBox.warning(
                 self, "Check out failed",
                 "Selection is empty or has already scrolled out of the buffer."
             )
             return
+        abs_start, abs_end = sel_abs
 
         try:
             slot.checkout_manager.create_from_abs_range(abs_start, abs_end)
@@ -1252,10 +1264,18 @@ class TurntableWindow(QMainWindow):
 
         The buffer selection deliberately survives a successful drag so
         the same slice can be dragged onto several DAW tracks in a row;
-        each repeat mints a new saved checkout + pool file by design."""
+        each repeat mints a new saved checkout + pool file by design.
+
+        Works in both selection modes: a manually drawn band, or the
+        automatic anchor/duration window painted in "default" mode —
+        the same range the OUT button would check out."""
         slot = self._state.active_slot
-        sel_abs = getattr(self, "_buffer_sel_abs", None)
-        if getattr(self, "_buffer_sel_mode", None) != "user" or sel_abs is None:
+        sel_abs = self._resolve_buffer_selection_abs(slot)
+        if sel_abs is None:
+            self.statusBar().showMessage(
+                "Drag-out failed: selection is empty or has already "
+                "scrolled out of the buffer.", 4000,
+            )
             return
         try:
             co = slot.checkout_manager.create_from_abs_range(*sel_abs)

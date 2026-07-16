@@ -648,10 +648,36 @@ def test_buffer_drag_out_cancel_discards_checkout_and_file(qapp, state, tmp_path
         win.close()
 
 
-def test_buffer_drag_out_without_user_selection_is_noop(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_out_default_mode_drags_duration_window(qapp, state, tmp_path, monkeypatch):
+    """The automatic (default-mode) selection band must be draggable —
+    it resolves to the same anchor/duration window the OUT button uses.
+    Regression: the handler used to silently drop non-"user" drags even
+    though the band is painted as a draggable selection every tick."""
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_mode = "default"
+        win._buffer_sel_abs = None
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_buffer_drag_out(0.0, 1.0)
+        cos = state.active_slot.checkout_manager.list()
+        assert len(cos) == 1
+        assert cos[0].state == "saved"
+        # Window is clamped to what's buffered: exactly the 1 s written.
+        sr = state.active_slot.buffer.sample_rate
+        assert cos[0].audio.shape[0] == sr
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_with_empty_buffer_is_noop(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
         win._export_pool_dir = tmp_path
         win._buffer_sel_mode = "default"
         called = []
@@ -659,7 +685,7 @@ def test_buffer_drag_out_without_user_selection_is_noop(qapp, state, tmp_path, m
             "flashback_sampler.app.turntable_window.perform_file_drag",
             lambda widget, path: called.append(path) or True,
         )
-        win._on_buffer_drag_out(0.0, 0.5)
+        win._on_buffer_drag_out(0.0, 1.0)
         assert called == []
         assert state.active_slot.checkout_manager.list() == []
     finally:
