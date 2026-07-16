@@ -684,3 +684,24 @@ def test_set_export_prefs_persist_and_apply(qapp, state, tmp_path, monkeypatch):
         assert saved == {"dir": str(tmp_path / "pool"), "depth": "PCM_24"}
     finally:
         win.close()
+
+
+def test_add_source_applies_rate_probe(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+    from flashback_sampler.core.quality_presets import QualityPreset
+
+    adjusted = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2, buffer_seconds=60.0
+    )
+    monkeypatch.setattr(
+        tw, "apply_rate_probe", lambda preset, device: (adjusted, "mix is 48k")
+    )
+    win = TurntableWindow(state)
+    try:
+        requested = QualityPreset(
+            name="CUSTOM", sample_rate=96000, channels=2, buffer_seconds=60.0
+        )
+        result = win._probe_and_notify(requested, None)
+        assert result.sample_rate == 48000  # notice shown via stubbed QMessageBox
+    finally:
+        win.close()
