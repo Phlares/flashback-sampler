@@ -45,7 +45,7 @@ from flashback_sampler.core.quality_presets import (
 # Sample rate options, ordered high → low so the default (48k) lands
 # at the top of the dropdown.
 SAMPLE_RATE_CHOICES: tuple[int, ...] = (
-    48_000, 44_100, 32_000, 22_050, 16_000, 8_000,
+    192_000, 176_400, 96_000, 88_200, 48_000, 44_100, 32_000, 22_050, 16_000, 8_000,
 )
 CHANNEL_CHOICES: tuple[tuple[int, str], ...] = (
     (2, "2  STEREO"),
