@@ -126,3 +126,86 @@ def test_default_returns_none_when_no_devices(monkeypatch):
     import flashback_sampler.app.audio_devices as ad
     monkeypatch.setattr(ad, "list_capture_devices", lambda: [])
     assert ad.default_capture_device() is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Rate probe
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_probe_input_ok(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+
+    monkeypatch.setattr(
+        ad.sd, "check_input_settings", lambda **kw: None, raising=False
+    )
+    dev = ad.CaptureDevice(kind="input", name="Mic", id="3")
+    res = ad.probe_capture_rate(dev, 96000, 2)
+    assert res.ok and res.effective_rate == 96000
+
+
+def test_probe_input_falls_back_to_device_default(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+
+    def boom(**kw):
+        raise Exception("unsupported")
+
+    monkeypatch.setattr(ad.sd, "check_input_settings", boom, raising=False)
+    monkeypatch.setattr(
+        ad.sd, "query_devices",
+        lambda idx=None, kind=None: {"default_samplerate": 44100.0},
+        raising=False,
+    )
+    dev = ad.CaptureDevice(kind="input", name="Mic", id="3")
+    res = ad.probe_capture_rate(dev, 192000, 2)
+    assert not res.ok
+    assert res.effective_rate == 44100
+    assert "192000" in res.message and "44100" in res.message
+
+
+def test_probe_loopback_over_mix_rate_falls_back(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+
+    monkeypatch.setattr(ad, "_wasapi_output_mix_rate", lambda hint: 48000)
+    dev = ad.CaptureDevice(kind="loopback", name="Speakers", id="spk")
+    res = ad.probe_capture_rate(dev, 96000, 2)
+    assert not res.ok
+    assert res.effective_rate == 48000
+    assert "24000" in res.message  # honest Nyquist notice
+
+
+def test_probe_loopback_at_or_below_mix_rate_ok(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+
+    monkeypatch.setattr(ad, "_wasapi_output_mix_rate", lambda hint: 48000)
+    dev = ad.CaptureDevice(kind="loopback", name="Speakers", id="spk")
+    assert ad.probe_capture_rate(dev, 48000, 2).ok
+    assert ad.probe_capture_rate(dev, 16000, 2).ok
+
+
+def test_probe_loopback_unknown_mix_rate_is_permissive(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+
+    monkeypatch.setattr(ad, "_wasapi_output_mix_rate", lambda hint: None)
+    res = ad.probe_capture_rate(None, 96000, 2)
+    assert res.ok and res.effective_rate == 96000
+
+
+def test_apply_rate_probe_rebuilds_preset(monkeypatch):
+    import flashback_sampler.app.audio_devices as ad
+    from flashback_sampler.core.quality_presets import QualityPreset
+
+    monkeypatch.setattr(ad, "_wasapi_output_mix_rate", lambda hint: 48000)
+    preset = QualityPreset(
+        name="CUSTOM", sample_rate=96000, channels=2, buffer_seconds=300.0
+    )
+    adjusted, notice = ad.apply_rate_probe(preset, None)
+    assert adjusted.sample_rate == 48000
+    assert adjusted.buffer_seconds == 300.0 and adjusted.channels == 2
+    assert notice is not None
+
+    ok_preset = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2, buffer_seconds=300.0
+    )
+    same, none_notice = ad.apply_rate_probe(ok_preset, None)
+    assert same is ok_preset and none_notice is None
