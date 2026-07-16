@@ -1248,7 +1248,11 @@ class TurntableWindow(QMainWindow):
         """Snipe the current buffer selection straight out of the app:
         implicit checkout → render → OS drag. On accept the checkout
         stays on the clip deck as `saved` (the pool + deck form the
-        sample bank); on cancel it is discarded."""
+        sample bank); on cancel it is discarded.
+
+        The buffer selection deliberately survives a successful drag so
+        the same slice can be dragged onto several DAW tracks in a row;
+        each repeat mints a new saved checkout + pool file by design."""
         slot = self._state.active_slot
         sel_abs = getattr(self, "_buffer_sel_abs", None)
         if getattr(self, "_buffer_sel_mode", None) != "user" or sel_abs is None:

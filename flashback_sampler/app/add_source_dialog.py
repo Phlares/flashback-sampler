@@ -4,7 +4,7 @@ AddSourceDialog — factual modal for building a new CaptureSlot.
 Fields:
 - NAME: user-given label for the slot ("Discord", "Game", etc.)
 - BUFFER LENGTH: seconds of audio to retain (1 .. settings cap)
-- SAMPLE RATE: 48000 / 44100 / 32000 / 22050 / 16000 / 8000
+- SAMPLE RATE: 192000 down to 8000 (see SAMPLE_RATE_CHOICES)
 - CHANNELS: 1 mono / 2 stereo
 - Live RAM footprint readout that updates as you dial
 
@@ -42,8 +42,8 @@ from flashback_sampler.core.quality_presets import (
 )
 
 
-# Sample rate options, ordered high → low so the default (48k) lands
-# at the top of the dropdown.
+# Sample rate options, ordered high → low. The default (48k) is
+# selected by value via findData, not by position.
 SAMPLE_RATE_CHOICES: tuple[int, ...] = (
     192_000, 176_400, 96_000, 88_200, 48_000, 44_100, 32_000, 22_050, 16_000, 8_000,
 )
