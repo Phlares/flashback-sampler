@@ -21,7 +21,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
+from flashback_sampler.app.audio_devices import (
+    CaptureDevice,
+    apply_rate_probe,
+    list_capture_devices,
+)
 from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
@@ -1376,16 +1380,25 @@ class TurntableWindow(QMainWindow):
         if preset is None:
             return
         name = dlg.result_name() or default_name
+        device = dlg.result_device()
+        preset = self._probe_and_notify(preset, device)
         try:
             self._state.add_slot(preset, name=name)
         except Exception as e:
             QMessageBox.warning(self, "Add source failed", str(e))
             return
         new_idx = len(self._state.slots) - 1
-        device = dlg.result_device()
         if device is not None and 0 <= new_idx < len(self._state.slots):
             self._state.slots[new_idx].capture_spec = device
         self._finalize_add_source(new_idx)
+
+    def _probe_and_notify(self, preset, device):
+        """Rate-probe the requested preset against the chosen device;
+        show the honest-fallback notice when the rate was adjusted."""
+        adjusted, notice = apply_rate_probe(preset, device)
+        if notice:
+            QMessageBox.information(self, "Sample rate adjusted", notice)
+        return adjusted
 
     def _refresh_source_indicators(self) -> None:
         """Update the NavBar source chips to reflect current slot armed/capturing state."""
