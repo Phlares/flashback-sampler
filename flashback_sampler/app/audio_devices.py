@@ -327,8 +327,29 @@ def _wasapi_output_mix_rate(name_hint: str | None) -> int | None:
         if didx is not None and didx >= 0:
             return int(devices[didx]["default_samplerate"])
     except Exception:
+        # Probe must never raise — degrade permissively per spec (see
+        # probe_capture_rate's docstring). Any WASAPI/query oddity here
+        # just means "unknown mix rate", not a fatal error; don't narrow
+        # this to specific exception types without re-checking that
+        # mandate first.
         return None
     return None
+
+
+def _strip_loopback_hint_suffix(name: str) -> str:
+    """
+    `CaptureDevice.name` for a loopback device is built as
+    f"{spk.name}  [loopback]" (see `_list_loopback_devices`), so the raw
+    name never appears verbatim in sounddevice's WASAPI output device
+    list. Strip the trailing "[loopback]" marker (and the whitespace
+    around it) so `_wasapi_output_mix_rate`'s containment match can find
+    the real output device.
+    """
+    stripped = name.rstrip()
+    suffix = "[loopback]"
+    if stripped.casefold().endswith(suffix):
+        stripped = stripped[: -len(suffix)].rstrip()
+    return stripped
 
 
 def probe_capture_rate(
@@ -346,14 +367,31 @@ def probe_capture_rate(
     kind = device.kind if device is not None else "loopback"
     if kind == "input":
         try:
+            # CaptureDevice.id for kind="input" is a sounddevice index
+            # stored as a string (see build_capture_source's int(device.id)
+            # for the same pattern). Passing the raw string here would make
+            # sounddevice treat it as a name-substring query instead of an
+            # index, so every real device would misreport as unsupported.
+            idx = int(device.id)
+        except (TypeError, ValueError):
+            # Id isn't a parseable index (shouldn't happen for real devices,
+            # but defend against it) — we can't probe, so degrade
+            # permissively per spec: trust the requested rate.
+            return ProbeResult(True, sample_rate)
+        try:
             sd.check_input_settings(
-                device=device.id, samplerate=sample_rate,
+                device=idx, samplerate=sample_rate,
                 channels=channels, dtype="float32",
             )
             return ProbeResult(True, sample_rate)
         except Exception:
+            # Probe must never raise — degrade permissively per spec: any
+            # failure here (unsupported rate, missing device, driver quirk)
+            # falls back to the device's own reported default rate instead
+            # of propagating. Don't narrow this without re-checking that
+            # mandate first.
             try:
-                info = sd.query_devices(device.id)
+                info = sd.query_devices(idx)
                 fallback = int(info["default_samplerate"])
             except Exception:
                 fallback = 48_000
@@ -363,7 +401,10 @@ def probe_capture_rate(
                 f"capturing at {fallback} Hz instead.",
             )
     # loopback / process_loopback: capped by the output mix format
-    mix = _wasapi_output_mix_rate(device.name if device is not None else None)
+    name_hint = device.name if device is not None else None
+    if name_hint is not None:
+        name_hint = _strip_loopback_hint_suffix(name_hint)
+    mix = _wasapi_output_mix_rate(name_hint)
     if mix is None or sample_rate <= mix:
         return ProbeResult(True, sample_rate)
     return ProbeResult(
