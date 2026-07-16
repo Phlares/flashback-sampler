@@ -327,6 +327,11 @@ def _wasapi_output_mix_rate(name_hint: str | None) -> int | None:
             if d["hostapi"] == was and d["max_output_channels"] > 0
         ]
         if name_hint:
+            # First containment match wins — a heuristic that can pick a
+            # sibling device when names overlap (e.g. "Speakers" vs
+            # "Speakers 2"). Acceptable: a wrong pick still yields a real
+            # mix rate, and the default-output fallback below covers the
+            # no-match case.
             hint = name_hint.casefold()
             for d in outputs:
                 if hint in d["name"].casefold():
@@ -390,9 +395,12 @@ def probe_capture_rate(
             # permissively per spec: trust the requested rate.
             return ProbeResult(True, sample_rate)
         try:
+            # Rate-only probe: channels are deliberately left out so a
+            # channel-count mismatch isn't misreported as a sample-rate
+            # problem (the notice below suggests a rate fallback, which
+            # would not fix a channel issue).
             sd.check_input_settings(
-                device=idx, samplerate=sample_rate,
-                channels=channels, dtype="float32",
+                device=idx, samplerate=sample_rate, dtype="float32",
             )
             return ProbeResult(True, sample_rate)
         except Exception:
