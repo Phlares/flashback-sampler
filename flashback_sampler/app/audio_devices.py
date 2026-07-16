@@ -15,6 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+import sounddevice as sd
+
+from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.platform.capabilities import loopback_supported
 
 
@@ -280,3 +283,111 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
         )
 
     raise ValueError(f"unknown CaptureDevice.kind: {device.kind!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Rate probe
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Outcome of asking whether a device can honestly deliver a rate."""
+    ok: bool
+    effective_rate: int
+    message: str = ""
+
+
+def _wasapi_output_mix_rate(name_hint: str | None) -> int | None:
+    """
+    Shared-mode mix-format rate of the WASAPI output device matching
+    `name_hint` (falling back to the default output). PortAudio reports
+    a WASAPI output's `default_samplerate` from its mix format, which is
+    exactly the rate Windows hands to loopback captures. None = unknown.
+    """
+    try:
+        hostapis = sd.query_hostapis()
+        was = next(
+            (i for i, h in enumerate(hostapis) if "WASAPI" in h.get("name", "")),
+            None,
+        )
+        if was is None:
+            return None
+        devices = sd.query_devices()
+        outputs = [
+            d for d in devices
+            if d["hostapi"] == was and d["max_output_channels"] > 0
+        ]
+        if name_hint:
+            hint = name_hint.casefold()
+            for d in outputs:
+                if hint in d["name"].casefold():
+                    return int(d["default_samplerate"])
+        didx = hostapis[was].get("default_output_device", -1)
+        if didx is not None and didx >= 0:
+            return int(devices[didx]["default_samplerate"])
+    except Exception:
+        return None
+    return None
+
+
+def probe_capture_rate(
+    device: CaptureDevice | None,
+    sample_rate: int,
+    channels: int,
+) -> ProbeResult:
+    """
+    Can this source honestly deliver `sample_rate`? Loopback rates above
+    the output mix format add no information (Windows hands loopback
+    audio at the mix rate), so we fall back with a notice instead of
+    silently upsampling. Unknown capabilities are treated permissively —
+    the capture backends already handle format conversion.
+    """
+    kind = device.kind if device is not None else "loopback"
+    if kind == "input":
+        try:
+            sd.check_input_settings(
+                device=device.id, samplerate=sample_rate,
+                channels=channels, dtype="float32",
+            )
+            return ProbeResult(True, sample_rate)
+        except Exception:
+            try:
+                info = sd.query_devices(device.id)
+                fallback = int(info["default_samplerate"])
+            except Exception:
+                fallback = 48_000
+            return ProbeResult(
+                False, fallback,
+                f"'{device.name}' can't open at {sample_rate} Hz — "
+                f"capturing at {fallback} Hz instead.",
+            )
+    # loopback / process_loopback: capped by the output mix format
+    mix = _wasapi_output_mix_rate(device.name if device is not None else None)
+    if mix is None or sample_rate <= mix:
+        return ProbeResult(True, sample_rate)
+    return ProbeResult(
+        False, mix,
+        f"Output mix format is {mix} Hz — a {sample_rate} Hz capture "
+        f"won't contain content above {mix // 2} Hz. "
+        f"Capturing at {mix} Hz instead.",
+    )
+
+
+def apply_rate_probe(
+    preset: QualityPreset,
+    device: CaptureDevice | None,
+) -> tuple[QualityPreset, str | None]:
+    """Probe `device` for `preset.sample_rate`; return the (possibly
+    rate-adjusted) preset plus a user-facing notice, or (preset, None)."""
+    probe = probe_capture_rate(device, preset.sample_rate, preset.channels)
+    if probe.ok:
+        return preset, None
+    adjusted = QualityPreset(
+        name=preset.name,
+        sample_rate=probe.effective_rate,
+        channels=preset.channels,
+        buffer_seconds=preset.buffer_seconds,
+        description=preset.description,
+    )
+    return adjusted, probe.message
