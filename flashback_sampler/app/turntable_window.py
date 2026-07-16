@@ -49,7 +49,10 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
-from flashback_sampler.core.drag_export import render_drag_file
+from flashback_sampler.core.drag_export import (
+    render_drag_file,
+    sanitize_source_name,
+)
 from flashback_sampler.core.source_status import (
     SILENCE_DBFS,
     Severity,
@@ -1125,9 +1128,7 @@ class TurntableWindow(QMainWindow):
         return checkouts[idx]
 
     def _suggested_clip_filename(self, slot, co, suffix: str = "") -> str:
-        import re
-        base_slot = re.sub(r"[^A-Za-z0-9_-]+", "_", slot.name or "").strip("_").lower() or "source"
-        base = f"flashback_{base_slot}_{co.id}"
+        base = f"flashback_{sanitize_source_name(slot.name)}_{co.id}"
         if suffix:
             base += f"_{suffix}"
         return base
@@ -1210,16 +1211,37 @@ class TurntableWindow(QMainWindow):
         path = self._render_for_drag(slot, co, trimmed)
         if path is None:
             return
-        if perform_file_drag(self.clip_panel.waveform, path):
+        self._complete_drag(
+            slot, co, path, self.clip_panel.waveform,
+            discard_on_cancel=False, auto_select_newest=False,
+        )
+
+    def _complete_drag(
+        self,
+        slot,
+        co,
+        path,
+        source_widget,
+        *,
+        discard_on_cancel: bool,
+        auto_select_newest: bool,
+    ) -> None:
+        """Shared tail of both decks' drag-out flows: run the blocking OS
+        drag, then commit (mark saved + refresh) or roll back (delete the
+        just-rendered file; discard the checkout too when it was created
+        just for this drag)."""
+        if perform_file_drag(source_widget, path):
             try:
                 slot.checkout_manager.mark_saved(co.id)
             except KeyError:
                 # Checkout was discarded while the drag loop ran; the
                 # exported file is still valid — nothing to flip.
                 pass
+            self._refresh_clip_side(auto_select_newest=auto_select_newest)
             self.statusBar().showMessage(f"Exported {path.name}", 4000)
-            self._refresh_clip_side()
         else:
+            if discard_on_cancel:
+                slot.checkout_manager.discard(co.id)
             path.unlink(missing_ok=True)
 
     def _on_buffer_drag_out(self, start_frac: float, end_frac: float) -> None:
@@ -1240,18 +1262,10 @@ class TurntableWindow(QMainWindow):
         if path is None:
             slot.checkout_manager.discard(co.id)
             return
-        if perform_file_drag(self.buffer_panel.waveform, path):
-            try:
-                slot.checkout_manager.mark_saved(co.id)
-            except KeyError:
-                # Checkout was discarded while the drag loop ran; the
-                # exported file is still valid — nothing to flip.
-                pass
-            self._refresh_clip_side(auto_select_newest=True)
-            self.statusBar().showMessage(f"Exported {path.name}", 4000)
-        else:
-            slot.checkout_manager.discard(co.id)
-            path.unlink(missing_ok=True)
+        self._complete_drag(
+            slot, co, path, self.buffer_panel.waveform,
+            discard_on_cancel=True, auto_select_newest=True,
+        )
 
     def _discard_current_clip(self) -> None:
         co = self._currently_displayed_checkout()

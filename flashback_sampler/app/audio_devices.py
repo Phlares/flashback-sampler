@@ -12,10 +12,18 @@ the right concrete source object.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
-import sounddevice as sd
+# Optional dependency: every other consumer in this module imports
+# sounddevice lazily inside a try/except so the module still loads
+# where the backend is absent. The probe helpers below reference it as
+# a module attribute (also what tests monkeypatch), so guard the import
+# and let the probes' permissive except-blocks absorb `sd = None`.
+try:
+    import sounddevice as sd
+except Exception:  # pragma: no cover - environment without sounddevice
+    sd = None  # type: ignore[assignment]
 
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.platform.capabilities import loopback_supported
@@ -364,6 +372,9 @@ def probe_capture_rate(
     silently upsampling. Unknown capabilities are treated permissively —
     the capture backends already handle format conversion.
     """
+    if sd is None:
+        # No sounddevice backend to ask — can't probe, trust the request.
+        return ProbeResult(True, sample_rate)
     kind = device.kind if device is not None else "loopback"
     if kind == "input":
         try:
@@ -424,11 +435,5 @@ def apply_rate_probe(
     probe = probe_capture_rate(device, preset.sample_rate, preset.channels)
     if probe.ok:
         return preset, None
-    adjusted = QualityPreset(
-        name=preset.name,
-        sample_rate=probe.effective_rate,
-        channels=preset.channels,
-        buffer_seconds=preset.buffer_seconds,
-        description=preset.description,
-    )
+    adjusted = replace(preset, sample_rate=probe.effective_rate)
     return adjusted, probe.message
