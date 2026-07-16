@@ -199,7 +199,11 @@ def test_probe_input_passes_integer_device_to_check_input_settings(monkeypatch):
     like build_capture_source's `int(device.id)` does."""
     import flashback_sampler.app.audio_devices as ad
 
-    def fake_check_input_settings(*, device, samplerate, channels, dtype):
+    def fake_check_input_settings(*, device, samplerate, dtype):
+        # Rate-only probe: the production call deliberately omits
+        # `channels` so channel mismatches aren't misreported as
+        # sample-rate problems — a fake with a `channels` kwarg here
+        # would silently mask a regression on that contract.
         if not isinstance(device, int):
             raise TypeError(f"device must be an int, got {device!r}")
 
