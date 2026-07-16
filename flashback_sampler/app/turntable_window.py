@@ -1,23 +1,9 @@
 """TurntableWindow — dual-turntable layout, the application's main window."""
 from __future__ import annotations
 
-import os
 import re
 import time
 from pathlib import Path
-
-# TEMPORARY drag-stall instrumentation (FLASHBACK_DRAG_DEBUG=1).
-# Appends timing lines to %TEMP%\flashback_drag_debug.log so a single
-# reproduction shows where wall-clock goes. Remove once diagnosed.
-_DRAG_DEBUG = os.environ.get("FLASHBACK_DRAG_DEBUG") == "1"
-
-
-def _dbg(msg: str) -> None:
-    if not _DRAG_DEBUG:
-        return
-    log = Path(os.environ.get("TEMP", ".")) / "flashback_drag_debug.log"
-    with log.open("a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%H:%M:%S')} +{time.perf_counter():.3f} {msg}\n")
 
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer
@@ -1276,19 +1262,14 @@ class TurntableWindow(QMainWindow):
         drag, then commit (mark saved + refresh) or roll back (delete the
         just-rendered file; discard the checkout too when it was created
         just for this drag)."""
-        t0 = time.perf_counter()
-        accepted = perform_file_drag(source_widget, path)
-        _dbg(f"drag.exec took {time.perf_counter() - t0:.3f}s accepted={accepted}")
-        if accepted:
+        if perform_file_drag(source_widget, path):
             try:
                 slot.checkout_manager.mark_saved(co.id)
             except KeyError:
                 # Checkout was discarded while the drag loop ran; the
                 # exported file is still valid — nothing to flip.
                 pass
-            t1 = time.perf_counter()
             self._refresh_clip_side(auto_select_newest=auto_select_newest)
-            _dbg(f"refresh_clip_side took {time.perf_counter() - t1:.3f}s")
             self.statusBar().showMessage(f"Exported {path.name}", 4000)
         else:
             if discard_on_cancel:
@@ -1316,7 +1297,6 @@ class TurntableWindow(QMainWindow):
                 "scrolled out of the buffer.", 4000,
             )
             return
-        t0 = time.perf_counter()
         co = None
         while co is None:
             try:
@@ -1332,13 +1312,7 @@ class TurntableWindow(QMainWindow):
                 if not (at_cap and self._evict_oldest_saved_checkout(slot)):
                     self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
                     return
-        _dbg(
-            f"buffer drag: create_from_abs_range({sel_abs[1] - sel_abs[0]} "
-            f"samples) took {time.perf_counter() - t0:.3f}s"
-        )
-        t1 = time.perf_counter()
         path = self._render_for_drag(slot, co, trimmed=True)
-        _dbg(f"buffer drag: render took {time.perf_counter() - t1:.3f}s -> {path}")
         if path is None:
             slot.checkout_manager.discard(co.id)
             return
@@ -1630,14 +1604,6 @@ class TurntableWindow(QMainWindow):
         """Pull peak-bin data from each slot's buffer and push into UI.
         Active slot drives the buffer WaveformPanel; each slot's bins
         also go to its corresponding track ring as a radial plot."""
-        _tick_t0 = time.perf_counter()
-        self._tick_inner()
-        if _DRAG_DEBUG:
-            dur = time.perf_counter() - _tick_t0
-            if dur > 0.040:
-                _dbg(f"SLOW tick: {dur:.3f}s")
-
-    def _tick_inner(self) -> None:
         slots = self._state.slots
         active_idx = self._state.active_slot_index
 
