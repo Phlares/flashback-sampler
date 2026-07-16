@@ -1,9 +1,23 @@
 """TurntableWindow — dual-turntable layout, the application's main window."""
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
+
+# TEMPORARY drag-stall instrumentation (FLASHBACK_DRAG_DEBUG=1).
+# Appends timing lines to %TEMP%\flashback_drag_debug.log so a single
+# reproduction shows where wall-clock goes. Remove once diagnosed.
+_DRAG_DEBUG = os.environ.get("FLASHBACK_DRAG_DEBUG") == "1"
+
+
+def _dbg(msg: str) -> None:
+    if not _DRAG_DEBUG:
+        return
+    log = Path(os.environ.get("TEMP", ".")) / "flashback_drag_debug.log"
+    with log.open("a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%H:%M:%S')} +{time.perf_counter():.3f} {msg}\n")
 
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer
@@ -233,6 +247,13 @@ class TurntableWindow(QMainWindow):
         # drifts with the live buffer's advancing write head. Keyed by
         # checkout id so switching clips preserves each one's trim.
         self._clip_trim_fracs: dict[str, tuple[float, float]] = {}
+        # Waveform bins per checkout id ("ring_amp" 540-bin radial amp,
+        # "panel_bins" 360-bin min/max). Checkout audio is immutable, so
+        # these are computed once — without the cache every refresh
+        # recomputes every banked clip and refresh cost grows with each
+        # drag (measured live: 0.17s -> 1.7s over 8 drags). Pruned in
+        # _refresh_clip_side when checkouts disappear.
+        self._clip_bins_cache: dict[str, dict[str, np.ndarray]] = {}
 
         # Tracks whether the scrub player was rolling on the previous
         # tick — used to auto-restart on loop when playback drains.
@@ -1061,6 +1082,11 @@ class TurntableWindow(QMainWindow):
         checkouts = list(slot.checkout_manager.list())  # oldest first
         n = len(checkouts)
 
+        # Drop cached bins for checkouts that no longer exist.
+        live_ids = {c.id for c in checkouts}
+        for stale in [k for k in self._clip_bins_cache if k not in live_ids]:
+            del self._clip_bins_cache[stale]
+
         # Resize clip turntable. Keep a minimum of 1 ring for visual
         # consistency when there are no checkouts yet.
         self.clip_turntable.set_track_count(max(n, 1))
@@ -1082,13 +1108,17 @@ class TurntableWindow(QMainWindow):
             self.clip_panel.set_times("0:00.00", "0:00.00")
             return
 
-        # Plot each checkout onto its ring.
+        # Plot each checkout onto its ring (bins cached — audio is immutable).
         for j, co in enumerate(checkouts):
-            bins = _peak_bins_from_audio(co.audio, n_bins=540)
-            amp = (
-                (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
-            ).astype(np.float32)
-            amp = np.clip(amp, 0.0, 1.0)
+            entry = self._clip_bins_cache.setdefault(co.id, {})
+            amp = entry.get("ring_amp")
+            if amp is None:
+                bins = _peak_bins_from_audio(co.audio, n_bins=540)
+                amp = (
+                    (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
+                ).astype(np.float32)
+                amp = np.clip(amp, 0.0, 1.0)
+                entry["ring_amp"] = amp
             self.clip_turntable.set_track_waveform(j, amp, fill_fraction=1.0)
 
         # Decide which clip's waveform the clip PANEL displays
@@ -1101,7 +1131,11 @@ class TurntableWindow(QMainWindow):
 
     def _display_clip_in_panel(self, co, index: int, total: int) -> None:
         """Render a single checkout's full audio into the clip WaveformPanel."""
-        bins = _peak_bins_from_audio(co.audio, n_bins=360)
+        entry = self._clip_bins_cache.setdefault(co.id, {})
+        bins = entry.get("panel_bins")
+        if bins is None:
+            bins = _peak_bins_from_audio(co.audio, n_bins=360)
+            entry["panel_bins"] = bins
         self.clip_panel.waveform.set_data(bins)
         # Clip timeline = fixed clip duration; lets the selection band
         # render its duration label on top.
@@ -1242,14 +1276,19 @@ class TurntableWindow(QMainWindow):
         drag, then commit (mark saved + refresh) or roll back (delete the
         just-rendered file; discard the checkout too when it was created
         just for this drag)."""
-        if perform_file_drag(source_widget, path):
+        t0 = time.perf_counter()
+        accepted = perform_file_drag(source_widget, path)
+        _dbg(f"drag.exec took {time.perf_counter() - t0:.3f}s accepted={accepted}")
+        if accepted:
             try:
                 slot.checkout_manager.mark_saved(co.id)
             except KeyError:
                 # Checkout was discarded while the drag loop ran; the
                 # exported file is still valid — nothing to flip.
                 pass
+            t1 = time.perf_counter()
             self._refresh_clip_side(auto_select_newest=auto_select_newest)
+            _dbg(f"refresh_clip_side took {time.perf_counter() - t1:.3f}s")
             self.statusBar().showMessage(f"Exported {path.name}", 4000)
         else:
             if discard_on_cancel:
@@ -1277,12 +1316,29 @@ class TurntableWindow(QMainWindow):
                 "scrolled out of the buffer.", 4000,
             )
             return
-        try:
-            co = slot.checkout_manager.create_from_abs_range(*sel_abs)
-        except (RuntimeError, ValueError) as e:
-            self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
-            return
+        t0 = time.perf_counter()
+        co = None
+        while co is None:
+            try:
+                co = slot.checkout_manager.create_from_abs_range(*sel_abs)
+            except (RuntimeError, ValueError) as e:
+                # At the active-checkout / RAM cap, make room by evicting
+                # the oldest `saved` clip — its pool file is the durable
+                # record. Any other failure (range lapped, etc.) reports.
+                at_cap = (
+                    "Maximum active checkouts" in str(e)
+                    or "RAM cap" in str(e)
+                )
+                if not (at_cap and self._evict_oldest_saved_checkout(slot)):
+                    self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
+                    return
+        _dbg(
+            f"buffer drag: create_from_abs_range({sel_abs[1] - sel_abs[0]} "
+            f"samples) took {time.perf_counter() - t0:.3f}s"
+        )
+        t1 = time.perf_counter()
         path = self._render_for_drag(slot, co, trimmed=True)
+        _dbg(f"buffer drag: render took {time.perf_counter() - t1:.3f}s -> {path}")
         if path is None:
             slot.checkout_manager.discard(co.id)
             return
@@ -1290,6 +1346,19 @@ class TurntableWindow(QMainWindow):
             slot, co, path, self.buffer_panel.waveform,
             discard_on_cancel=True, auto_select_newest=True,
         )
+
+    def _evict_oldest_saved_checkout(self, slot) -> bool:
+        """Discard the oldest checkout in `saved` state to make room for
+        a new drag checkout. Saved clips live on durably as their export
+        pool file; `pending` clips are the user's working set and are
+        never evicted. Returns False when nothing was evictable."""
+        for co in slot.checkout_manager.list():  # oldest first
+            if co.state == "saved":
+                slot.checkout_manager.discard(co.id)
+                self._clip_trim_fracs.pop(co.id, None)
+                self._clip_bins_cache.pop(co.id, None)
+                return True
+        return False
 
     def _discard_current_clip(self) -> None:
         co = self._currently_displayed_checkout()
@@ -1561,6 +1630,14 @@ class TurntableWindow(QMainWindow):
         """Pull peak-bin data from each slot's buffer and push into UI.
         Active slot drives the buffer WaveformPanel; each slot's bins
         also go to its corresponding track ring as a radial plot."""
+        _tick_t0 = time.perf_counter()
+        self._tick_inner()
+        if _DRAG_DEBUG:
+            dur = time.perf_counter() - _tick_t0
+            if dur > 0.040:
+                _dbg(f"SLOW tick: {dur:.3f}s")
+
+    def _tick_inner(self) -> None:
         slots = self._state.slots
         active_idx = self._state.active_slot_index
 

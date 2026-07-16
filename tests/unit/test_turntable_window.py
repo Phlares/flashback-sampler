@@ -675,6 +675,105 @@ def test_buffer_drag_out_default_mode_drags_duration_window(qapp, state, tmp_pat
         win.close()
 
 
+def test_refresh_clip_side_caches_peak_bins_per_checkout(qapp, state, monkeypatch):
+    """Waveform bins are computed once per checkout, not on every refresh —
+    otherwise refresh cost grows with every banked clip (measured live:
+    0.17s -> 1.7s over 8 drags)."""
+    import flashback_sampler.app.turntable_window as tw
+
+    calls = []
+    real = tw._peak_bins_from_audio
+    monkeypatch.setattr(
+        tw, "_peak_bins_from_audio",
+        lambda audio, n_bins: calls.append(n_bins) or real(audio, n_bins),
+    )
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        mgr.create(duration_s=0.2)
+        mgr.create(duration_s=0.2)
+        win._refresh_clip_side(auto_select_newest=True)
+        first_pass = len(calls)
+        assert first_pass > 0
+        win._refresh_clip_side()
+        win._refresh_clip_side()
+        assert len(calls) == first_pass  # all hits served from cache
+    finally:
+        win.close()
+
+
+def test_refresh_clip_side_prunes_cache_for_discarded_checkouts(qapp, state):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.2)
+        win._refresh_clip_side(auto_select_newest=True)
+        assert co.id in win._clip_bins_cache
+        mgr.discard(co.id)
+        win._refresh_clip_side()
+        assert co.id not in win._clip_bins_cache
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(qapp, state, tmp_path, monkeypatch):
+    """The sample-bank flow mints a checkout per drag; at the manager's
+    active-checkout cap the oldest `saved` clip is evicted (its pool file
+    is the durable record) so drags keep working."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        mgr = state.active_slot.checkout_manager
+        # Fill to the cap with saved checkouts (as prior drags would)
+        cap = mgr._max_active
+        for _ in range(cap):
+            co = mgr.create(duration_s=0.01)
+            mgr.mark_saved(co.id)
+        oldest_id = mgr.list()[0].id
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        ids = [c.id for c in mgr.list()]
+        assert oldest_id not in ids  # evicted
+        assert len(ids) == cap  # newcomer took its place
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_at_cap_without_saved_clips_reports_failure(qapp, state, tmp_path, monkeypatch):
+    """Pending (unsaved) clips are the user's working set — never evicted."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        mgr = state.active_slot.checkout_manager
+        cap = mgr._max_active
+        for _ in range(cap):
+            mgr.create(duration_s=0.01)  # all stay pending
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        called = []
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: called.append(path) or True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        assert called == []
+        assert len(mgr.list()) == cap  # nothing evicted
+    finally:
+        win.close()
+
+
 def test_buffer_drag_out_with_empty_buffer_is_noop(qapp, state, tmp_path, monkeypatch):
     win = TurntableWindow(state)
     try:
