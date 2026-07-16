@@ -24,6 +24,12 @@ from .buffer import AudioCircularBuffer
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
 CheckoutFormat = Literal["WAV", "FLAC"]
+CheckoutSubtype = Literal["FLOAT", "PCM_24", "PCM_16"]
+
+# libsndfile's WAV default is PCM_16 — an explicit subtype keeps our
+# float32 buffers bit-perfect on disk. FLAC has no float subtype.
+_DEFAULT_SUBTYPE: dict[str, str] = {"WAV": "FLOAT", "FLAC": "PCM_24"}
+_VALID_SUBTYPES: tuple[str, ...] = ("FLOAT", "PCM_24", "PCM_16")
 
 
 @dataclass
@@ -277,19 +283,35 @@ class CheckoutManager:
         target_path: Path | str,
         fmt: CheckoutFormat = "WAV",
         trimmed: bool = True,
+        subtype: CheckoutSubtype | None = None,
+        mark_saved: bool = True,
     ) -> Path:
         """
         Write the checkout's audio to `target_path` in the requested
-        format and mark the checkout as `saved`. When `trimmed` is
-        True (default) the file contains just the region between
-        trim_in_samples / trim_out_samples; when False, the full
-        untrimmed snapshot is written regardless of trim state.
+        format. When `trimmed` is True (default) the file contains just
+        the region between trim_in_samples / trim_out_samples; when False,
+        the full untrimmed snapshot is written regardless of trim state.
+
+        `subtype` controls the bit depth: None (default) resolves to FLOAT
+        for WAV and PCM_24 for FLAC. FLAC + FLOAT coerces to PCM_24 (FLAC
+        has no float subtype). `mark_saved` controls whether the checkout
+        state is flipped to 'saved' (default True); when False, the caller
+        can write without affecting checkout state (used by drag-out flow).
         """
         fmt = fmt.upper()  # type: ignore[assignment]
         if fmt not in self._VALID_FORMATS:
             raise ValueError(
                 f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}"
             )
+
+        if subtype is None:
+            subtype = _DEFAULT_SUBTYPE[fmt]  # type: ignore[assignment]
+        if subtype not in _VALID_SUBTYPES:
+            raise ValueError(
+                f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}"
+            )
+        if fmt == "FLAC" and subtype == "FLOAT":
+            subtype = "PCM_24"
 
         with self._lock:
             if checkout_id not in self._checkouts:
@@ -300,11 +322,21 @@ class CheckoutManager:
 
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(str(target), audio, sr, format=fmt)
+        sf.write(str(target), audio, sr, format=fmt, subtype=subtype)
 
-        with self._lock:
-            co.state = "saved"
+        if mark_saved:
+            with self._lock:
+                co.state = "saved"
         return target
+
+    def mark_saved(self, checkout_id: str) -> None:
+        """Flip a checkout to `saved` without writing anything — used by
+        the drag-out flow, which renders first and only commits the state
+        once the drop target has accepted the file."""
+        with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            self._checkouts[checkout_id].state = "saved"
 
     def discard(self, checkout_id: str) -> None:
         with self._lock:

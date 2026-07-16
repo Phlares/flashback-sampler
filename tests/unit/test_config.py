@@ -92,3 +92,46 @@ def test_global_hotkeys_roundtrip(tmp_path: Path):
     p = tmp_path / "config.json"
     save_global_hotkeys_enabled(True, p)
     assert load_global_hotkeys_enabled(p) is True
+
+
+def test_export_pool_dir_defaults_to_documents(tmp_path):
+    from flashback_sampler.app.config import (
+        default_export_pool_dir,
+        load_export_pool_dir,
+        save_export_pool_dir,
+    )
+
+    cfg = tmp_path / "config.json"
+    assert load_export_pool_dir(cfg) == default_export_pool_dir()
+    assert default_export_pool_dir() == (
+        Path.home() / "Documents" / "flashback-sampler" / "exports"
+    )
+    save_export_pool_dir(tmp_path / "pool", cfg)
+    assert load_export_pool_dir(cfg) == tmp_path / "pool"
+
+
+def test_export_bit_depth_roundtrip_and_validation(tmp_path):
+    import pytest
+    from flashback_sampler.app.config import (
+        load_export_bit_depth,
+        save_export_bit_depth,
+    )
+
+    cfg = tmp_path / "config.json"
+    assert load_export_bit_depth(cfg) == "FLOAT"
+    save_export_bit_depth("PCM_24", cfg)
+    assert load_export_bit_depth(cfg) == "PCM_24"
+    with pytest.raises(ValueError):
+        save_export_bit_depth("MP3", cfg)
+
+
+def test_export_bit_depth_ignores_garbage_in_file(tmp_path):
+    from flashback_sampler.app.config import (
+        EXPORT_BIT_DEPTH_KEY,
+        load_export_bit_depth,
+    )
+    from flashback_sampler.app.config import save_config
+
+    cfg = tmp_path / "config.json"
+    save_config({EXPORT_BIT_DEPTH_KEY: "banana"}, cfg)
+    assert load_export_bit_depth(cfg) == "FLOAT"

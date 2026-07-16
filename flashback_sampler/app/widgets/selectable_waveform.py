@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
+from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.theme import EREBUS
 from flashback_sampler.app.widgets.waveform_view import (
@@ -41,11 +42,22 @@ class SelectableWaveform(WaveformView):
       changes to Qt.SizeHorCursor while hovering over an edge.
     - Right click: emit contextMenuRequested with the global position.
     - Double click: clear the current manual selection.
+    - Left press-drag starting *inside* an existing selection (not on an
+      edge): arms a selection drag-out; crossing the OS drag threshold
+      emits dragOutRequested(start_frac, end_frac). A click there that
+      never crosses the threshold is a no-op.
+    - Ctrl+left press-drag anywhere: arms a full-clip drag-out; crossing
+      the OS drag threshold emits dragFullClipRequested().
     """
 
     manualSelectionChanged = Signal(float, float)  # start_frac, end_frac
     manualSelectionCleared = Signal()
     contextMenuRequested = Signal(QPointF)
+    # Drag-out: the user is pulling a slice OUT of the app (OS file drag).
+    # "selection" mode reports the armed selection's fracs; "full" (Ctrl)
+    # asks the host for the whole clip regardless of selection.
+    dragOutRequested = Signal(float, float)  # start_frac, end_frac
+    dragFullClipRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,6 +66,8 @@ class SelectableWaveform(WaveformView):
         self._drag_anchor: float | None = None  # mouse press x, as frac
         self._is_dragging: bool = False
         self._dragging_edge: str | None = None  # "start" | "end" | None
+        self._drag_out_origin: QPointF | None = None
+        self._drag_out_mode: str | None = None  # "selection" | "full"
         self._idle_cursor: Qt.CursorShape = Qt.CrossCursor
         self.setMouseTracking(True)
         self.setCursor(self._idle_cursor)
@@ -80,7 +94,11 @@ class SelectableWaveform(WaveformView):
         overwrite the manual selection while this returns True, otherwise
         a periodic refresh tick will snap the drag back to its prior
         position."""
-        return self._is_dragging or self._dragging_edge is not None
+        return (
+            self._is_dragging
+            or self._dragging_edge is not None
+            or self._drag_out_origin is not None
+        )
 
     def set_manual_selection(
         self,
@@ -144,6 +162,11 @@ class SelectableWaveform(WaveformView):
             return "end"
         return None
 
+    def _frac_inside_selection(self, frac: float) -> bool:
+        if not self.has_manual_selection():
+            return False
+        return float(self._manual_start) < frac < float(self._manual_end)
+
     def _refresh_hover_cursor(self, x: float) -> None:
         """Update the mouse cursor based on whether we're over an edge."""
         if self._edge_at(x) is not None:
@@ -153,7 +176,13 @@ class SelectableWaveform(WaveformView):
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.LeftButton:
-            # Priority 1: grab an existing mark edge and drag it
+            # Priority 1: Ctrl+press arms a full-clip drag-out
+            if ev.modifiers() & Qt.ControlModifier:
+                self._drag_out_origin = ev.position()
+                self._drag_out_mode = "full"
+                ev.accept()
+                return
+            # Priority 2: grab an existing mark edge and drag it
             edge = self._edge_at(ev.position().x())
             if edge is not None:
                 self._dragging_edge = edge
@@ -162,7 +191,13 @@ class SelectableWaveform(WaveformView):
                 self.setCursor(Qt.SizeHorCursor)
                 ev.accept()
                 return
-            # Priority 2: begin a new selection drag
+            # Priority 3: press inside the selection arms a drag-out
+            if self._frac_inside_selection(self._pos_frac(ev.position().x())):
+                self._drag_out_origin = ev.position()
+                self._drag_out_mode = "selection"
+                ev.accept()
+                return
+            # Priority 4: begin a new selection drag
             self._drag_anchor = self._pos_frac(ev.position().x())
             self._is_dragging = True
             ev.accept()
@@ -177,6 +212,23 @@ class SelectableWaveform(WaveformView):
 
     def mouseMoveEvent(self, ev) -> None:  # noqa: N802
         x = ev.position().x()
+
+        # Armed drag-out: fire once past the OS drag threshold. The host
+        # runs a blocking QDrag from the signal handler, so disarm first.
+        if self._drag_out_origin is not None:
+            delta = ev.position() - self._drag_out_origin
+            if delta.manhattanLength() >= QApplication.startDragDistance():
+                mode = self._drag_out_mode
+                self._drag_out_origin = None
+                self._drag_out_mode = None
+                if mode == "full":
+                    self.dragFullClipRequested.emit()
+                elif self.has_manual_selection():
+                    self.dragOutRequested.emit(
+                        float(self._manual_start), float(self._manual_end)
+                    )
+            ev.accept()
+            return
 
         # Edge-drag takes priority over new-selection drag
         if self._dragging_edge is not None and self.has_manual_selection():
@@ -214,6 +266,13 @@ class SelectableWaveform(WaveformView):
 
     def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.LeftButton:
+            # An armed drag-out that never crossed the threshold is a
+            # plain click — disarm and leave the selection untouched.
+            if self._drag_out_origin is not None:
+                self._drag_out_origin = None
+                self._drag_out_mode = None
+                ev.accept()
+                return
             # Finish an edge drag
             if self._dragging_edge is not None:
                 self._dragging_edge = None

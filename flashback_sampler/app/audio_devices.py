@@ -12,9 +12,20 @@ the right concrete source object.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
+# Optional dependency: every other consumer in this module imports
+# sounddevice lazily inside a try/except so the module still loads
+# where the backend is absent. The probe helpers below reference it as
+# a module attribute (also what tests monkeypatch), so guard the import
+# and let the probes' permissive except-blocks absorb `sd = None`.
+try:
+    import sounddevice as sd
+except Exception:  # pragma: no cover - environment without sounddevice
+    sd = None  # type: ignore[assignment]
+
+from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.platform.capabilities import loopback_supported
 
 
@@ -280,3 +291,157 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
         )
 
     raise ValueError(f"unknown CaptureDevice.kind: {device.kind!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Rate probe
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Outcome of asking whether a device can honestly deliver a rate."""
+    ok: bool
+    effective_rate: int
+    message: str = ""
+
+
+def _wasapi_output_mix_rate(name_hint: str | None) -> int | None:
+    """
+    Shared-mode mix-format rate of the WASAPI output device matching
+    `name_hint` (falling back to the default output). PortAudio reports
+    a WASAPI output's `default_samplerate` from its mix format, which is
+    exactly the rate Windows hands to loopback captures. None = unknown.
+    """
+    try:
+        hostapis = sd.query_hostapis()
+        was = next(
+            (i for i, h in enumerate(hostapis) if "WASAPI" in h.get("name", "")),
+            None,
+        )
+        if was is None:
+            return None
+        devices = sd.query_devices()
+        outputs = [
+            d for d in devices
+            if d["hostapi"] == was and d["max_output_channels"] > 0
+        ]
+        if name_hint:
+            # First containment match wins — a heuristic that can pick a
+            # sibling device when names overlap (e.g. "Speakers" vs
+            # "Speakers 2"). Acceptable: a wrong pick still yields a real
+            # mix rate, and the default-output fallback below covers the
+            # no-match case.
+            hint = name_hint.casefold()
+            for d in outputs:
+                if hint in d["name"].casefold():
+                    return int(d["default_samplerate"])
+        didx = hostapis[was].get("default_output_device", -1)
+        if didx is not None and didx >= 0:
+            return int(devices[didx]["default_samplerate"])
+    except Exception:
+        # Probe must never raise — degrade permissively per spec (see
+        # probe_capture_rate's docstring). Any WASAPI/query oddity here
+        # just means "unknown mix rate", not a fatal error; don't narrow
+        # this to specific exception types without re-checking that
+        # mandate first.
+        return None
+    return None
+
+
+def _strip_loopback_hint_suffix(name: str) -> str:
+    """
+    `CaptureDevice.name` for a loopback device is built as
+    f"{spk.name}  [loopback]" (see `_list_loopback_devices`), so the raw
+    name never appears verbatim in sounddevice's WASAPI output device
+    list. Strip the trailing "[loopback]" marker (and the whitespace
+    around it) so `_wasapi_output_mix_rate`'s containment match can find
+    the real output device.
+    """
+    stripped = name.rstrip()
+    suffix = "[loopback]"
+    if stripped.casefold().endswith(suffix):
+        stripped = stripped[: -len(suffix)].rstrip()
+    return stripped
+
+
+def probe_capture_rate(
+    device: CaptureDevice | None,
+    sample_rate: int,
+    channels: int,
+) -> ProbeResult:
+    """
+    Can this source honestly deliver `sample_rate`? Loopback rates above
+    the output mix format add no information (Windows hands loopback
+    audio at the mix rate), so we fall back with a notice instead of
+    silently upsampling. Unknown capabilities are treated permissively —
+    the capture backends already handle format conversion.
+    """
+    if sd is None:
+        # No sounddevice backend to ask — can't probe, trust the request.
+        return ProbeResult(True, sample_rate)
+    kind = device.kind if device is not None else "loopback"
+    if kind == "input":
+        try:
+            # CaptureDevice.id for kind="input" is a sounddevice index
+            # stored as a string (see build_capture_source's int(device.id)
+            # for the same pattern). Passing the raw string here would make
+            # sounddevice treat it as a name-substring query instead of an
+            # index, so every real device would misreport as unsupported.
+            idx = int(device.id)
+        except (TypeError, ValueError):
+            # Id isn't a parseable index (shouldn't happen for real devices,
+            # but defend against it) — we can't probe, so degrade
+            # permissively per spec: trust the requested rate.
+            return ProbeResult(True, sample_rate)
+        try:
+            # Rate-only probe: channels are deliberately left out so a
+            # channel-count mismatch isn't misreported as a sample-rate
+            # problem (the notice below suggests a rate fallback, which
+            # would not fix a channel issue).
+            sd.check_input_settings(
+                device=idx, samplerate=sample_rate, dtype="float32",
+            )
+            return ProbeResult(True, sample_rate)
+        except Exception:
+            # Probe must never raise — degrade permissively per spec: any
+            # failure here (unsupported rate, missing device, driver quirk)
+            # falls back to the device's own reported default rate instead
+            # of propagating. Don't narrow this without re-checking that
+            # mandate first.
+            try:
+                info = sd.query_devices(idx)
+                fallback = int(info["default_samplerate"])
+            except Exception:
+                fallback = 48_000
+            return ProbeResult(
+                False, fallback,
+                f"'{device.name}' can't open at {sample_rate} Hz — "
+                f"capturing at {fallback} Hz instead.",
+            )
+    # loopback / process_loopback: capped by the output mix format
+    name_hint = device.name if device is not None else None
+    if name_hint is not None:
+        name_hint = _strip_loopback_hint_suffix(name_hint)
+    mix = _wasapi_output_mix_rate(name_hint)
+    if mix is None or sample_rate <= mix:
+        return ProbeResult(True, sample_rate)
+    return ProbeResult(
+        False, mix,
+        f"Output mix format is {mix} Hz — a {sample_rate} Hz capture "
+        f"won't contain content above {mix // 2} Hz. "
+        f"Capturing at {mix} Hz instead.",
+    )
+
+
+def apply_rate_probe(
+    preset: QualityPreset,
+    device: CaptureDevice | None,
+) -> tuple[QualityPreset, str | None]:
+    """Probe `device` for `preset.sample_rate`; return the (possibly
+    rate-adjusted) preset plus a user-facing notice, or (preset, None)."""
+    probe = probe_capture_rate(device, preset.sample_rate, preset.channels)
+    if probe.ok:
+        return preset, None
+    adjusted = replace(preset, sample_rate=probe.effective_rate)
+    return adjusted, probe.message
