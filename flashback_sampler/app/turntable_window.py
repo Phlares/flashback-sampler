@@ -1068,8 +1068,15 @@ class TurntableWindow(QMainWindow):
         checkouts = list(slot.checkout_manager.list())  # oldest first
         n = len(checkouts)
 
-        # Drop cached bins for checkouts that no longer exist.
-        live_ids = {c.id for c in checkouts}
+        # Drop cached bins for checkouts that no longer exist. The cache
+        # spans ALL slots (checkout ids are globally unique), so prune
+        # against every slot's live checkouts — pruning against just the
+        # active slot would wipe other slots' entries on every switch.
+        live_ids = {
+            c.id
+            for s in self._state.slots
+            for c in s.checkout_manager.list()
+        }
         for stale in [k for k in self._clip_bins_cache if k not in live_ids]:
             del self._clip_bins_cache[stale]
 

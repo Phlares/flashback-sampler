@@ -718,6 +718,32 @@ def test_refresh_clip_side_prunes_cache_for_discarded_checkouts(qapp, state):
         win.close()
 
 
+def test_refresh_clip_side_keeps_cache_for_inactive_slots(qapp, state):
+    """The bins cache is shared across slots (checkout ids are globally
+    unique) — refreshing while one slot is active must not evict cached
+    bins belonging to another slot's checkouts."""
+    from flashback_sampler.core.quality_presets import QualityPreset
+
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        co_a = state.active_slot.checkout_manager.create(duration_s=0.2)
+        win._refresh_clip_side(auto_select_newest=True)
+        assert co_a.id in win._clip_bins_cache
+
+        state.add_slot(
+            QualityPreset(
+                name="CUSTOM", sample_rate=48000, channels=2,
+                buffer_seconds=60.0,
+            ),
+            name="second",
+        )
+        win._switch_to_slot(len(state.slots) - 1)
+        assert co_a.id in win._clip_bins_cache  # survived the slot switch
+    finally:
+        win.close()
+
+
 def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(qapp, state, tmp_path, monkeypatch):
     """The sample-bank flow mints a checkout per drag; at the manager's
     active-checkout cap the oldest `saved` clip is evicted (its pool file
