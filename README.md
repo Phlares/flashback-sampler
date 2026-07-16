@@ -24,7 +24,7 @@ python -m flashback_sampler.app.main
 CLI flags:
 
 - `--buffer-minutes N` — ring buffer length (default 15). Use `0.5` to force a rollover quickly when testing.
-- `--sample-rate N` — capture sample rate (default 48000).
+- `--sample-rate N` — capture sample rate (default 48000). The **Add Source** dialog offers rates up to 192 kHz; when a device can't honestly deliver a requested rate (e.g. loopback is capped at the Windows output mix format), Flashback notifies you and captures at the device's true rate instead.
 - `--channels N` — 1 mono or 2 stereo (default 2).
 
 ## Using it
@@ -37,6 +37,7 @@ The window is a pair of turntables. The **left deck** is the live ring buffer (y
 4. **OUT →** checks out the current selection as a frozen in-RAM clip onto the right deck. The ring buffer keeps recording throughout.
 5. **Preview & trim.** Select a clip, then **PLAY** (or the spacebar) auditions it. The clip **− / + / ◀ / ▶** controls trim the in/out points; **LOOP** repeats the trimmed range.
 6. **SAVE** opens a file dialog (WAV or FLAC); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
+7. **Drag it into your DAW.** Grab the inside of a selection band on either deck and drag it out of the window — the slice lands as a 32-bit-float WAV on whatever accepts file drops (an Ableton track, Explorer, a sampler). Ctrl+drag on the clip deck exports the whole untrimmed clip. Exports live in the pool folder (Preferences → Export; default `Documents/flashback-sampler/exports`) and the dragged clip stays on the right deck as your sample bank — never move pool files a DAW project still references.
 
 > Set your **preview output to a different device than your capture source** (e.g. headphones while capturing speakers) so the preview doesn't feed back into the ring.
 

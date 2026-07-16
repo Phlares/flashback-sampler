@@ -21,16 +21,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from flashback_sampler.app.audio_devices import CaptureDevice, list_capture_devices
+from flashback_sampler.app.audio_devices import (
+    CaptureDevice,
+    apply_rate_probe,
+    list_capture_devices,
+)
 from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
+    load_export_bit_depth,
+    load_export_pool_dir,
     load_global_hotkeys_enabled,
     load_show_notifications,
+    save_export_bit_depth,
+    save_export_pool_dir,
     save_global_hotkeys_enabled,
     save_show_notifications,
 )
+from flashback_sampler.app.drag_out import perform_file_drag
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
@@ -40,6 +49,10 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+from flashback_sampler.core.drag_export import (
+    render_drag_file,
+    sanitize_source_name,
+)
 from flashback_sampler.core.source_status import (
     SILENCE_DBFS,
     Severity,
@@ -220,6 +233,13 @@ class TurntableWindow(QMainWindow):
         # drifts with the live buffer's advancing write head. Keyed by
         # checkout id so switching clips preserves each one's trim.
         self._clip_trim_fracs: dict[str, tuple[float, float]] = {}
+        # Waveform bins per checkout id ("ring_amp" 540-bin radial amp,
+        # "panel_bins" 360-bin min/max). Checkout audio is immutable, so
+        # these are computed once — without the cache every refresh
+        # recomputes every banked clip and refresh cost grows with each
+        # drag (measured live: 0.17s -> 1.7s over 8 drags). Pruned in
+        # _refresh_clip_side when checkouts disappear.
+        self._clip_bins_cache: dict[str, dict[str, np.ndarray]] = {}
 
         # Tracks whether the scrub player was rolling on the previous
         # tick — used to auto-restart on loop when playback drains.
@@ -299,6 +319,11 @@ class TurntableWindow(QMainWindow):
             "transport.stop_recording": "transport.toggle_recording",
         }):
             self._binding_table.save()
+
+        # Drag-out export prefs — pool dir + bit depth used when rendering
+        # a clip for an OS drag (see _render_for_drag).
+        self._export_pool_dir: Path = load_export_pool_dir()
+        self._export_bit_depth: str = load_export_bit_depth()
 
         # Global hotkeys (fire while minimized) — opt-in, Windows-only for now.
         self._global_hotkeys_enabled = load_global_hotkeys_enabled()
@@ -507,6 +532,14 @@ class TurntableWindow(QMainWindow):
         save_global_hotkeys_enabled(enabled)
         self._apply_global_hotkeys(enabled)
 
+    def _set_export_pool_dir(self, path_str: str) -> None:
+        self._export_pool_dir = Path(path_str)
+        save_export_pool_dir(path_str)
+
+    def _set_export_bit_depth(self, depth: str) -> None:
+        self._export_bit_depth = depth
+        save_export_bit_depth(depth)
+
     def _open_preferences_dialog(self) -> None:
         dlg = PreferencesDialog(
             show_notifications=self._show_notifications,
@@ -514,6 +547,10 @@ class TurntableWindow(QMainWindow):
             global_hotkeys_enabled=self._global_hotkeys_enabled,
             on_global_hotkeys_changed=self._set_global_hotkeys_enabled,
             global_hotkeys_supported=global_hotkeys_supported(),
+            export_pool_dir=str(self._export_pool_dir),
+            on_export_pool_dir_changed=self._set_export_pool_dir,
+            export_bit_depth=self._export_bit_depth,
+            on_export_bit_depth_changed=self._set_export_bit_depth,
             parent=self,
         )
         dlg.exec()
@@ -573,6 +610,13 @@ class TurntableWindow(QMainWindow):
         self.buffer_panel.waveform.manualSelectionCleared.connect(on_buffer_clear)
         self.clip_panel.waveform.manualSelectionChanged.connect(on_clip_sel)
         self.clip_panel.waveform.manualSelectionCleared.connect(on_clip_clear)
+
+        self.clip_panel.waveform.dragOutRequested.connect(self._on_clip_drag_out)
+        self.clip_panel.waveform.dragFullClipRequested.connect(self._on_clip_drag_full)
+
+        # The buffer deck deliberately gets no dragFullClipRequested
+        # connection — "full clip" has no meaning on a rolling ring.
+        self.buffer_panel.waveform.dragOutRequested.connect(self._on_buffer_drag_out)
 
     def _wire_controls(self) -> None:
         # Transport
@@ -962,33 +1006,45 @@ class TurntableWindow(QMainWindow):
         # Refresh clip side to show the new slot's checkouts
         self._refresh_clip_side()
 
-    def _on_checkout_clicked(self) -> None:
-        if not self._state.slots:
-            return
-        slot = self._state.active_slot
+    def _resolve_buffer_selection_abs(self, slot) -> tuple[int, int] | None:
+        """Resolve the buffer deck's current selection — a manually drawn
+        band ("user" mode) or the automatic anchor/duration window
+        ("default" mode) — to an absolute sample range, clamped to what
+        the ring still holds. Returns None when the range is empty or has
+        scrolled out entirely. Shared by the OUT button and the buffer
+        drag-out so both accept exactly the same selections."""
         buf = slot.buffer
         total = int(buf.total_written)
         sr = int(buf.sample_rate)
-
-        # Determine abs range from current selection mode
         if self._buffer_sel_mode == "user" and self._buffer_sel_abs is not None:
             abs_start, abs_end = self._buffer_sel_abs
         else:
-            # Default mode — use slot.duration_preset_idx + anchor_offset_s from "now"
+            # Default mode — slot.duration_preset_idx + anchor_offset_s
+            # from "now"
             duration_s = self._active_duration_s(slot)
             anchor_s = max(0.0, slot.anchor_offset_s)
             abs_end = total - int(anchor_s * sr)
             abs_start = abs_end - int(duration_s * sr)
-
         # Clamp abs_start to what's still in the ring
         oldest_available = max(0, total - buf.buffer_size)
         abs_start = max(abs_start, oldest_available)
         if abs_end <= abs_start:
+            return None
+        return (abs_start, abs_end)
+
+    def _on_checkout_clicked(self) -> None:
+        if not self._state.slots:
+            return
+        slot = self._state.active_slot
+
+        sel_abs = self._resolve_buffer_selection_abs(slot)
+        if sel_abs is None:
             QMessageBox.warning(
                 self, "Check out failed",
                 "Selection is empty or has already scrolled out of the buffer."
             )
             return
+        abs_start, abs_end = sel_abs
 
         try:
             slot.checkout_manager.create_from_abs_range(abs_start, abs_end)
@@ -1012,6 +1068,18 @@ class TurntableWindow(QMainWindow):
         checkouts = list(slot.checkout_manager.list())  # oldest first
         n = len(checkouts)
 
+        # Drop cached bins for checkouts that no longer exist. The cache
+        # spans ALL slots (checkout ids are globally unique), so prune
+        # against every slot's live checkouts — pruning against just the
+        # active slot would wipe other slots' entries on every switch.
+        live_ids = {
+            c.id
+            for s in self._state.slots
+            for c in s.checkout_manager.list()
+        }
+        for stale in [k for k in self._clip_bins_cache if k not in live_ids]:
+            del self._clip_bins_cache[stale]
+
         # Resize clip turntable. Keep a minimum of 1 ring for visual
         # consistency when there are no checkouts yet.
         self.clip_turntable.set_track_count(max(n, 1))
@@ -1033,13 +1101,17 @@ class TurntableWindow(QMainWindow):
             self.clip_panel.set_times("0:00.00", "0:00.00")
             return
 
-        # Plot each checkout onto its ring.
+        # Plot each checkout onto its ring (bins cached — audio is immutable).
         for j, co in enumerate(checkouts):
-            bins = _peak_bins_from_audio(co.audio, n_bins=540)
-            amp = (
-                (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
-            ).astype(np.float32)
-            amp = np.clip(amp, 0.0, 1.0)
+            entry = self._clip_bins_cache.setdefault(co.id, {})
+            amp = entry.get("ring_amp")
+            if amp is None:
+                bins = _peak_bins_from_audio(co.audio, n_bins=540)
+                amp = (
+                    (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
+                ).astype(np.float32)
+                amp = np.clip(amp, 0.0, 1.0)
+                entry["ring_amp"] = amp
             self.clip_turntable.set_track_waveform(j, amp, fill_fraction=1.0)
 
         # Decide which clip's waveform the clip PANEL displays
@@ -1052,7 +1124,11 @@ class TurntableWindow(QMainWindow):
 
     def _display_clip_in_panel(self, co, index: int, total: int) -> None:
         """Render a single checkout's full audio into the clip WaveformPanel."""
-        bins = _peak_bins_from_audio(co.audio, n_bins=360)
+        entry = self._clip_bins_cache.setdefault(co.id, {})
+        bins = entry.get("panel_bins")
+        if bins is None:
+            bins = _peak_bins_from_audio(co.audio, n_bins=360)
+            entry["panel_bins"] = bins
         self.clip_panel.waveform.set_data(bins)
         # Clip timeline = fixed clip duration; lets the selection band
         # render its duration label on top.
@@ -1091,9 +1167,7 @@ class TurntableWindow(QMainWindow):
         return checkouts[idx]
 
     def _suggested_clip_filename(self, slot, co, suffix: str = "") -> str:
-        import re
-        base_slot = re.sub(r"[^A-Za-z0-9_-]+", "_", slot.name or "").strip("_").lower() or "source"
-        base = f"flashback_{base_slot}_{co.id}"
+        base = f"flashback_{sanitize_source_name(slot.name)}_{co.id}"
         if suffix:
             base += f"_{suffix}"
         return base
@@ -1140,6 +1214,132 @@ class TurntableWindow(QMainWindow):
             QMessageBox.warning(self, "Save failed", str(e))
             return
         self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
+
+    def _render_for_drag(self, slot, co, trimmed: bool):
+        """Render `co` into the export pool; returns the path or None on
+        failure (already reported to the user)."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return render_drag_file(
+                slot.checkout_manager,
+                co.id,
+                self._export_pool_dir,
+                slot.name,
+                bit_depth=self._export_bit_depth,
+                trimmed=trimmed,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Export failed", str(e))
+            return None
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _on_clip_drag_out(self, start_frac: float, end_frac: float) -> None:
+        # The clip selection IS the trim (kept in sync by on_clip_sel),
+        # so dragging the band exports the trimmed range.
+        self._drag_current_clip(trimmed=True)
+
+    def _on_clip_drag_full(self) -> None:
+        self._drag_current_clip(trimmed=False)
+
+    def _drag_current_clip(self, trimmed: bool) -> None:
+        co = self._currently_displayed_checkout()
+        if co is None:
+            return
+        slot = self._state.active_slot
+        path = self._render_for_drag(slot, co, trimmed)
+        if path is None:
+            return
+        self._complete_drag(
+            slot, co, path, self.clip_panel.waveform,
+            discard_on_cancel=False, auto_select_newest=False,
+        )
+
+    def _complete_drag(
+        self,
+        slot,
+        co,
+        path,
+        source_widget,
+        *,
+        discard_on_cancel: bool,
+        auto_select_newest: bool,
+    ) -> None:
+        """Shared tail of both decks' drag-out flows: run the blocking OS
+        drag, then commit (mark saved + refresh) or roll back (delete the
+        just-rendered file; discard the checkout too when it was created
+        just for this drag)."""
+        if perform_file_drag(source_widget, path):
+            try:
+                slot.checkout_manager.mark_saved(co.id)
+            except KeyError:
+                # Checkout was discarded while the drag loop ran; the
+                # exported file is still valid — nothing to flip.
+                pass
+            self._refresh_clip_side(auto_select_newest=auto_select_newest)
+            self.statusBar().showMessage(f"Exported {path.name}", 4000)
+        else:
+            if discard_on_cancel:
+                slot.checkout_manager.discard(co.id)
+            path.unlink(missing_ok=True)
+
+    def _on_buffer_drag_out(self, start_frac: float, end_frac: float) -> None:
+        """Snipe the current buffer selection straight out of the app:
+        implicit checkout → render → OS drag. On accept the checkout
+        stays on the clip deck as `saved` (the pool + deck form the
+        sample bank); on cancel it is discarded.
+
+        The buffer selection deliberately survives a successful drag so
+        the same slice can be dragged onto several DAW tracks in a row;
+        each repeat mints a new saved checkout + pool file by design.
+
+        Works in both selection modes: a manually drawn band, or the
+        automatic anchor/duration window painted in "default" mode —
+        the same range the OUT button would check out."""
+        slot = self._state.active_slot
+        sel_abs = self._resolve_buffer_selection_abs(slot)
+        if sel_abs is None:
+            self.statusBar().showMessage(
+                "Drag-out failed: selection is empty or has already "
+                "scrolled out of the buffer.", 4000,
+            )
+            return
+        co = None
+        while co is None:
+            try:
+                co = slot.checkout_manager.create_from_abs_range(*sel_abs)
+            except (RuntimeError, ValueError) as e:
+                # At the active-checkout / RAM cap, make room by evicting
+                # the oldest `saved` clip — its pool file is the durable
+                # record. Any other failure (range lapped, etc.) reports.
+                at_cap = (
+                    "Maximum active checkouts" in str(e)
+                    or "RAM cap" in str(e)
+                )
+                if not (at_cap and self._evict_oldest_saved_checkout(slot)):
+                    self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
+                    return
+        path = self._render_for_drag(slot, co, trimmed=True)
+        if path is None:
+            slot.checkout_manager.discard(co.id)
+            return
+        self._complete_drag(
+            slot, co, path, self.buffer_panel.waveform,
+            discard_on_cancel=True, auto_select_newest=True,
+        )
+
+    def _evict_oldest_saved_checkout(self, slot) -> bool:
+        """Discard the oldest checkout in `saved` state to make room for
+        a new drag checkout. Saved clips live on durably as their export
+        pool file; `pending` clips are the user's working set and are
+        never evicted. Returns False when nothing was evictable."""
+        for co in slot.checkout_manager.list():  # oldest first
+            if co.state == "saved":
+                slot.checkout_manager.discard(co.id)
+                self._clip_trim_fracs.pop(co.id, None)
+                self._clip_bins_cache.pop(co.id, None)
+                return True
+        return False
 
     def _discard_current_clip(self) -> None:
         co = self._currently_displayed_checkout()
@@ -1268,16 +1468,25 @@ class TurntableWindow(QMainWindow):
         if preset is None:
             return
         name = dlg.result_name() or default_name
+        device = dlg.result_device()
+        preset = self._probe_and_notify(preset, device)
         try:
             self._state.add_slot(preset, name=name)
         except Exception as e:
             QMessageBox.warning(self, "Add source failed", str(e))
             return
         new_idx = len(self._state.slots) - 1
-        device = dlg.result_device()
         if device is not None and 0 <= new_idx < len(self._state.slots):
             self._state.slots[new_idx].capture_spec = device
         self._finalize_add_source(new_idx)
+
+    def _probe_and_notify(self, preset, device):
+        """Rate-probe the requested preset against the chosen device;
+        show the honest-fallback notice when the rate was adjusted."""
+        adjusted, notice = apply_rate_probe(preset, device)
+        if notice:
+            QMessageBox.information(self, "Sample rate adjusted", notice)
+        return adjusted
 
     def _refresh_source_indicators(self) -> None:
         """Update the NavBar source chips to reflect current slot armed/capturing state."""

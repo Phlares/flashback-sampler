@@ -537,3 +537,322 @@ def test_rename_slot_cancel_keeps_name(qapp, state, monkeypatch):
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
     win._rename_slot(0)
     assert state.slots[0].name == original
+
+
+def _write_one_second(state):
+    import numpy as np
+    state.active_slot.buffer.write(
+        np.zeros((state.active_slot.buffer.sample_rate, 2), dtype=np.float32)
+    )
+
+
+def test_clip_drag_full_exports_and_marks_saved(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_clip_drag_full()
+        assert mgr.get(co.id).state == "saved"
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_clip_drag_cancel_deletes_file_and_keeps_clip(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: False,
+        )
+        win._on_clip_drag_full()
+        assert mgr.get(co.id).state == "pending"
+        assert list(tmp_path.glob("*.wav")) == []
+    finally:
+        win.close()
+
+
+def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
+    import soundfile as sf
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        n = co.audio.shape[0]
+        co.trim_in_samples = n // 4
+        co.trim_out_samples = n // 2
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_clip_drag_out(0.25, 0.5)
+        files = list(tmp_path.glob("*.wav"))
+        assert len(files) == 1
+        assert sf.info(str(files[0])).frames == n // 2 - n // 4
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_persists_saved_checkout_on_accept(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        cos = state.active_slot.checkout_manager.list()
+        assert len(cos) == 1
+        assert cos[0].state == "saved"
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_cancel_discards_checkout_and_file(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: False,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        assert state.active_slot.checkout_manager.list() == []
+        assert list(tmp_path.glob("*.wav")) == []
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_default_mode_drags_duration_window(qapp, state, tmp_path, monkeypatch):
+    """The automatic (default-mode) selection band must be draggable —
+    it resolves to the same anchor/duration window the OUT button uses.
+    Regression: the handler used to silently drop non-"user" drags even
+    though the band is painted as a draggable selection every tick."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_mode = "default"
+        win._buffer_sel_abs = None
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_buffer_drag_out(0.0, 1.0)
+        cos = state.active_slot.checkout_manager.list()
+        assert len(cos) == 1
+        assert cos[0].state == "saved"
+        # Window is clamped to what's buffered: exactly the 1 s written.
+        sr = state.active_slot.buffer.sample_rate
+        assert cos[0].audio.shape[0] == sr
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_refresh_clip_side_caches_peak_bins_per_checkout(qapp, state, monkeypatch):
+    """Waveform bins are computed once per checkout, not on every refresh —
+    otherwise refresh cost grows with every banked clip (measured live:
+    0.17s -> 1.7s over 8 drags)."""
+    import flashback_sampler.app.turntable_window as tw
+
+    calls = []
+    real = tw._peak_bins_from_audio
+    monkeypatch.setattr(
+        tw, "_peak_bins_from_audio",
+        lambda audio, n_bins: calls.append(n_bins) or real(audio, n_bins),
+    )
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        mgr.create(duration_s=0.2)
+        mgr.create(duration_s=0.2)
+        win._refresh_clip_side(auto_select_newest=True)
+        first_pass = len(calls)
+        assert first_pass > 0
+        win._refresh_clip_side()
+        win._refresh_clip_side()
+        assert len(calls) == first_pass  # all hits served from cache
+    finally:
+        win.close()
+
+
+def test_refresh_clip_side_prunes_cache_for_discarded_checkouts(qapp, state):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        co = mgr.create(duration_s=0.2)
+        win._refresh_clip_side(auto_select_newest=True)
+        assert co.id in win._clip_bins_cache
+        mgr.discard(co.id)
+        win._refresh_clip_side()
+        assert co.id not in win._clip_bins_cache
+    finally:
+        win.close()
+
+
+def test_refresh_clip_side_keeps_cache_for_inactive_slots(qapp, state):
+    """The bins cache is shared across slots (checkout ids are globally
+    unique) — refreshing while one slot is active must not evict cached
+    bins belonging to another slot's checkouts."""
+    from flashback_sampler.core.quality_presets import QualityPreset
+
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        co_a = state.active_slot.checkout_manager.create(duration_s=0.2)
+        win._refresh_clip_side(auto_select_newest=True)
+        assert co_a.id in win._clip_bins_cache
+
+        state.add_slot(
+            QualityPreset(
+                name="CUSTOM", sample_rate=48000, channels=2,
+                buffer_seconds=60.0,
+            ),
+            name="second",
+        )
+        win._switch_to_slot(len(state.slots) - 1)
+        assert co_a.id in win._clip_bins_cache  # survived the slot switch
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(qapp, state, tmp_path, monkeypatch):
+    """The sample-bank flow mints a checkout per drag; at the manager's
+    active-checkout cap the oldest `saved` clip is evicted (its pool file
+    is the durable record) so drags keep working."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        mgr = state.active_slot.checkout_manager
+        # Fill to the cap with saved checkouts (as prior drags would)
+        cap = mgr._max_active
+        for _ in range(cap):
+            co = mgr.create(duration_s=0.01)
+            mgr.mark_saved(co.id)
+        oldest_id = mgr.list()[0].id
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        ids = [c.id for c in mgr.list()]
+        assert oldest_id not in ids  # evicted
+        assert len(ids) == cap  # newcomer took its place
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_at_cap_without_saved_clips_reports_failure(qapp, state, tmp_path, monkeypatch):
+    """Pending (unsaved) clips are the user's working set — never evicted."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.active_slot.buffer.sample_rate
+        mgr = state.active_slot.checkout_manager
+        cap = mgr._max_active
+        for _ in range(cap):
+            mgr.create(duration_s=0.01)  # all stay pending
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_abs = (0, sr // 2)
+        win._buffer_sel_mode = "user"
+        called = []
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: called.append(path) or True,
+        )
+        win._on_buffer_drag_out(0.0, 0.5)
+        assert called == []
+        assert len(mgr.list()) == cap  # nothing evicted
+    finally:
+        win.close()
+
+
+def test_buffer_drag_out_with_empty_buffer_is_noop(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        win._export_pool_dir = tmp_path
+        win._buffer_sel_mode = "default"
+        called = []
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda widget, path: called.append(path) or True,
+        )
+        win._on_buffer_drag_out(0.0, 1.0)
+        assert called == []
+        assert state.active_slot.checkout_manager.list() == []
+    finally:
+        win.close()
+
+
+def test_set_export_prefs_persist_and_apply(qapp, state, tmp_path, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+    saved = {}
+    monkeypatch.setattr(
+        tw, "save_export_pool_dir", lambda p: saved.__setitem__("dir", str(p))
+    )
+    monkeypatch.setattr(
+        tw, "save_export_bit_depth", lambda d: saved.__setitem__("depth", d)
+    )
+    win = TurntableWindow(state)
+    try:
+        win._set_export_pool_dir(str(tmp_path / "pool"))
+        win._set_export_bit_depth("PCM_24")
+        assert win._export_pool_dir == tmp_path / "pool"
+        assert win._export_bit_depth == "PCM_24"
+        assert saved == {"dir": str(tmp_path / "pool"), "depth": "PCM_24"}
+    finally:
+        win.close()
+
+
+def test_add_source_applies_rate_probe(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+    from flashback_sampler.core.quality_presets import QualityPreset
+
+    adjusted = QualityPreset(
+        name="CUSTOM", sample_rate=48000, channels=2, buffer_seconds=60.0
+    )
+    monkeypatch.setattr(
+        tw, "apply_rate_probe", lambda preset, device: (adjusted, "mix is 48k")
+    )
+    win = TurntableWindow(state)
+    try:
+        requested = QualityPreset(
+            name="CUSTOM", sample_rate=96000, channels=2, buffer_seconds=60.0
+        )
+        result = win._probe_and_notify(requested, None)
+        assert result.sample_rate == 48000  # notice shown via stubbed QMessageBox
+    finally:
+        win.close()

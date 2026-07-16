@@ -10,9 +10,14 @@ from typing import Callable
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -26,6 +31,10 @@ class PreferencesDialog(QDialog):
         global_hotkeys_enabled: bool = False,
         on_global_hotkeys_changed: Callable[[bool], None] | None = None,
         global_hotkeys_supported: bool = True,
+        export_pool_dir: str = "",
+        on_export_pool_dir_changed: Callable[[str], None] | None = None,
+        export_bit_depth: str = "FLOAT",
+        on_export_bit_depth_changed: Callable[[str], None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -61,6 +70,46 @@ class PreferencesDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
         root.addWidget(hint)
+
+        root.addSpacing(10)
+        root.addWidget(QLabel("<b>Export</b>"))
+        dir_row = QHBoxLayout()
+        self.export_dir_edit = QLineEdit(export_pool_dir)
+        self.export_dir_edit.setReadOnly(True)
+        self.export_dir_btn = QPushButton("Browse…")
+
+        def _pick_export_dir() -> None:
+            chosen = QFileDialog.getExistingDirectory(
+                self, "Export folder", self.export_dir_edit.text()
+            )
+            if not chosen:
+                return
+            self.export_dir_edit.setText(chosen)
+            if on_export_pool_dir_changed is not None:
+                on_export_pool_dir_changed(chosen)
+
+        self.export_dir_btn.clicked.connect(_pick_export_dir)
+        dir_row.addWidget(self.export_dir_edit, 1)
+        dir_row.addWidget(self.export_dir_btn)
+        root.addLayout(dir_row)
+
+        self.export_depth_combo = QComboBox()
+        for label, value in (
+            ("32-bit float", "FLOAT"),
+            ("24-bit PCM", "PCM_24"),
+            ("16-bit PCM", "PCM_16"),
+        ):
+            self.export_depth_combo.addItem(label, value)
+        depth_idx = self.export_depth_combo.findData(export_bit_depth)
+        if depth_idx >= 0:
+            self.export_depth_combo.setCurrentIndex(depth_idx)
+
+        def _depth_changed(_i: int) -> None:
+            if on_export_bit_depth_changed is not None:
+                on_export_bit_depth_changed(self.export_depth_combo.currentData())
+
+        self.export_depth_combo.currentIndexChanged.connect(_depth_changed)
+        root.addWidget(self.export_depth_combo)
 
         root.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
