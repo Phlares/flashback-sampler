@@ -76,3 +76,31 @@ jobs:
           name: junit-py${{ matrix.python-version }}
           path: junit.xml
           if-no-files-found: warn
+
+  zig:
+    name: zig (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Format check
+        run: zig fmt --check build.zig src
+      - name: Unit tests (Debug — full safety checks)
+        run: zig build test
+      - name: Build shared library (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Cross-compile health check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows
+          zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu
