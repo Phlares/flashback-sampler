@@ -1,0 +1,8 @@
+# Zig sources must stay LF on every platform. `zig fmt --check` treats
+# CRLF as unformatted, and this repo has core.autocrlf=true (or the
+# Windows CI runner's default) rewriting LF -> CRLF on checkout, which
+# fails the format-check CI gate on Windows only (Linux/macOS check out
+# verbatim). Pin these two extensions to LF so the checked-out bytes
+# always match what `zig fmt` wrote, regardless of local git config.
+*.zig text eol=lf
+*.zon text eol=lf
