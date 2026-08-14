@@ -119,21 +119,55 @@ report as such, never return silently corrupt data.
 Small, flat, out-params, no allocation across the boundary:
 
 ```c
-FbRing*  fb_ring_create(uint32_t rate, uint16_t channels, double seconds); // NULL on OOM
-void     fb_ring_destroy(FbRing*);
-void     fb_ring_write(FbRing*, const float* frames, size_t n);   // RT-safe
-uint64_t fb_ring_total_written(const FbRing*);
-void     fb_ring_set_gain(FbRing*, float);
-float    fb_ring_gain(const FbRing*);
-FbStatus fb_ring_read(FbRing*, uint64_t abs_start, size_t n, float* out);
-FbStatus fb_ring_summary(FbRing*, uint64_t abs_start, uint64_t abs_end,
-                         size_t n_bins, float* min, float* max, float* rms);
-FbStatus fb_wav_write(const char* path, const float* frames, size_t n,
-                      uint32_t rate, uint16_t channels, FbSubtype subtype);
+FbRing*      fb_ring_create(uint32_t rate, uint16_t channels, double seconds); // NULL on OOM
+void         fb_ring_destroy(FbRing*);
+void         fb_ring_write(FbRing*, const float* frames, size_t n_frames); // RT-safe
+uint64_t     fb_ring_total_written(const FbRing*);
+uint64_t     fb_ring_capacity(const FbRing*);        // in frames
+const float* fb_ring_storage(const FbRing*);         // zero-copy view, see below
+void         fb_ring_set_gain(FbRing*, float);
+float        fb_ring_gain(const FbRing*);
+void         fb_ring_flush(FbRing*);
+FbStatus     fb_ring_read(FbRing*, uint64_t abs_start, size_t n_frames, float* out);
+FbStatus     fb_ring_summary_bins(FbRing*, size_t n_bins, uint64_t n_samples,
+                                  uint64_t bin_span_frames, float* out_rms);
+FbStatus     fb_wav_write(const char* path, const float* frames, size_t n_frames,
+                          uint32_t rate, uint16_t channels, FbSubtype subtype);
 ```
 
 `FbStatus`: `OK`, `OVERWRITTEN`, `OUT_OF_RANGE`, `IO_ERROR`, `INVALID_ARG`.
 `FbSubtype`: `FLOAT32`, `PCM_24`, `PCM_16`.
+
+**Refinements over the first draft** (from the code recon; each is the
+smaller, truer surface):
+
+- **Zero-copy storage view instead of a min/max summary query.** Python's
+  `get_peak_bins` deliberately reads ring storage in place via numpy views
+  (30 Hz polling on a ~345 MB ring — copying would saturate memory
+  bandwidth) with its own seqlock verify. The native path keeps that
+  algorithm in Python over `fb_ring_storage` + `fb_ring_total_written`
+  (numpy view via `np.ctypeslib.as_array`), extracted into one shared
+  function used by both implementations. It is visualization code that the
+  eventual UI rewrite replaces anyway — porting it now is waste.
+- **Summary query returns RMS bins only** (`fb_ring_summary_bins`, mirror
+  of `get_summary_bins` semantics: `n_samples = 0` → all available,
+  `bin_span_frames = 0` → window/n_bins), because that is the only summary
+  consumer. YAGNI on per-bin min/max.
+- **`total_written` is the single source of truth.** There is no stored
+  `write_pos`; the writer derives its ring position as
+  `total_written % capacity`. Readers never address beyond
+  `total_written`, so stale bytes past it are unreachable — which makes…
+- **…`fb_ring_flush` one release-store of `total_written = 0`** plus
+  poisoning every summary slot generation (`slot_abs = -1`) plus a hygiene
+  zeroing of storage (off the audio thread). Flush during active capture
+  races at most one audio block into silence — silence is a valid sample,
+  never torn garbage — and one summary slot may transiently mix epochs
+  (~85 ms, self-heals at the slot's next generation). Documented, accepted.
+- **A single factory swaps the app**: five call sites construct buffers
+  today (`app/state.py`, `core/capture.py`, `core/capture_slot.py`,
+  `core/loopback_capture.py`, `core/mixed_capture.py`); the swap PR routes
+  them through one `make_ring_buffer(...)` that returns the native
+  implementation when the library loads, else the Python one.
 
 ## Python integration & parity harness
 
