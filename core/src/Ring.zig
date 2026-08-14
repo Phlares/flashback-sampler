@@ -55,6 +55,19 @@ pub fn deinit(self: *Ring) void {
     self.* = undefined; // poison: use-after-deinit becomes loud in Debug
 }
 
+/// Discard all buffered audio. Because `total_written` is the single
+/// source of truth and readers never address at-or-beyond it, resetting
+/// it to zero makes every stale byte unreachable — no zeroing REQUIRED
+/// for correctness. We zero anyway (hygiene: `.buffer` is exposed as a
+/// zero-copy view to the Python host). Called from a control thread,
+/// never the audio thread. Racing an active writer costs at most one
+/// audio block rendered as silence — silence is a valid sample, never
+/// torn garbage. Documented and accepted in the spec.
+pub fn flush(self: *Ring) void {
+    self.total_written.store(0, .release);
+    @memset(self.frames, 0);
+}
+
 /// RT-SAFE: no locks, no allocation, no failure path. Called from the
 /// audio callback thread. `interleaved.len` must be a multiple of channels.
 pub fn write(self: *Ring, interleaved: []const f32) void {
@@ -272,4 +285,17 @@ test "seqlock stress: concurrent writer never yields torn reads" {
         }
         successes += 1;
     }
+}
+
+test "flush empties the ring; writer restarts cleanly at abs 0" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 8, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 1, 2, 3, 4, 5 });
+    ring.flush();
+    try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
+    var out: [1]f32 = undefined;
+    try std.testing.expectError(error.OutOfRange, ring.read(0, &out)); // nothing readable
+    ring.write(&[_]f32{ 9, 8 });
+    try ring.read(0, &out);
+    try std.testing.expectEqual(@as(f32, 9), out[0]);
 }
