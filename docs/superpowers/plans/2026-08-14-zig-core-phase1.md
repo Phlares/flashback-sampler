@@ -39,17 +39,9 @@
 Run: `zig version && zig env`
 Expected: a 0.16.x version prints. Record the exact string — it is `<ZIGVER>` everywhere below. If `zig` is missing, install per https://ziglang.org/download/ and re-run.
 
-- [ ] **Step 2: Create the epic + sub-issues**
+- [ ] **Step 2: Verify the tracker (already created)**
 
-```bash
-gh issue create --title "Epic: Zig core phase 1 — lock-free memory engine + WAV writer" \
-  --body "Spec: docs/superpowers/specs/2026-08-14-zig-core-phase1-design.md
-Plan: docs/superpowers/plans/2026-08-14-zig-core-phase1.md
-
-Sub-issues: scaffold+CI, seqlock ring, summary ring, WAV writer, ABI+parity harness, app swap."
-```
-
-Then one sub-issue per PR in the task→PR map (6 issues), each titled `Zig core: <prname>` with a one-line body pointing at the spec section, and each linked to the epic (`gh issue edit` with a task-list in the epic body, portfolio convention). Write-at-the-moment: update issues as tasks land, not at session end.
+Epic **#9** with sub-issues **#10** (scaffold, Task 1), **#11** (ring, Tasks 2–3), **#12** (summary, Task 4), **#13** (wav, Task 5), **#14** (abi+parity, Tasks 6–7), **#15** (swap, Task 8) already exist — run `gh issue list` and confirm all seven are open. Repo `CLAUDE.md` carries the tracking convention: write-at-the-moment, `Closes #NN` in each PR body, tick the epic checkbox on merge.
 
 - [ ] **Step 3: Sanity-check repo state**
 
@@ -189,7 +181,7 @@ git checkout -b feat/zig-scaffold
 git add core .gitignore .github/workflows/test.yml
 git commit -m "feat(core): scaffold Zig library + CI zig job"
 git push -u origin feat/zig-scaffold
-gh pr create --fill --body "Closes #<scaffold-issue>. Zig concepts in this PR: build.zig graph, build.zig.zon pinning, zig test runner."
+gh pr create --fill --body "Closes #10. Zig concepts in this PR: build.zig graph, build.zig.zon pinning, zig test runner."
 ```
 
 Expected: all six CI legs green (3 zig OSes + 3 pytest pythons). Merge; delete branch.
@@ -558,7 +550,7 @@ Run: `zig build test` → PASS. Mutation-check: swap the two lines' order and co
 
 ```bash
 git push -u origin feat/zig-ring
-gh pr create --fill --body "Closes #<ring-issue>. Zig concepts in this PR: std.atomic.Value + acquire/release, file-as-struct, errdefer, std.Thread, testing allocator leak detection, @memcpy spans."
+gh pr create --fill --body "Closes #11. Zig concepts in this PR: std.atomic.Value + acquire/release, file-as-struct, errdefer, std.Thread, testing allocator leak detection, @memcpy spans."
 ```
 
 CI green → merge.
@@ -834,7 +826,7 @@ Red, then: add `summary: Summary` field to Ring; `init` constructs it (`Summary.
 git checkout -b feat/zig-summary && git add core
 git commit -m "feat(core): summary ring — generational slots + rms bins, wired into write/flush"
 git push -u origin feat/zig-summary
-gh pr create --fill --body "Closes #<summary-issue>. Zig concepts in this PR: multi-errdefer init, f64 accumulation, debug asserts as interface contracts, composition (Ring has-a Summary)."
+gh pr create --fill --body "Closes #12. Zig concepts in this PR: multi-errdefer init, f64 accumulation, debug asserts as interface contracts, composition (Ring has-a Summary)."
 ```
 
 ---
@@ -1065,7 +1057,7 @@ Run → PASS.
 git checkout -b feat/zig-wav && git add core
 git commit -m "feat(core): zero-dep WAV writer — float32 bit-perfect, pcm16/24 quantized"
 git push -u origin feat/zig-wav
-gh pr create --fill --body "Closes #<wav-issue>. Zig concepts in this PR: comptime endianness assert, exhaustive switch dispatch on enums, std.mem.writeInt, fixed stack buffers, defer for file close."
+gh pr create --fill --body "Closes #13. Zig concepts in this PR: comptime endianness assert, exhaustive switch dispatch on enums, std.mem.writeInt, fixed stack buffers, defer for file close."
 ```
 
 ---
@@ -1651,7 +1643,7 @@ Expected effect: the parity leg stops skipping on CI — verify in the run log t
 git add core flashback_sampler tests .github
 git commit -m "feat(core): C ABI + ctypes host + parity harness over both buffer implementations"
 git push -u origin feat/zig-abi
-gh pr create --fill --body "Closes #<abi-issue>. Zig concepts in this PR: export fn / C ABI, sentinel pointers ([*:0]), opaque handles, comptime force-reference for exports."
+gh pr create --fill --body "Closes #14. Zig concepts in this PR: export fn / C ABI, sentinel pointers ([*:0]), opaque handles, comptime force-reference for exports."
 ```
 
 ---
@@ -1753,7 +1745,7 @@ Then the review battery per repo workflow (`/simplify`, then `/code-review` at f
 git checkout -b feat/zig-swap && git add -A
 git commit -m "feat: app runs on the Zig core — factory swap + native WAV checkout + bundled DLL"
 git push -u origin feat/zig-swap
-gh pr create --fill --body "Closes #<swap-issue>. Closes #<epic> checklist item. Zig concepts in this PR: none new — this is the payoff PR."
+gh pr create --fill --body "Closes #15. (Do NOT write 'Closes #9' — the epic stays open until the phase-end measurements land as a comment there, then close it by hand.) Zig concepts in this PR: none new — this is the payoff PR."
 ```
 
 Acceptance before merge (mirror of the DAW-arc bar): on this machine, launch the app, capture system audio ~2 min, scrub both decks, drag a slice into Ableton Live 12, confirm the dropped WAV plays and the project reference survives save/reopen. Report results honestly in the PR.
