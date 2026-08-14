@@ -16,11 +16,3 @@ pub const Ring = @import("Ring.zig");
 test {
     std.testing.refAllDecls(@This());
 }
-
-test "scaffold: the test runner runs" {
-    try std.testing.expect(smoke() == 42);
-}
-
-fn smoke() u8 {
-    return 42;
-}
