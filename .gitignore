@@ -63,3 +63,7 @@ captures/
 
 # Git worktrees
 .worktrees/
+
+# Zig build outputs
+core/zig-out/
+core/.zig-cache/
