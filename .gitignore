@@ -67,3 +67,4 @@ captures/
 # Zig build outputs
 core/zig-out/
 core/.zig-cache/
+core/.zig-cache-global/
