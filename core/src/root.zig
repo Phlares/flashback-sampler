@@ -6,6 +6,7 @@ const std = @import("std");
 // from this root module) actually pulls in Ring.zig's test blocks.
 pub const Ring = @import("Ring.zig");
 pub const Summary = @import("Summary.zig");
+pub const wav = @import("wav.zig");
 
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
 // declarations that are actually used, so an unreferenced `Ring` re-export
