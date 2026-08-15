@@ -307,6 +307,25 @@ def test_get_summary_bins_constant_amplitude_is_exact_rms(buffer_cls):
     np.testing.assert_allclose(bins, 0.5, atol=1e-6)
 
 
+def test_get_summary_bins_seconds_zero_is_zero_bins_not_all_available(buffer_cls):
+    """An explicit seconds=0 must return all-zero bins (a zero-length
+    window), NOT the full-buffer answer. The ABI/Zig side overloads
+    n_samples_req=0 to mean "all available" (fb_ring_summary_bins /
+    Summary.rmsBins), and native.py's get_summary_bins computed
+    n_samples = int(seconds * sample_rate) without distinguishing
+    seconds=0 (a real, deliberate zero-length request) from seconds=None
+    (the "give me everything" default) -- both collapsed to the same
+    n_samples=0 wire value, so native() silently returned the FULL
+    window's RMS for an explicit zero-second request. Confirmed
+    divergence before the fix: native returned non-zero bins here while
+    AudioCircularBuffer correctly returned all zeros."""
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=4096, channels=1)
+    buf.write(np.full((4096, 1), 0.5, dtype=np.float32))
+    bins = buf.get_summary_bins(n_bins=2, seconds=0)
+    assert bins.shape == (2, 1)
+    np.testing.assert_array_equal(bins, 0.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Concurrency smoke test
 # ─────────────────────────────────────────────────────────────────────────

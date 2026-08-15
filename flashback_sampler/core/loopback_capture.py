@@ -6,7 +6,8 @@ PortAudio wheels don't ship WASAPI loopback, so for "capture what's playing"
 we bypass it entirely and talk to WASAPI through soundcard.
 
 Same public surface as AudioCapture: start() / stop() / context manager,
-pumps float32 frames into an AudioCircularBuffer.
+pumps float32 frames into a ring buffer (AudioCircularBuffer or
+NativeAudioCircularBuffer -- whichever make_ring_buffer's factory returns).
 """
 
 import sys
@@ -16,7 +17,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .buffer import AudioCircularBuffer
+from .buffer import RingDerivedOps
 
 # Windows: soundcard talks to Media Foundation via COM, which must be
 # initialized on every thread that calls into it. Our capture runs on a
@@ -40,7 +41,8 @@ def _get_sc():
 class LoopbackCapture:
     """
     Continuously record the default (or named) speaker's loopback stream
-    into an AudioCircularBuffer.
+    into a ring buffer (AudioCircularBuffer or NativeAudioCircularBuffer --
+    whichever make_ring_buffer's factory returns).
 
     Usage:
         buf = make_ring_buffer(duration_seconds=60, channels=2)
@@ -52,7 +54,7 @@ class LoopbackCapture:
 
     def __init__(
         self,
-        buffer: AudioCircularBuffer,
+        buffer: RingDerivedOps,
         speaker_name: Optional[str] = None,   # None = default speaker
         sample_rate: int = 48_000,
         channels: int = 2,

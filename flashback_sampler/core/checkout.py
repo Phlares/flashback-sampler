@@ -19,7 +19,7 @@ from typing import Literal, Optional
 import numpy as np
 import soundfile as sf
 
-from .buffer import AudioCircularBuffer
+from .buffer import RingDerivedOps
 from flashback_sampler.core import native
 
 
@@ -89,7 +89,7 @@ class CheckoutManager:
 
     def __init__(
         self,
-        buffer: AudioCircularBuffer,
+        buffer: RingDerivedOps,
         max_active_checkouts: int = 16,
         max_total_ram_mb: float = 1024.0,
     ):
