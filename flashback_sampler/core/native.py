@@ -29,8 +29,11 @@ import numpy as np
 from flashback_sampler.core.buffer import RingDerivedOps, _peak_bins_impl
 
 _OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG = range(5)
-# Public: checkout.py routes only subtypes present here to the native
-# encoder (anything else falls back to soundfile).
+# Public: mirrors flashback_core.h's FbSubtype and checkout.py's
+# CheckoutSubtype strings. Not yet wired into checkout.py (that routing
+# is future work, not current behavior) -- when it is, only subtypes
+# present here should go to the native encoder, with anything else
+# falling back to soundfile.
 SUBTYPE_INTS = {"FLOAT": 0, "PCM_24": 1, "PCM_16": 2}
 
 _lib: C.CDLL | None = None
@@ -120,10 +123,14 @@ def _as_f32p(a: np.ndarray):
 
 
 def wav_write(path, audio: np.ndarray, sample_rate: int, subtype: str) -> None:
-    """Write `audio` [N, channels] float32 via the Zig encoder."""
+    """Write `audio` [N, channels] float32 via the Zig encoder. Mono 1-D
+    input is reshaped to [N, 1], matching NativeAudioCircularBuffer.write's
+    own mono handling -- audio.shape would otherwise fail to unpack below."""
     lib = load()
     if lib is None:
         raise RuntimeError("flashback_core library not available")
+    if audio.ndim == 1:
+        audio = audio[:, np.newaxis]
     audio = np.ascontiguousarray(audio, dtype=np.float32)
     n_frames, channels = audio.shape
     status = lib.fb_wav_write(
@@ -224,17 +231,29 @@ class NativeAudioCircularBuffer(RingDerivedOps):
     def get_segment(self, start_ago: float, end_ago: float) -> np.ndarray:
         if start_ago <= end_ago:
             raise ValueError("start_ago must be greater than end_ago")
-        tw = self.total_written
-        n_avail = min(tw, self.buffer_size)
-        avail_secs = n_avail / self.sample_rate
-        start_ago = min(start_ago, avail_secs)
-        end_ago = max(end_ago, 0.0)
-        n_start = int(start_ago * self.sample_rate)
-        n_end = int(end_ago * self.sample_rate)
-        span = n_start - n_end
-        if span <= 0:
-            return np.zeros((0, self.channels), dtype=np.float32)
-        return self._read_abs(tw - n_start, span)
+        # Same re-snapshot-and-retry pattern as get_latest, and for the
+        # same reason: no lock between snapshotting total_written and the
+        # read completing, so a fast writer can lap this span in the gap.
+        # Without a retry here, get_segment silently returns empty under
+        # writer contention where the Python implementation (which holds
+        # the lock across the whole snapshot-and-retry loop in
+        # _copy_abs_range) returns data -- a real parity divergence on
+        # the exact path checkout.py's create()/create_from_abs_range use.
+        for _ in range(3):
+            tw = self.total_written
+            n_avail = min(tw, self.buffer_size)
+            avail_secs = n_avail / self.sample_rate
+            start_ago_clamped = min(start_ago, avail_secs)
+            end_ago_clamped = max(end_ago, 0.0)
+            n_start = int(start_ago_clamped * self.sample_rate)
+            n_end = int(end_ago_clamped * self.sample_rate)
+            span = n_start - n_end
+            if span <= 0:
+                return np.zeros((0, self.channels), dtype=np.float32)
+            got = self._read_abs(tw - n_start, span)
+            if len(got):
+                return got
+        return np.zeros((0, self.channels), dtype=np.float32)
 
     def get_peak_bins(self, seconds: float, n_bins: int) -> np.ndarray:
         return _peak_bins_impl(

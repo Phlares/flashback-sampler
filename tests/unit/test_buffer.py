@@ -80,6 +80,27 @@ def test_write_advances_position_and_total(buffer_cls):
     assert buf.buffered_seconds == pytest.approx(0.4)
 
 
+def test_write_pos_wraps_at_the_physical_buffer_size_after_a_real_wrap(buffer_cls):
+    """Implementation-agnostic invariant: write_pos == total_written %
+    buffer.shape[0] -- buffer.shape[0] is each implementation's own
+    PHYSICAL modulus (buffer_size for Python, storage_frames for native;
+    see native.py's TWO SIZES note), so this holds for both without
+    either implementation needing to agree on what that physical size
+    actually is. Writes past 4196 frames (buffer_size=100 + native's
+    4096-frame guard band) so native's physical wrap point is actually
+    exercised, not just Python's smaller one. Pins native.py's write_pos
+    against being computed with buffer_size (the READABLE capacity)
+    instead of storage_frames (the PHYSICAL size it actually wraps at)
+    -- that mutation reddens this test (write_pos comes back 0 instead
+    of the correct 804 at these exact numbers; see the Task 7 fix
+    report's mutation record)."""
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=100, channels=1)
+    chunk = np.zeros((100, 1), dtype=np.float32)  # == buffer_size: one write() call per lap, no multi-wrap
+    for _ in range(50):  # 5000 frames total, past native's storage_frames (100 + 4096 = 4196)
+        buf.write(chunk)
+    assert buf.write_pos == buf.total_written % buf.buffer.shape[0]
+
+
 # python-impl internal: probes write_pos and raw physical buffer indexing
 # past the wrap point. Both are genuinely different between implementations
 # by design (native.py's TWO SIZES note) — native wraps its PHYSICAL
@@ -215,6 +236,32 @@ def test_get_rms_levels_sine_is_sqrt_half_amplitude(buffer_cls):
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# get_summary_bins — pre-decimated RMS ring (had NO test coverage, either
+# implementation, before this parity test: Summary is the phase's largest
+# numeric port, and the two implementations could have silently agreed on
+# a shared mistake at their SUMMARY_SLOT_SAMPLES==4096 boundary (Python
+# excludes unfrozen partial slots via its slot-generation tag; native's
+# rmsBins clamps against `capacity` instead) without either side's own
+# suite ever catching it. Asserted ANALYTICALLY (constant amplitude ->
+# known RMS), not cross-checked against the other implementation, which
+# is what actually makes a shared mistake visible instead of invisible.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_get_summary_bins_constant_amplitude_is_exact_rms(buffer_cls):
+    # Frame count is an exact multiple of the summary slot size (4096, both
+    # implementations' default) so every slot involved is fully FROZEN --
+    # no partial-slot edge case to reason about, keeping the analytic
+    # assertion simple: RMS of a constant-amplitude signal is exactly that
+    # amplitude, in every bin, with no approximation needed.
+    buf = buffer_cls(duration_seconds=2.0, sample_rate=4096, channels=1)
+    buf.write(np.full((8192, 1), 0.5, dtype=np.float32))  # == 2 slots exactly
+    bins = buf.get_summary_bins(n_bins=2)  # bin_span defaults to 8192/2 == 4096, one slot per bin
+    assert bins.shape == (2, 1)
+    np.testing.assert_allclose(bins, 0.5, atol=1e-6)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Concurrency smoke test
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -225,6 +272,14 @@ def test_writer_and_reader_concurrent_no_corruption(buffer_cls):
     Pound the buffer from a writer thread while the main thread takes
     repeated get_segment snapshots. Neither should crash, deadlock, or
     return malformed arrays.
+
+    Also asserts at least one read came back non-empty (`reads_with_data
+    > 0`) -- shape-only assertions (`seg.ndim`/`seg.shape[1]`) hold
+    trivially for an empty `(0, channels)` array too, so a native
+    get_segment that silently returned empty on EVERY call (e.g. no
+    retry against writer contention -- a real bug this test previously
+    missed, see the Task 7 fix report) would still have passed the
+    shape checks alone.
     """
     buf = buffer_cls(duration_seconds=1.0, sample_rate=48_000, channels=2)
     stop = threading.Event()
@@ -244,13 +299,17 @@ def test_writer_and_reader_concurrent_no_corruption(buffer_cls):
     try:
         deadline = time.monotonic() + 0.5
         reads = 0
+        reads_with_data = 0
         while time.monotonic() < deadline:
             seg = buf.get_segment(start_ago=0.3, end_ago=0.05)
             # Shape sanity — should never come back malformed
             assert seg.ndim == 2
             assert seg.shape[1] == 2
+            if seg.shape[0] > 0:
+                reads_with_data += 1
             reads += 1
         assert reads > 10  # we actually did some work
+        assert reads_with_data > 0, "every read came back empty -- get_segment never returned data under contention"
     finally:
         stop.set()
         t.join(timeout=1.0)
@@ -371,8 +430,19 @@ def test_flush_after_wrap_fully_clears_ring(buffer_cls):
 def test_get_segment_does_not_stall_writer(buffer_cls):
     """
     The writer thread must not see inter-write latency spikes even when
-    the reader is pulling multi-second segments. This proves get_segment
-    is not holding the lock during its memcpy.
+    the reader is pulling multi-second segments.
+
+    [python]: proves get_segment is not holding self._lock during its
+    memcpy (a copy-under-lock regression would stall the writer, which
+    also acquires the lock, for the copy's full duration).
+
+    [native]: there is no lock on this path at all -- get_segment goes
+    straight through ctypes into Zig's lock-free seqlock read, so this
+    param instead bounds overall writer-thread tail latency under
+    concurrent reader contention (ctypes call overhead, GIL handoff
+    between the two threads, and the Zig read's own copy time). A real
+    regression there (e.g. get_segment somehow blocking the writer) would
+    still show up as an inter-write stall, just not a *lock*-shaped one.
 
     Buffer: 30s @ 48kHz stereo (~11 MB). Reader pulls 20s slices (~7.7 MB
     memcpy each) — large enough that a copy-under-lock regression stalls
