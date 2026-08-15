@@ -81,7 +81,7 @@ def _peak_bins_impl(ring, capacity, snapshot, verify, sample_rate, channels, sec
     # it is `capacity + guard band` (native.py's storage_frames).
     modulus = len(ring)
 
-    # Retry up to 3 times on tear, matching get_latest / _copy_abs_range.
+    # Retry up to 3 times on tear, matching get_latest / copy_abs_range.
     # Each retry re-snapshots abs_start so the window rides the writer.
     for attempt in range(3):
         out = np.zeros(out_shape, dtype=np.float32)
@@ -205,6 +205,22 @@ class RingDerivedOps:
     def is_full(self) -> bool:
         return self.total_written >= self.buffer_size
 
+    @property
+    def capacity_bytes(self) -> int:
+        """Byte footprint of the READABLE window (buffer_size frames ×
+        channels × 4 bytes/float32) -- the number callers that account for
+        RAM usage (AppState.total_project_ram_bytes) should read.
+
+        Deliberately NOT `self.buffer.nbytes`: AudioCircularBuffer's raw
+        array is sized exactly to buffer_size, so the two numbers agree
+        there, but NativeAudioCircularBuffer's raw storage array is sized
+        to storage_frames -- buffer_size plus a guard band (see native.py's
+        module docstring) -- so reading `.buffer.nbytes` on that
+        implementation over-reports the resident footprint by the guard
+        band's size.
+        """
+        return self.buffer_size * self.channels * 4
+
     def status(self) -> dict:
         return {
             "buffered_seconds": round(self.buffered_seconds, 1),
@@ -214,13 +230,7 @@ class RingDerivedOps:
             "total_written_samples": self.total_written,
             "sample_rate": self.sample_rate,
             "channels": self.channels,
-            # Same number as self.buffer.nbytes / 1_048_576 for
-            # AudioCircularBuffer, but derived without touching `.buffer`
-            # so a subclass whose buffer is a zero-copy view over
-            # Zig-owned (and possibly larger, guard-banded) storage
-            # reports the READABLE capacity's footprint, not the
-            # physical allocation's.
-            "memory_mb": round(self.buffer_size * self.channels * 4 / 1_048_576, 1),
+            "memory_mb": round(self.capacity_bytes / 1_048_576, 1),
         }
 
 
@@ -369,7 +379,7 @@ class AudioCircularBuffer(RingDerivedOps):
             total_snapshot = self.total_written
             abs_end = total_snapshot
             abs_start = abs_end - n
-        return self._copy_abs_range(abs_start, abs_end)
+        return self.copy_abs_range(abs_start, abs_end)
 
     def get_segment(self, start_ago: float, end_ago: float) -> np.ndarray:
         """
@@ -395,16 +405,22 @@ class AudioCircularBuffer(RingDerivedOps):
             total_snapshot = self.total_written
             abs_end = total_snapshot - n_end
             abs_start = total_snapshot - n_start
-        return self._copy_abs_range(abs_start, abs_end)
+        return self.copy_abs_range(abs_start, abs_end)
 
     # ------------------------------------------------------------------
     # Seqlock-style non-blocking read
     # ------------------------------------------------------------------
 
-    def _copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
+    def copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
         """
         Copy samples from the ring by absolute sample index (total_written
         space), WITHOUT holding the writer lock during the memcpy.
+
+        Also the shared surface checkout.py (create_from_abs_range) and
+        mixed_capture.py (the mixer thread) read an absolute span through,
+        instead of reaching into self._lock — which NativeAudioCircularBuffer
+        (native.py) does not have; that class provides its own
+        copy_abs_range with the same signature.
 
         Algorithm:
           1. Under lock, snapshot total_written, compute ring indices,
@@ -463,6 +479,16 @@ class AudioCircularBuffer(RingDerivedOps):
     # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """No-op: AudioCircularBuffer's storage is a plain numpy array,
+        reclaimed by ordinary Python GC once nothing references it.
+        Exists so callers holding a RingDerivedOps (not knowing which
+        implementation they have) can call close() unconditionally —
+        NativeAudioCircularBuffer's close() does real work (destroys the
+        Zig-owned ring), this one does nothing. Safe to call more than
+        once."""
+        pass
 
     def flush(self) -> None:
         """
@@ -570,3 +596,35 @@ class AudioCircularBuffer(RingDerivedOps):
                 bin_ss[nonzero] / bin_cnt[nonzero, None]
             ).astype(np.float32)
         return out
+
+
+def make_ring_buffer(
+    duration_seconds: float = 900.0,
+    sample_rate: int = 48_000,
+    channels: int = 2,
+):
+    """One constructor for every ring buffer in the app: the Zig core
+    when its library is present, the Python implementation otherwise.
+    This is the ONLY way app code should construct a ring buffer.
+
+    The import of `native` happens INSIDE this function, not at module
+    scope, because native.py imports RingDerivedOps and _peak_bins_impl
+    from this module -- a top-level `import native` here would form an
+    import cycle. Deferring the import to call time breaks the cycle
+    without either module losing what it needs from the other.
+
+    (The Python fallback dies with phase 2; every call site already
+    speaks the shared surface so deletion will be a no-op here.)
+    """
+    from flashback_sampler.core import native
+    if native.load() is not None:
+        return native.NativeAudioCircularBuffer(
+            duration_seconds=duration_seconds,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+    return AudioCircularBuffer(
+        duration_seconds=duration_seconds,
+        sample_rate=sample_rate,
+        channels=channels,
+    )

@@ -20,6 +20,7 @@ import numpy as np
 import soundfile as sf
 
 from .buffer import AudioCircularBuffer
+from flashback_sampler.core import native
 
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
@@ -153,9 +154,11 @@ class CheckoutManager:
                 start_ago=effective_offset_s + duration_s,
                 end_ago=effective_offset_s,
             )
-        # Snapshot abs sample range under the buffer's lock (cheap) for metadata
-        with self._buffer._lock:  # noqa: SLF001 — internal coordination
-            total = self._buffer.total_written
+        # total_written is a single atomic read on both implementations
+        # (a GIL-protected int attribute on AudioCircularBuffer, an atomic
+        # ctypes call on NativeAudioCircularBuffer) — no lock needed, and
+        # NativeAudioCircularBuffer has no self._lock to reach for.
+        total = self._buffer.total_written
         abs_end = total - int(effective_offset_s * self._buffer.sample_rate)
         abs_start = abs_end - audio.shape[0]
 
@@ -210,10 +213,11 @@ class CheckoutManager:
                 f"abs_end must be greater than abs_start ({abs_end} <= {abs_start})"
             )
 
-        # Check the range is still available in the ring
+        # Check the range is still available in the ring. total_written is
+        # a single atomic read on both implementations — see create()'s
+        # comment above for why no lock is needed here.
         buf = self._buffer
-        with buf._lock:  # noqa: SLF001
-            total = buf.total_written
+        total = buf.total_written
         if abs_end > total:
             raise RuntimeError(
                 f"requested range extends past current head "
@@ -224,7 +228,7 @@ class CheckoutManager:
                 "requested range has already been overwritten"
             )
 
-        audio = buf._copy_abs_range(abs_start, abs_end)  # noqa: SLF001
+        audio = buf.copy_abs_range(abs_start, abs_end)
         if audio.shape[0] == 0:
             raise RuntimeError(
                 "could not read requested range; the writer may have "
@@ -322,7 +326,13 @@ class CheckoutManager:
 
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(str(target), audio, sr, format=fmt, subtype=subtype)
+        # WAV goes through the Zig encoder when the native library is
+        # built and the requested subtype is one it supports. FLAC always
+        # keeps the soundfile path -- native.py has no FLAC encoder.
+        if fmt == "WAV" and subtype in native.SUBTYPE_INTS and native.load() is not None:
+            native.wav_write(target, np.ascontiguousarray(audio, dtype=np.float32), sr, subtype)
+        else:
+            sf.write(str(target), audio, sr, format=fmt, subtype=subtype)
 
         if mark_saved:
             with self._lock:

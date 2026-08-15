@@ -68,6 +68,14 @@ jobs:
           echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           echo "Resolved version: $version"
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build native core (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+        working-directory: core
+
       - name: Run unit tests (smoke before build)
         run: pytest tests/unit -m "not audio_hw and not perf" -x -q
 

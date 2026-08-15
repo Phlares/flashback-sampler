@@ -72,10 +72,14 @@ def test_window_has_loop_button(qapp, state):
 
 
 def test_buffer_selection_updates_disc(qapp, state):
+    import numpy as np
     win = TurntableWindow(state)
     # Simulate some buffered audio so the drag can capture abs samples.
+    # A real write (not a fake total_written assignment) so the test
+    # exercises whichever ring implementation the machine has available --
+    # NativeAudioCircularBuffer.total_written has no setter.
     buf = state.active_slot.buffer
-    buf.total_written = int(60 * buf.sample_rate)
+    buf.write(np.zeros((int(60 * buf.sample_rate), buf.channels), dtype=np.float32))
     # Emit a selection change
     win.buffer_panel.waveform.manualSelectionChanged.emit(0.1, 0.3)
     # _update_selection_display paints the disc; run a tick (or invoke directly).
@@ -91,10 +95,11 @@ def test_buffer_selection_updates_disc(qapp, state):
 
 
 def test_clip_selection_updates_disc(qapp, state):
+    import numpy as np
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
     # Populate buffer and create a checkout so a clip is displayed.
-    buf.total_written = int(60 * buf.sample_rate)
+    buf.write(np.zeros((int(60 * buf.sample_rate), buf.channels), dtype=np.float32))
     state.active_slot.checkout_manager.create_from_abs_range(
         0, int(30 * buf.sample_rate)
     )
@@ -243,13 +248,14 @@ def test_switch_to_slot_updates_active_and_mirrors(qapp, state):
 
 
 def test_default_buffer_selection_applied_at_init(qapp, state):
+    import numpy as np
     win = TurntableWindow(state)
     # Default slot has duration_preset_idx=4 (180s) and anchor_offset_s=0.
     # New semantics: the selection is painted against buffered_seconds,
     # not buffer capacity. Simulate some audio being present so the
     # display update has something to show, then check the selection.
     buf = state.active_slot.buffer
-    buf.total_written = int(60 * buf.sample_rate)  # 60s buffered
+    buf.write(np.zeros((int(60 * buf.sample_rate), buf.channels), dtype=np.float32))  # 60s buffered
     win._update_selection_display()
     sel = win.buffer_panel.waveform.manual_selection()
     assert sel is not None
@@ -262,13 +268,14 @@ def test_default_buffer_selection_applied_at_init(qapp, state):
 def test_default_buffer_selection_skipped_if_buffer_too_small(qapp):
     """If the buffered audio is shorter than the preset duration,
     start_frac clamps to 0."""
+    import numpy as np
     from flashback_sampler.app.state import AppState
     s = AppState(buffer_seconds=10.0, sample_rate=48000, channels=2)  # only 10s
     try:
         win = TurntableWindow(s)
         # Pretend the buffer is completely full (10s buffered on a 10s buf).
         buf = s.active_slot.buffer
-        buf.total_written = int(10 * buf.sample_rate)
+        buf.write(np.zeros((int(10 * buf.sample_rate), buf.channels), dtype=np.float32))
         win._update_selection_display()
         sel = win.buffer_panel.waveform.manual_selection()
         # 3:00 (180s) default on 10s of audio → end_frac=1, start_frac=0
@@ -294,10 +301,11 @@ def test_tick_updates_time_labels(qapp, state):
 
 
 def test_user_drag_captures_absolute_samples(qapp, state):
+    import numpy as np
     win = TurntableWindow(state)
-    # Pretend the buffer has recorded 60s of audio
+    # The buffer has recorded 60s of audio
     buf = state.active_slot.buffer
-    buf.total_written = 60 * buf.sample_rate  # fake having written 60s
+    buf.write(np.zeros((60 * buf.sample_rate, buf.channels), dtype=np.float32))
     # Simulate a user drag from 0.5 to 1.0 (last 30s of 60s = 30s to 0s ago)
     win.buffer_panel.waveform.manualSelectionChanged.emit(0.5, 1.0)
     assert win._buffer_sel_mode == "user"
@@ -313,6 +321,7 @@ def test_user_selection_drifts_with_buffer(qapp):
     """A user selection set at T=60s should shift in fraction-space as the
     buffer advances to T=120s, because absolute samples are fixed but the
     display window moves forward."""
+    import numpy as np
     from flashback_sampler.app.state import AppState
     # Need a buffer capacity >= 120s so the displayed window can grow to 120s.
     s = AppState(buffer_seconds=240.0, sample_rate=48000, channels=2)
@@ -321,15 +330,15 @@ def test_user_selection_drifts_with_buffer(qapp):
         buf = s.active_slot.buffer
         sr = buf.sample_rate
         # T=60s of audio written
-        buf.total_written = 60 * sr
+        buf.write(np.zeros((60 * sr, buf.channels), dtype=np.float32))
         # User selects [0.5, 1.0] = last 30s (from 30s ago to now).
         # Store: abs_start=30*sr, abs_end=60*sr (approx)
         win.buffer_panel.waveform.manualSelectionChanged.emit(0.5, 1.0)
-        # Now simulate buffer advancing to T=120s. Without touching
-        # _buffer_sel_abs, the effective fractions in the new 120s window
-        # should be [0.25, 0.5] (still the same 30-to-60 second range in
-        # absolute terms).
-        buf.total_written = 120 * sr
+        # Now advance the buffer to T=120s by writing 60 more seconds.
+        # Without touching _buffer_sel_abs, the effective fractions in the
+        # new 120s window should be [0.25, 0.5] (still the same 30-to-60
+        # second range in absolute terms).
+        buf.write(np.zeros((60 * sr, buf.channels), dtype=np.float32))
         win._update_selection_display()
         sel = win.buffer_panel.waveform.manual_selection()
         assert sel is not None
@@ -342,9 +351,10 @@ def test_user_selection_drifts_with_buffer(qapp):
 
 
 def test_clear_selection_returns_to_default(qapp, state):
+    import numpy as np
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
-    buf.total_written = 60 * buf.sample_rate
+    buf.write(np.zeros((60 * buf.sample_rate, buf.channels), dtype=np.float32))
     win.buffer_panel.waveform.manualSelectionChanged.emit(0.3, 0.6)
     assert win._buffer_sel_mode == "user"
     win.buffer_panel.waveform.manualSelectionCleared.emit()
@@ -353,6 +363,7 @@ def test_clear_selection_returns_to_default(qapp, state):
 
 
 def test_switching_tracks_resets_selection_mode(qapp, state):
+    import numpy as np
     from flashback_sampler.core.quality_presets import QualityPreset
     preset = QualityPreset(
         name="CUSTOM", sample_rate=48000, channels=2,
@@ -362,7 +373,7 @@ def test_switching_tracks_resets_selection_mode(qapp, state):
     win = TurntableWindow(state)
     win.buffer_turntable.set_track_count(len(state.slots))
     buf = state.active_slot.buffer
-    buf.total_written = 20 * buf.sample_rate
+    buf.write(np.zeros((20 * buf.sample_rate, buf.channels), dtype=np.float32))
     win.buffer_panel.waveform.manualSelectionChanged.emit(0.3, 0.8)
     assert win._buffer_sel_mode == "user"
     win.buffer_turntable.track_selected.emit(1)
@@ -478,9 +489,10 @@ def test_clip_ring_click_does_not_change_active_slot(qapp, state):
 def test_drag_in_progress_not_overwritten_by_tick(qapp, state):
     """During an active drag on the buffer panel, _tick must not overwrite
     the in-progress manual selection on the linear waveform."""
+    import numpy as np
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
-    buf.total_written = 60 * buf.sample_rate  # 60s "buffered"
+    buf.write(np.zeros((60 * buf.sample_rate, buf.channels), dtype=np.float32))  # 60s "buffered"
     # Simulate the user mid-drag by flipping the flag directly. Set a
     # user selection that the tick would normally re-apply.
     win.buffer_panel.waveform._is_dragging = True

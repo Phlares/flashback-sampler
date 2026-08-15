@@ -29,7 +29,7 @@ class AudioCapture:
     Wraps a sounddevice InputStream and pipes frames into an AudioCircularBuffer.
 
     Usage:
-        buf = AudioCircularBuffer(duration_seconds=900)
+        buf = make_ring_buffer(duration_seconds=900)
         cap = AudioCapture(buf, device=None)  # None = system default input
         cap.start()
         ...

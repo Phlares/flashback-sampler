@@ -43,7 +43,7 @@ class LoopbackCapture:
     into an AudioCircularBuffer.
 
     Usage:
-        buf = AudioCircularBuffer(duration_seconds=60, channels=2)
+        buf = make_ring_buffer(duration_seconds=60, channels=2)
         cap = LoopbackCapture(buf)            # default speaker
         cap.start()
         ...

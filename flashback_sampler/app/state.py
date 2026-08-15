@@ -21,7 +21,7 @@ from flashback_sampler.app.audio_devices import (
     default_capture_device,
     default_output_device,
 )
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.buffer import RingDerivedOps, make_ring_buffer
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.quality_presets import QualityPreset
@@ -172,7 +172,11 @@ class AppState:
         """
         total = 0
         for slot in self.slots:
-            total += int(slot.buffer.buffer.nbytes)
+            # capacity_bytes, not slot.buffer.buffer.nbytes -- the latter
+            # reads the raw storage array, which on NativeAudioCircularBuffer
+            # is larger than the readable window by a guard band (see
+            # buffer.py's RingDerivedOps.capacity_bytes docstring).
+            total += slot.buffer.capacity_bytes
             for co in slot.checkout_manager.list():
                 total += co.ram_bytes
         return total
@@ -210,7 +214,7 @@ class AppState:
     # ------------------------------------------------------------------
 
     @property
-    def buffer(self) -> AudioCircularBuffer:
+    def buffer(self) -> RingDerivedOps:
         return self.active_slot.buffer
 
     @property
@@ -387,18 +391,30 @@ class AppState:
             except Exception:  # pragma: no cover
                 pass
 
-        new_buf = AudioCircularBuffer(
+        old_buf = slot.buffer
+        new_buf = make_ring_buffer(
             duration_seconds=float(new_seconds),
             sample_rate=slot.sample_rate,
             channels=slot.channels,
         )
-        new_buf.gain = slot.buffer.gain  # preserve the source's record gain
+        new_buf.gain = old_buf.gain  # preserve the source's record gain
         slot.buffer = new_buf
         slot.buffer_seconds = float(new_seconds)
         slot.checkout_manager._buffer = new_buf  # noqa: SLF001
         # Capture source, if present, was writing into the old buffer.
         # Drop it so the caller rebuilds from state.build_capture().
         slot.capture_source = None
+        # Release the old buffer's resources now rather than waiting on
+        # GC/__del__ -- a no-op for AudioCircularBuffer, but deterministic
+        # release of the Zig-owned handle for NativeAudioCircularBuffer.
+        # Safe here specifically: the writer was already stopped above
+        # (stop_capture() joins/closes its stream before returning), and
+        # rebuild_buffer runs entirely on the GUI thread, so nothing else
+        # can be mid-read on old_buf when we reach this line.
+        try:
+            old_buf.close()
+        except Exception:  # pragma: no cover
+            pass
 
     def shutdown(self) -> None:
         """Called on window close — stop all slots + playback cleanly."""
