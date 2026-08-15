@@ -1,3 +1,6 @@
+# Deletion-candidate holding area (see global CLAUDE.md sequester policy)
+/_ToRemove/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -67,3 +70,4 @@ captures/
 # Zig build outputs
 core/zig-out/
 core/.zig-cache/
+core/.zig-cache-global/
