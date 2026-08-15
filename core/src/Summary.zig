@@ -68,6 +68,14 @@ pub fn poison(self: *Summary) void {
     @memset(self.slot_abs, -1);
 }
 
+/// The largest `n_bins` `rmsBins` will accept — bounds its two
+/// allocation-free stack scratch arrays below. Public so Task 6's ABI
+/// guard (`fb_ring_summary_bins`) can reject an oversized `n_bins`
+/// BEFORE calling in, using this same constant, rather than duplicating
+/// `4096` as an unlinked magic number that could silently desync from
+/// this one if the scratch-array bound ever changed.
+pub const max_bins: usize = 4096;
+
 /// Mirror of buffer.py _update_summary_locked. `interleaved` is the
 /// PRE-gain input; gain is re-applied here (a block is ~1k frames — the
 /// extra multiply is nothing, and it keeps write()'s fast path free of
@@ -146,11 +154,11 @@ pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin
     // (n_slots is small: capacity/slot_frames). `out` itself is only
     // written in the second pass below, once each bin's final sqrt(ss/
     // count) is known — allocation-free by bounding n_bins: callers ask
-    // for display bins (≤ ~4096). Assert it.
-    std.debug.assert(n_bins <= 4096);
+    // for display bins (≤ max_bins). Assert it.
+    std.debug.assert(n_bins <= max_bins);
     std.debug.assert(chans <= 2);
-    var bin_ss: [4096 * 2]f64 = undefined; // max bins * max channels
-    var bin_cnt: [4096]u64 = undefined;
+    var bin_ss: [max_bins * 2]f64 = undefined; // max bins * max channels
+    var bin_cnt: [max_bins]u64 = undefined;
     @memset(bin_ss[0 .. n_bins * chans], 0);
     @memset(bin_cnt[0..n_bins], 0);
 
