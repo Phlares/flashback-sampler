@@ -134,6 +134,14 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
 /// torn `ss` read produces NaN through the sqrt rather than trapping —
 /// no memory unsafety, no crash path. A design decision for the arc,
 /// not fixed here. See issue #23.
+///
+/// STACK: allocates ~96 KiB of scratch on the caller's stack (`bin_ss`:
+/// max_bins * 2 channels * 8 bytes = 64 KiB, plus `bin_cnt`: max_bins * 8
+/// bytes = 32 KiB) — unsafe to call from a thread with a small stack.
+/// The ctypes host's control/UI thread has an ordinary OS-default stack,
+/// so this is a non-issue there, but a future non-Python host (this is a
+/// C ABI precisely so other hosts can link it) with a constrained-stack
+/// thread must account for this before calling in.
 pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
     const chans = self.channels;
     const n_bins = out.len / chans;

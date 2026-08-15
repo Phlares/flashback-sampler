@@ -9,7 +9,8 @@ Architecture:
     sub-source B ──► 2 s staging ring B ─┼─► mixer thread ─► target ring
     sub-source C ──► 2 s staging ring C ─┘   (sum, clip [-1,1], write)
 
-Each sub-source writes into its own small AudioCircularBuffer. A
+Each sub-source writes into its own small ring buffer (via make_ring_buffer,
+so native when available, Python otherwise). A
 background mixer thread polls every ~10 ms, reads whatever's
 available from every staging ring (bounded by the slowest sub so
 no source is ever skipped), sums them sample-for-sample, hard-clips
@@ -28,7 +29,7 @@ from typing import Callable
 
 import numpy as np
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.buffer import RingDerivedOps, make_ring_buffer
 from flashback_sampler.core.capture_source import CaptureSource
 
 
@@ -42,8 +43,8 @@ class MixedCaptureSource:
 
     def __init__(
         self,
-        target_buffer: AudioCircularBuffer,
-        sub_factories: list[Callable[[AudioCircularBuffer], CaptureSource]],
+        target_buffer: RingDerivedOps,
+        sub_factories: list[Callable[[RingDerivedOps], CaptureSource]],
         sample_rate: int,
         channels: int,
     ):
@@ -54,13 +55,13 @@ class MixedCaptureSource:
         self._target = target_buffer
 
         # One staging ring + one sub-source per factory.
-        self._stages: list[AudioCircularBuffer] = []
+        self._stages: list[RingDerivedOps] = []
         self._subs: list[CaptureSource] = []
         # Read position (in target absolute-sample space) per staging
         # ring — tracks how much of each we've already consumed.
         self._read_positions: list[int] = []
         for factory in sub_factories:
-            stage = AudioCircularBuffer(
+            stage = make_ring_buffer(
                 duration_seconds=self.STAGING_SECONDS,
                 sample_rate=self.sample_rate,
                 channels=self.channels,
@@ -170,7 +171,7 @@ class MixedCaptureSource:
             for i, (stage, read_pos) in enumerate(
                 zip(self._stages, self._read_positions)
             ):
-                segment = stage._copy_abs_range(read_pos, read_pos + n)  # noqa: SLF001
+                segment = stage.copy_abs_range(read_pos, read_pos + n)
                 if segment.shape[0] == 0:
                     # Rare: writer lapped us between the stale-fixup
                     # above and the copy. Reset on next iteration.

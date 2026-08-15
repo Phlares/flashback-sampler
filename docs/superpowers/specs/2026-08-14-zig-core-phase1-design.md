@@ -1,7 +1,7 @@
 # Zig core, phase 1 — lock-free memory engine + WAV writer
 
 **Date:** 2026-08-14
-**Status:** approved (owner sign-off in session)
+**Status:** implemented (PRs #18, #19, #22, #24, #25, #27, #29)
 **Arc:** first step of the native-core arc: Zig engine under the existing
 Python/Qt app → CLAP plugin → mobile shells. This spec covers phase 1 only.
 
@@ -49,7 +49,8 @@ core/
 ```
 
 Artifacts: shared library (`flashback_core.dll` / `.so` / `.dylib`) for the
-ctypes host + static lib for future hosts. Tests are colocated `test` blocks.
+ctypes host (`core/build.zig`'s only `addLibrary` call, `linkage = .dynamic`
+— no static archive is built). Tests are colocated `test` blocks.
 
 ## Idiomatic commitments
 
@@ -105,9 +106,13 @@ report as such, never return silently corrupt data.
 
 ## WAV writer (`wav.zig`)
 
-- Real API is Zig-generic — `write(writer: anytype, frames, …)` — testable
-  against an in-memory buffer with golden-byte tests. The file-path
-  convenience lives at the ABI (`fb_wav_write`).
+- The API is three small functions, not one generic writer: `writeHeader`
+  (fills a 44-byte RIFF/WAVE header buffer), `encodeSamples` (converts a
+  slice of `f32` samples to the requested subtype's on-disk bytes), and
+  `writeFile` (the path-based convenience — header + encode + write to
+  disk — that the ABI's `fb_wav_write` thinly wraps). Golden-byte tests
+  exercise `writeHeader`/`encodeSamples` directly against in-memory
+  buffers, no `anytype` writer needed.
 - Subtypes: `FLOAT32` (default — bit-perfect, file payload == RAM),
   `PCM_24`, `PCM_16` (explicit quantized options, matching today's
   `_VALID_SUBTYPES`). Dithered quantization is future flair, not phase 1.
@@ -123,8 +128,10 @@ FbRing*      fb_ring_create(uint32_t rate, uint16_t channels, double seconds); /
 void         fb_ring_destroy(FbRing*);
 void         fb_ring_write(FbRing*, const float* frames, size_t n_frames); // RT-safe
 uint64_t     fb_ring_total_written(const FbRing*);
-uint64_t     fb_ring_capacity(const FbRing*);        // in frames
-const float* fb_ring_storage(const FbRing*);         // zero-copy view, see below
+uint64_t     fb_ring_capacity(const FbRing*);        // in frames -- the READABLE window
+uint64_t     fb_ring_storage_frames(const FbRing*);  // PHYSICAL frame count backing fb_ring_storage
+                                                      // (capacity + guard band -- the whole two-sizes design)
+const float* fb_ring_storage(const FbRing*);         // zero-copy view, shaped with storage_frames
 void         fb_ring_set_gain(FbRing*, float);
 float        fb_ring_gain(const FbRing*);
 void         fb_ring_flush(FbRing*);
@@ -154,15 +161,29 @@ smaller, truer surface):
   `bin_span_frames = 0` → window/n_bins), because that is the only summary
   consumer. YAGNI on per-bin min/max.
 - **`total_written` is the single source of truth.** There is no stored
-  `write_pos`; the writer derives its ring position as
-  `total_written % capacity`. Readers never address beyond
-  `total_written`, so stale bytes past it are unreachable — which makes…
+  `write_pos`; the writer derives its physical ring position as
+  `total_written % storage_frames` — **not** `% capacity`. The ring
+  allocates `storage_frames = capacity + max_write_frames` frames (a guard
+  band sized to the largest single write), so an accepted reader's span and
+  the writer's in-flight, not-yet-published block are always provably
+  disjoint in physical storage. `capacity` — the smaller, readable window —
+  stays what every clamp (`get_latest`, `is_full`, the overwritten check)
+  is checked against; only the modulo for physical indexing uses the
+  larger size. Readers never address beyond `total_written`, so stale
+  bytes past it are unreachable — which makes…
 - **…`fb_ring_flush` one release-store of `total_written = 0`** plus
   poisoning every summary slot generation (`slot_abs = -1`) plus a hygiene
-  zeroing of storage (off the audio thread). Flush during active capture
-  races at most one audio block into silence — silence is a valid sample,
-  never torn garbage — and one summary slot may transiently mix epochs
-  (~85 ms, self-heals at the slot's next generation). Documented, accepted.
+  zeroing of storage (off the audio thread). Racing an active writer is
+  NOT bounded to "one block of silence": a writer that already loaded
+  `tw` before the flush will still publish `tw + n` afterward, silently
+  UNDOING the reset — `total_written` lands back near its pre-flush value
+  even though every readable frame is now zero, with no observable
+  indication a flush happened at all. Up to a FULL CAPACITY of silence,
+  not one block, can result. One summary slot may also transiently mix
+  epochs (~85 ms, self-heals at the slot's next generation). This is a
+  known race in the flush-vs-writer relationship, documented in
+  `Ring.zig`'s `flush()` doc comment, tracked as a separate design
+  question for the arc — not fixed here. See issue #20.
 - **A single factory swaps the app**: five call sites construct buffers
   today (`app/state.py`, `core/capture.py`, `core/capture_slot.py`,
   `core/loopback_capture.py`, `core/mixed_capture.py`); the swap PR routes

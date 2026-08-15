@@ -19,6 +19,12 @@ Notes:
     - The Monaspace OTF fonts are loaded at runtime via
       QFontDatabase.addApplicationFont(), so they must be copied to
       the bundle as data files.
+    - flashback_core.dll (the Zig core, built via `zig build
+      -Doptimize=ReleaseSafe` in core/) is bundled explicitly rather
+      than discovered by collect_all, since it's our own build output,
+      not a pip package. Destination is flashback_sampler/core -- the
+      first path native.py's _candidates() checks, so the bundled app
+      finds it exactly like a dev checkout finds its zig-out build.
 """
 
 from PyInstaller.utils.hooks import collect_all
@@ -44,7 +50,9 @@ datas.append(("flashback_sampler/app/fonts", "flashback_sampler/app/fonts"))
 a = Analysis(
     ["flashback_sampler/app/main.py"],
     pathex=[],
-    binaries=binaries,
+    binaries=binaries + [
+        ("core/zig-out/bin/flashback_core.dll", "flashback_sampler/core"),
+    ],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

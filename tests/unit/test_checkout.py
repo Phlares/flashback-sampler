@@ -482,6 +482,60 @@ def test_mark_saved_sets_state():
     assert mgr.get(co.id).state == "saved"
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Save — native WAV encoder routing
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
+    """WAV saves must route through the Zig encoder when the native
+    library is built (this machine) instead of always calling
+    soundfile.write -- FLAC always keeps its existing soundfile path
+    (native.py has no FLAC encoder)."""
+    from flashback_sampler.core import native
+
+    if native.load() is None:
+        pytest.skip("flashback_core library not built")
+
+    calls = []
+    real = native.wav_write
+    monkeypatch.setattr(
+        native, "wav_write",
+        lambda *a, **k: (calls.append(a), real(*a, **k))[1],
+    )
+
+    mgr, co = _mgr_with_checkout()
+    target = mgr.save(co.id, tmp_path / "clip.wav")
+
+    assert calls, "WAV save did not route through the native encoder"
+    # The file soundfile reads back must still match the checkout's audio
+    # -- routing to a different encoder must not change the bytes a
+    # consumer (Ableton, this repo's own tests) reads back.
+    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
+    assert sr == co.sample_rate
+    assert np.allclose(data, co.trimmed_audio(), atol=1e-7)
+
+
+def test_flac_save_does_not_use_native_encoder(tmp_path, monkeypatch):
+    """FLAC has no native encoder (native.SUBTYPE_INTS covers WAV subtypes
+    only) -- FLAC saves must keep going through soundfile regardless of
+    whether the native library is present."""
+    from flashback_sampler.core import native
+
+    calls = []
+    real = native.wav_write
+    monkeypatch.setattr(
+        native, "wav_write",
+        lambda *a, **k: (calls.append(a), real(*a, **k))[1],
+    )
+
+    mgr, co = _mgr_with_checkout()
+    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
+
+    assert not calls, "FLAC save must never call the native WAV encoder"
+    assert target.exists()
+
+
 def test_mark_saved_unknown_id_raises():
     mgr, _ = _mgr_with_checkout()
     with pytest.raises(KeyError):
