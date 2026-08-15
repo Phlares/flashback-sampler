@@ -456,10 +456,18 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     //    caught by NEITHER 2,000 nor 10,000 successes at cap_frames=32768
     //    — the guard band remains pinned only by the init test's
     //    allocation-arithmetic assertion, not by any test that exercises
-    //    the race it exists to prevent. `cap_frames` is documented here
-    //    as measured, not removed, since it's still a defensible stress
-    //    parameter — but it is NOT the fix for "the guard band has no
-    //    behavioral test," and nothing in this file currently is.
+    //    the race it exists to prevent. `cap_frames` is NOT the fix for
+    //    "the guard band has no behavioral test" — see the separate
+    //    "guard band: reader targets the lap boundary" test below, which
+    //    is aimed at that instead.
+    //
+    // `cap_frames = 32768` was measured (round 2 of this PR's review) and
+    // REJECTED: 5% mutation-3 detection under the runtime-bounded
+    // config it required, no better than 4096 when the attempt budget is
+    // held constant (30% either way). Reverted to 4096/10,000 successes
+    // below — the measurably better config for this metric. Do not
+    // re-run this experiment; the numbers are recorded here so the next
+    // person doesn't have to pay for it again.
     //
     // This test deliberately does NOT race a flusher (see the separate
     // "flush racing..." test below): a flush racing an in-flight write
@@ -471,7 +479,7 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     // becomes ambiguous between "real bug" and "accepted race artifact".
     // Splitting the two properties into two tests keeps each one able to
     // fail unambiguously.
-    const cap_frames = 32768;
+    const cap_frames = 4096;
     const chans = 2;
     const block_frames = 128; // realistic: one audio-callback-sized block
     const margin_frames = 512; // stress parameter, not a safety margin — see points 3-4 above
@@ -514,29 +522,15 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     // OutOfRange/Overwritten while the writer catches up) so a
     // regression that makes reads never converge fails fast instead of
     // hanging CI.
-    // Measured (warm cache, this workstation, cap_frames=32768):
-    //   2,000 successes: ~0.96s; unmutated clean-run rate 20/20 (100%).
-    //   Mutation 3 (delete the t2 re-check) at 2,000 successes: 2/40 (5%)
-    //     — WORSE than the pre-round-2 30% at cap_frames=4096/10,000
-    //     successes. Isolating cap_frames's own effect (holding
-    //     successes at 10,000 despite the ~5s runtime that implies):
-    //     3/10 (30%) — statistically indistinguishable from the OLD
-    //     cap_frames=4096 baseline. cap_frames does NOT measurably raise
-    //     per-attempt detection probability in this implementation
-    //     (contrary to the "bigger copy -> more overlap opportunity"
-    //     prediction); the number of attempts a fixed runtime budget
-    //     allows is what actually drives detection, and that shrinks as
-    //     cap_frames grows because the verify loop scales with it too.
-    //     Separately, and more importantly: removing the guard band
-    //     entirely (storage_frames = capacity) was caught by NEITHER
-    //     2,000 successes (0/20) NOR 10,000 successes (0/10) at this
-    //     cap_frames — the guard band remains pinned only by the init
-    //     test's allocation-arithmetic assertion, not by any test that
-    //     exercises the race it prevents. Reported as found, not tuned
-    //     further — see the task report for the full measurement set
-    //     and why cap_frames turned out not to be the lever it looked
-    //     like on paper.
-    const target_successes: u64 = 2_000;
+    // Measured (warm cache, this workstation, cap_frames=4096 — the
+    // reverted, measurably-better config; see the rejected cap_frames=
+    // 32768 numbers in the tuning-history comment above): ~0.585s at
+    // 10,000 successes. Mutation 3 (delete the t2 re-check) reddens
+    // 6/20 runs (30%) at this count — a real, not-great detection rate;
+    // noted honestly rather than picked to look good. The guard band
+    // itself is NOT pinned by this test at any geometry tried — see the
+    // separate "guard band: reader targets the lap boundary" test below.
+    const target_successes: u64 = 10_000;
     const max_attempts: u64 = target_successes * 2000;
     var attempts: u64 = 0;
     var successes: u64 = 0;
@@ -546,22 +540,26 @@ test "seqlock stress: concurrent writer never yields torn reads" {
         attempts += 1;
         const tw = ring.total_written.load(.acquire);
         if (tw < read_frames) {
-            // Hardware hint for a spin-wait: cheap, doesn't change
-            // behavior, but reduces how hard this busy-loop contends
-            // for execution resources against the writer thread while
-            // waiting for it to catch up — cap_frames=32768 needs ~252
-            // writer calls before the FIRST read is even attemptable
-            // (vs. ~28 at the old cap_frames=4096), which showed up
-            // during verification as one observed flake (out of ~30
-            // total runs at these settings): a full-suite run that
-            // exhausted max_attempts with 0 successes and last_err ==
-            // null, meaning total_written never even reached
-            // read_frames — consistent with the writer thread being
-            // starved of scheduling, not with any regression in read()
-            // or write(). Did not reproduce in 25 immediately-following
-            // runs. This hint is a standard, zero-risk mitigation for
-            // that class of flake; it does not touch the oracle, the
-            // guard band, or chunking.
+            // Standard hardware hint for a spin-wait loop (Intel's own
+            // guidance for exactly this shape). Harmless and cheap, but
+            // NOT a fix for the flake once observed at cap_frames=32768
+            // (see the task report): that flake was `last_err == null`
+            // after exhausting max_attempts, meaning total_written never
+            // reached read_frames at all — consistent with the writer
+            // thread going unscheduled for on the order of hundreds of
+            // milliseconds under real system load on a shared, busy
+            // dev workstation (confirmed present at diagnosis time via
+            // `Get-Process`; this is a spin-wait *hint*, operating at
+            // nanosecond/microsecond granularity — it does not yield to
+            // the OS scheduler and cannot plausibly close a gap that
+            // size). It is kept here as ordinary hygiene for a spin-wait
+            // loop, not represented as the reason the flake hasn't
+            // recurred. What actually reduces the flake's blast radius
+            // is the much larger `max_attempts` headroom that came back
+            // with reverting to cap_frames=4096 (20,000,000 vs. the
+            // 4,000,000 that tripped) — more wall-clock time for a
+            // transient scheduling delay to resolve before the bounded
+            // cap gives up.
             std.atomic.spinLoopHint();
             continue;
         }
@@ -585,6 +583,148 @@ test "seqlock stress: concurrent writer never yields torn reads" {
         std.debug.print(
             "seqlock stress: only {d}/{d} successes in {d} attempts (cap {d}); last error: {?}\n",
             .{ successes, target_successes, attempts, max_attempts, last_err },
+        );
+        return error.StressTestDidNotConverge;
+    }
+}
+
+test "guard band: reader targets the lap boundary" {
+    // The mutation-3 test above samples abs_start = tw - cap_frames +
+    // margin_frames, which sits margin_frames (512) below the "already
+    // lapped" boundary — nowhere near where the guard band actually
+    // does its work. That is why removing the guard band entirely
+    // (storage_frames = capacity, mutating out the entire fix) reddens
+    // NEITHER that test NOR the init test at any cap_frames tried (see
+    // the task report) — the physical collision the guard band prevents
+    // never falls inside a window that test's reader samples.
+    //
+    // This test targets the boundary on purpose. abs_start sits exactly
+    // `offset` frames inside the "already lapped" edge (n = capacity -
+    // offset), so acceptance tolerates the writer having advanced a
+    // LITTLE between the outer snapshot and read()'s own t1 load, but no
+    // more. Worked through by hand before implementing (P =
+    // storage_frames, C = capacity, M = max_write_frames):
+    //
+    //   WITH the guard band (P = C + M): the oldest byte in the read
+    //   window physically collides with a later write once total_written
+    //   reaches abs_start + P + 1 = tw + offset + M + 1 — at least M+1
+    //   frames of writer progress needed from t1, far more than a
+    //   same-copy writer can produce; provably disjoint by construction.
+    //
+    //   WITHOUT the guard band (P = C): the same collision needs only
+    //   tw + offset + 1 — the "logical" validity boundary and the
+    //   "physical" corruption boundary are exactly 1 frame apart, pushed
+    //   M frames apart by the guard band instead.
+    //
+    // First implementation used the SAME symbol for both the writer's
+    // own chunk size and this offset (as originally proposed) and
+    // measured 0/20 detection even with the guard band fully removed —
+    // worse than the mutation-3 test's 0/20 at capacity-based sampling,
+    // despite being aimed at the right boundary. Diagnosed with
+    // temporary t1/t2 instrumentation: coupling offset to the writer's
+    // block size means n = capacity - block_frames shrinks the read
+    // (hence its copy duration) in exact lockstep as block_frames grows
+    // the writer's own per-call duration — the two effects cancel
+    // regardless of the shared value chosen, and the maximum writer
+    // progress ever observed during a copy was exactly one call, which
+    // by the formula's own construction lands EXACTLY on the safe side
+    // of the boundary (t2 - abs_start == capacity, which passes) rather
+    // than past it. Fixed by DECOUPLING the two: `block_frames` (the
+    // writer's own chunk size — large, so a single in-flight call's
+    // written-but-unpublished window is wide) from `offset` (the read's
+    // tolerance margin — small, so little writer progress is needed to
+    // breach it). That combination is what actually reddens this test;
+    // see the numbers below.
+    //
+    // Most attempts return Overwritten by design (the writer racing
+    // ahead of a read that intentionally sits at the edge of validity)
+    // — expected, not a failure; only a successful read with wrong
+    // content is. Kept as its own test (rather than folded into the
+    // mutation-3 test above) so that test's own 30% measurement stays
+    // undisturbed by a completely different sampling strategy.
+    //
+    // Measured (this workstation, 20 runs each):
+    //   Unmutated (guard band present): 20/20 clean (100%), ~0.11s/run.
+    //   Guard band removed (storage_frames = capacity): 12/20 runs (60%)
+    //     produced a genuine TornRead (e.g. "got 2000000, want 1991808",
+    //     a diff of exactly 2*capacity in floats — one full lap ahead,
+    //     the guard-band-removal signature), 0 convergence-cap trips.
+    // This is the first test in this file that actually pins the guard
+    // band behaviorally, not just via the init test's allocation
+    // arithmetic.
+    const cap_frames = 4096;
+    const chans = 2;
+    const block_frames = 3968; // large: widens a single in-flight chunk's unpublished window
+    const offset = 64; // small and INDEPENDENT of block_frames — see above for why coupling them fails
+    const n = cap_frames - offset; // full window minus the (small, independent) tolerance offset
+    var ring = try Ring.init(std.testing.allocator, .{
+        .sample_rate = 48_000,
+        .channels = chans,
+        .seconds = @as(f64, cap_frames) / 48_000.0,
+    });
+    defer ring.deinit();
+
+    const H = struct {
+        fn expected(abs_frame: u64, ch: u64) f32 {
+            return @floatFromInt((abs_frame * chans + ch) % (1 << 24));
+        }
+        fn writerLoop(r: *Ring, stop: *std.atomic.Value(bool)) void {
+            var abs: u64 = 0;
+            var block: [block_frames * chans]f32 = undefined;
+            while (!stop.load(.monotonic)) {
+                for (0..block_frames) |i| {
+                    for (0..chans) |c| {
+                        block[i * chans + c] = expected(abs + i, c);
+                    }
+                }
+                r.write(&block);
+                abs += block_frames;
+            }
+        }
+    };
+
+    var stop = std.atomic.Value(bool).init(false);
+    const writer = try std.Thread.spawn(.{}, H.writerLoop, .{ &ring, &stop });
+    defer writer.join();
+    defer stop.store(true, .monotonic);
+
+    // Most attempts return Overwritten by design (see above), so the
+    // attempt budget needs to be much larger relative to the success
+    // target than the mutation-3 test's. Measured numbers (this
+    // workstation): see the task report.
+    const target_successes: u64 = 500;
+    const max_attempts: u64 = target_successes * 20_000;
+    var attempts: u64 = 0;
+    var successes: u64 = 0;
+    var overwritten: u64 = 0;
+    var out: [n * chans]f32 = undefined;
+    while (successes < target_successes and attempts < max_attempts) {
+        attempts += 1;
+        const tw = ring.total_written.load(.acquire);
+        if (tw < cap_frames - offset) {
+            std.atomic.spinLoopHint();
+            continue;
+        }
+        const abs_start = tw + offset - cap_frames; // add before subtract: avoids an intermediate underflow
+        ring.read(abs_start, &out) catch |err| {
+            if (err == error.Overwritten) overwritten += 1;
+            continue;
+        };
+        for (0..n) |i| {
+            for (0..chans) |c| {
+                const want = H.expected(abs_start + i, c);
+                if (out[i * chans + c] != want) {
+                    std.debug.print("TORN at abs {d} ch {d}: got {d}, want {d}\n", .{ abs_start + i, c, out[i * chans + c], want });
+                    return error.TornRead;
+                }
+            }
+        }
+        successes += 1;
+    }
+    if (successes < target_successes) {
+        std.debug.print(
+            "guard band boundary test: only {d}/{d} successes in {d} attempts ({d} Overwritten); cap {d}\n",
+            .{ successes, target_successes, attempts, overwritten, max_attempts },
         );
         return error.StressTestDidNotConverge;
     }

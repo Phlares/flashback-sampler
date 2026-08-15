@@ -1,3 +1,6 @@
+# Deletion-candidate holding area (see global CLAUDE.md sequester policy)
+/_ToRemove/
+
 # Python
 __pycache__/
 *.py[cod]
