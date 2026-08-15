@@ -182,38 +182,58 @@ test "pcm24 writes 3 little-endian bytes per sample" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x00, 0x80 }, out[3..6]); // -8388607
 }
 
-// Scratchpad path, not a repo-relative one: this test writes a real file
-// and the brief's bare relative filename would litter core/ if `zig
-// build test` is ever invoked from a different cwd (or the deferred
-// cleanup fails). The scratchpad is session-local and already outside
-// version control.
-const roundtrip_test_path = "C:/Users/Ryon/AppData/Local/Temp/claude/C--Users-Ryon-Documents-dev/3b2cf763-0187-47aa-9da3-7c089ed81d99/scratchpad/zig-wav-roundtrip-test.wav";
+// `writeFile` takes a path, not a `Dir` — that's the shape Task 6's C
+// ABI needs (a C caller has no `Dir` handle to hand in), so it must
+// stay that way. `std.testing.tmpDir` hands back an already-open
+// `Dir` for reading, but `writeFile` needs a *string* to write
+// through. `tmpDir` builds its directory at a fixed, cwd-relative
+// spot — `.zig-cache/tmp/<random sub_path>/` — and returns that
+// `sub_path`, so joining it back into the same relative form gives
+// `writeFile` a path that resolves to the exact directory `tmpDir`
+// already created and opened. This is portable (no machine-specific
+// absolute path baked in), self-cleaning (`tmp.cleanup()` deletes the
+// whole subtree — no more `defer ... deleteFile(...) catch {}`), and
+// still never touches a tracked path in the repo, since `.zig-cache`
+// is gitignored build output.
+fn tmpWritePath(buf: []u8, tmp: *const std.testing.TmpDir, filename: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, filename }) catch unreachable;
+}
 
 test "writeFile round-trips float32 through a real file" {
-    defer std.Io.Dir.cwd().deleteFile(std.testing.io, roundtrip_test_path) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [64]u8 = undefined;
+    const path = tmpWritePath(&path_buf, &tmp, "roundtrip.wav");
+
     const in = [_]f32{ 0.1, -0.2, 0.3, -0.4 }; // 2 stereo frames
-    try writeFile(roundtrip_test_path, &in, 48_000, 2, .float32);
+    try writeFile(path, &in, 48_000, 2, .float32);
     var buf: [44 + 16]u8 = undefined;
-    const got = try std.Io.Dir.cwd().readFile(std.testing.io, roundtrip_test_path, &buf);
+    const got = try tmp.dir.readFile(std.testing.io, "roundtrip.wav", &buf);
     try std.testing.expectEqual(@as(usize, 60), got.len);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&in), got[44..]);
 }
 
 test "writeFile with zero samples writes a header-only file" {
-    const path = "C:/Users/Ryon/AppData/Local/Temp/claude/C--Users-Ryon-Documents-dev/3b2cf763-0187-47aa-9da3-7c089ed81d99/scratchpad/zig-wav-empty-test.wav";
-    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [64]u8 = undefined;
+    const path = tmpWritePath(&path_buf, &tmp, "empty.wav");
+
     const in = [_]f32{};
     try writeFile(path, &in, 48_000, 2, .pcm_16);
     var buf: [header_len]u8 = undefined;
-    const got = try std.Io.Dir.cwd().readFile(std.testing.io, path, &buf);
+    const got = try tmp.dir.readFile(std.testing.io, "empty.wav", &buf);
     try std.testing.expectEqual(@as(usize, header_len), got.len);
     try std.testing.expectEqual(@as(u32, 36), std.mem.readInt(u32, got[4..8], .little)); // 36 + 0 data bytes
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, got[40..44], .little)); // data chunk size 0
 }
 
 test "writeFile spans more than one chunk-buffer iteration" {
-    const path = "C:/Users/Ryon/AppData/Local/Temp/claude/C--Users-Ryon-Documents-dev/3b2cf763-0187-47aa-9da3-7c089ed81d99/scratchpad/zig-wav-chunked-test.wav";
-    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [64]u8 = undefined;
+    const path = tmpWritePath(&path_buf, &tmp, "chunked.wav");
+
     // writeFile's fixed buffer caps a chunk at 16384 samples; +5 forces
     // a second, partial chunk through the `while` loop — the round-trip
     // test above only ever exercises a single chunk.
@@ -222,7 +242,7 @@ test "writeFile spans more than one chunk-buffer iteration" {
     for (&samples, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) / @as(f32, n);
     try writeFile(path, &samples, 44_100, 1, .float32);
     var buf: [header_len + n * 4]u8 = undefined;
-    const got = try std.Io.Dir.cwd().readFile(std.testing.io, path, &buf);
+    const got = try tmp.dir.readFile(std.testing.io, "chunked.wav", &buf);
     try std.testing.expectEqual(@as(usize, header_len + n * 4), got.len);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&samples), got[header_len..]);
 }
