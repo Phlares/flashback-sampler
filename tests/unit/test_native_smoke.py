@@ -17,6 +17,35 @@ def test_roundtrip_write_read():
     buf.close()
 
 
+@pytest.mark.parametrize("frames", [
+    pytest.param(np.arange(4, dtype=np.float32), id="1d_mono_into_stereo"),
+    pytest.param(np.arange(4, dtype=np.float32).reshape(4, 1), id="2d_single_column_into_stereo"),
+    pytest.param(np.arange(12, dtype=np.float32).reshape(4, 3), id="3_columns_into_stereo"),
+])
+def test_write_rejects_channel_count_mismatch(frames):
+    """write() must reject frames whose channel count doesn't match the
+    ring's. Previously it passed len(frames) straight to fb_ring_write,
+    which reads n_frames * self.channels floats out of whatever buffer
+    the caller handed it regardless of that buffer's actual width --
+    confirmed by reproducing against the built DLL: writing a 4-element
+    1-D (mono) array into a channels=2 ring returns 2 real frames
+    followed by 2 frames of uninitialized heap (e.g. 8.19e+34), not a
+    clean error and not the value AudioCircularBuffer would produce.
+
+    AudioCircularBuffer instead silently BROADCASTS a narrower array
+    across channels (e.g. the same 1-D input becomes [[0,0],[1,1],[2,2],
+    [3,3]]) -- a deliberate, documented parity divergence: broadcasting
+    masks a real caller bug by writing plausible-looking wrong audio,
+    which is exactly the "conflating shapes corrupts silently" failure
+    mode this phase exists to close off. Raising is the safer contract
+    even though no current app caller reaches this path (every capture
+    source already conforms its channel count before writing)."""
+    buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=2)
+    with pytest.raises(ValueError):
+        buf.write(frames)
+    buf.close()
+
+
 def test_zero_copy_storage_view_sees_writes():
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=1)
     buf.write(np.array([0.5], dtype=np.float32))
@@ -26,7 +55,7 @@ def test_zero_copy_storage_view_sees_writes():
 
 def test_get_segment_retries_on_transient_read_failure(monkeypatch):
     """native-impl internal: deterministically pins get_segment's 3-attempt
-    retry loop (matching get_latest's own, and Python's _copy_abs_range).
+    retry loop (matching get_latest's own, and Python's copy_abs_range).
     A live writer/reader race is inherently probabilistic -- pounding the
     buffer from a background thread does NOT reliably prove the retry
     loop matters, since most single-attempt reads still succeed by luck
@@ -51,6 +80,36 @@ def test_get_segment_retries_on_transient_read_failure(monkeypatch):
     seg = buf.get_segment(start_ago=0.3, end_ago=0.05)
     assert calls["n"] == 3, "get_segment did not retry 3 times"
     assert seg.shape[0] > 0, "get_segment gave up instead of succeeding on the 3rd attempt"
+    buf.close()
+
+
+def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
+    """native-impl internal: copy_abs_range must retry a transient seqlock
+    tear the same way get_latest/get_segment do (see the retry test above
+    for why a live writer/reader race can't deterministically prove this --
+    monkeypatching fb_ring_read forces two synthetic failures before
+    success). Without a retry, checkout.py's create_from_abs_range (drag-
+    select) and MixedCaptureSource's mixer thread (mixed_capture.py,
+    polling a live sub-source ring every 10ms) both see a torn read as a
+    hard failure -- an empty array / RuntimeError -- on a request that
+    would have succeeded a moment later, a real behavior gap against
+    AudioCircularBuffer.copy_abs_range's 3-attempt retry."""
+    buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(np.arange(500, dtype=np.float32)[:, None])
+
+    real_read = buf._lib.fb_ring_read
+    calls = {"n": 0}
+
+    def flaky_read(ring, abs_start, n_frames, out_ptr):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return native._OVERWRITTEN  # simulate a transient seqlock tear
+        return real_read(ring, abs_start, n_frames, out_ptr)
+
+    monkeypatch.setattr(buf._lib, "fb_ring_read", flaky_read)
+    seg = buf.copy_abs_range(100, 200)
+    assert calls["n"] == 3, "copy_abs_range did not retry 3 times"
+    assert seg.shape[0] == 100, "copy_abs_range gave up instead of succeeding on the 3rd attempt"
     buf.close()
 
 
@@ -79,6 +138,26 @@ def test_get_peak_bins_correct_past_capacity_before_physical_wrap():
     assert np.all(np.diff(maxes) > 0), f"bins not monotonically increasing: {maxes}"
     assert maxes[-1] == pytest.approx(9996.0, abs=5)
     buf.close()
+
+
+def test_load_skips_a_candidate_that_exists_but_is_not_a_valid_library(tmp_path, monkeypatch):
+    """A bundled-but-broken library (architecture mismatch, missing
+    runtime dependency, a corrupted/truncated file) is the realistic
+    distribution failure this fallback exists for -- load()'s own
+    docstring promises None "if not built anywhere", and
+    make_ring_buffer()/PLATFORM.md both promise a graceful fallback to
+    the Python implementation, not a crash. Previously C.CDLL(...) was
+    unguarded: a candidate that EXISTS but is not a loadable library
+    raises OSError straight out of load() -> make_ring_buffer() ->
+    AppState.__init__, crashing app startup instead of skipping to the
+    next candidate (or falling back to Python if none work) exactly like
+    a MISSING candidate already does."""
+    bad = tmp_path / "not_a_real_library.dll"
+    bad.write_text("this is not a shared library")
+    monkeypatch.setattr(native, "_candidates", lambda: [bad])
+    monkeypatch.setattr(native, "_lib", None)
+    monkeypatch.setattr(native, "_lib_tried", False)
+    assert native.load() is None
 
 
 def test_wav_float32_decode_equals_soundfile(tmp_path):
