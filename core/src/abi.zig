@@ -5,6 +5,7 @@
 //! shared library.
 const std = @import("std");
 const Ring = @import("Ring.zig");
+const Summary = @import("Summary.zig");
 const wav = @import("wav.zig");
 
 // One allocator instance for every ABI-created object. smp_allocator is
@@ -82,20 +83,20 @@ test "fb_ring_summary_bins rejects n_bins == 0" {
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_ring_summary_bins(ring, 0, 0, 0, &out));
 }
 
-test "fb_ring_summary_bins rejects n_bins > 4096" {
+test "fb_ring_summary_bins rejects n_bins > Summary.max_bins" {
     const ring = fb_ring_create(48_000, 1, 1.0) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
-    var out: [4097]f32 = undefined;
-    try std.testing.expectEqual(FbStatus.invalid_arg, fb_ring_summary_bins(ring, 4097, 0, 0, &out));
+    var out: [Summary.max_bins + 1]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_ring_summary_bins(ring, Summary.max_bins + 1, 0, 0, &out));
 }
 
-test "fb_ring_summary_bins accepts n_bins == 4096, the inclusive boundary" {
+test "fb_ring_summary_bins accepts n_bins == Summary.max_bins, the inclusive boundary" {
     // Pins the guard's `>` (not `>=`) — a mutation to `>=` would reject
     // this exact value and this test would catch it going red.
     const ring = fb_ring_create(48_000, 1, 1.0) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
-    var out: [4096]f32 = undefined;
-    try std.testing.expectEqual(FbStatus.ok, fb_ring_summary_bins(ring, 4096, 0, 0, &out));
+    var out: [Summary.max_bins]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.ok, fb_ring_summary_bins(ring, Summary.max_bins, 0, 0, &out));
 }
 
 test "fb_wav_write rejects invalid rate/channels/subtype without touching disk" {
@@ -108,6 +109,44 @@ test "fb_wav_write rejects invalid rate/channels/subtype without touching disk" 
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 0, 0)); // channels == 0
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 2, 3)); // subtype out of range
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 2, -1)); // subtype negative
+}
+
+// fb_ring_create's guard has FIVE independent clauses; each one gets its
+// own isolated test (three-of-five valid, one under test) so a fully
+// deletable or half-deletable guard shows up immediately as a specific
+// red test, not a green suite that never exercised the boundary at all.
+test "fb_ring_create rejects rate == 0" {
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(0, 2, 1.0));
+}
+
+test "fb_ring_create rejects channels == 0" {
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 0, 1.0));
+}
+
+test "fb_ring_create rejects channels == 3" {
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 3, 1.0));
+}
+
+test "fb_ring_create rejects seconds <= 0" {
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, 0.0));
+}
+
+// NaN and +Infinity both fail `seconds <= 0` (IEEE 754: any comparison
+// against NaN is false; +Infinity compares greater than 0), so neither
+// is caught by that clause alone — they need their own, separate
+// isFinite check. Without it they reach Ring.init's
+// `@intFromFloat(config.seconds * sample_rate)`, and @intFromFloat on a
+// non-finite float is documented illegal behavior: a ReleaseSafe
+// process abort, not a catchable error. fb_ring_create is a C boundary
+// fed straight from ctypes' c_double — Python-side float() conversions
+// can hand across NaN with no complaint, so this is directly reachable,
+// not a theoretical input.
+test "fb_ring_create rejects NaN seconds (does not satisfy seconds <= 0)" {
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.nan(f64)));
+}
+
+test "fb_ring_create rejects +Infinity seconds (does not satisfy seconds <= 0)" {
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.inf(f64)));
 }
 
 test "fb_wav_write round-trips a real file" {
@@ -124,7 +163,13 @@ test "fb_wav_write round-trips a real file" {
 }
 
 export fn fb_ring_create(rate: u32, channels: u16, seconds: f64) ?*Ring {
-    if (rate == 0 or channels == 0 or channels > 2 or seconds <= 0) return null;
+    // Five independent clauses, each pinned by its own test above.
+    // !std.math.isFinite(seconds) is deliberately its own clause, not
+    // folded into `seconds <= 0`: NaN and +Infinity both evaluate that
+    // comparison as false (IEEE 754), so without a separate finite
+    // check they'd reach Ring.init's @intFromFloat on a non-finite
+    // float — documented illegal behavior, a ReleaseSafe process abort.
+    if (rate == 0 or channels == 0 or channels > 2 or !std.math.isFinite(seconds) or seconds <= 0) return null;
     const ring = allocator.create(Ring) catch return null;
     ring.* = Ring.init(allocator, .{
         .sample_rate = rate,
@@ -198,7 +243,11 @@ export fn fb_ring_read(ring: *Ring, abs_start: u64, n_frames: usize, out: [*]f32
 }
 
 export fn fb_ring_summary_bins(ring: *Ring, n_bins: usize, n_samples: u64, bin_span_frames: u64, out_rms: [*]f32) FbStatus {
-    if (n_bins == 0 or n_bins > 4096) return .invalid_arg; // Summary's asserted bound
+    // Summary.max_bins is the SAME constant Summary.rmsBins sizes its own
+    // scratch arrays from — reusing it here (rather than a duplicated
+    // literal 4096) means a future change to that bound can't silently
+    // desync this guard from what rmsBins actually asserts.
+    if (n_bins == 0 or n_bins > Summary.max_bins) return .invalid_arg;
     ring.summary.rmsBins(ring.total_written.load(.acquire), n_samples, bin_span_frames, out_rms[0 .. n_bins * ring.channels]);
     return .ok;
 }
