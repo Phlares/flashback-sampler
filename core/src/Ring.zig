@@ -74,7 +74,12 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Ring {
     // using storage_frames here would silently diverge from the Python
     // reference whenever capacity isn't slot-aligned.
     var summary = try Summary.init(allocator, capacity, config.summary_slot_frames, config.channels);
-    errdefer summary.deinit(); // multi-errdefer init: unwinds frames above too if this succeeded but a later field failed
+    // No fallible operation follows before the return below, so this
+    // errdefer never actually fires today — kept as the same
+    // multi-errdefer pattern as `frames` above (each fallible allocation
+    // paired with its own unwind) so the struct stays safe to extend
+    // with another `try` later without re-deriving the pattern.
+    errdefer summary.deinit();
     return .{
         .allocator = allocator,
         .frames = frames,
@@ -849,17 +854,23 @@ test "write feeds the summary; flush poisons it" {
     ring.summary.rmsBins(ring.total_written.load(.acquire), 0, 0, &out);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-6);
     ring.flush();
-    ring.summary.rmsBins(0, 0, 0, &out);
-    try std.testing.expectEqual(@as(f32, 0), out[0]);
+    // Direct check on the mechanism, not rmsBins: rmsBins(0, ...) here
+    // would early-return on n_samples == 0 right after its leading
+    // @memset(out, 0), before ever reading slot_abs — it can't tell
+    // poison() ran from poison() being skipped (see the finding in the
+    // task report / the follow-up test below, which pins the observable
+    // consequence). slot_abs is a public field; check it directly.
+    try std.testing.expectEqual(@as(i64, -1), ring.summary.slot_abs[0]);
 }
 
 test "flush poisons stale slot generations, not just resets total_written" {
-    // The test above calls rmsBins(0, ...) post-flush, which returns
-    // early on n_samples == 0 before ever reading slot_abs — it cannot
-    // tell poison() ran from poison() being skipped. This test targets
-    // the actual bug poisoning prevents: post-flush, abs indices restart
-    // at 0, so a slot touched again by a NEW write can collide with its
-    // OWN stale pre-flush tag (same numeric abs value) and wrongly take
+    // The test above checks slot_abs directly, since rmsBins(0, ...)
+    // would early-return on n_samples == 0 before ever reading slot_abs
+    // — it cannot tell poison() ran from poison() being skipped. This
+    // test targets the actual bug poisoning prevents: post-flush, abs
+    // indices restart at 0, so a slot touched again by a NEW write can
+    // collide with its OWN stale pre-flush tag (same numeric abs value)
+    // and wrongly take
     // the "same generation, accumulate" branch instead of "new
     // generation, overwrite" — silently merging pre- and post-flush
     // audio into one slot's stats.
