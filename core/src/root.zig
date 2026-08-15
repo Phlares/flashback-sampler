@@ -6,6 +6,7 @@ const std = @import("std");
 // from this root module) actually pulls in Ring.zig's test blocks.
 pub const Ring = @import("Ring.zig");
 pub const Summary = @import("Summary.zig");
+pub const wav = @import("wav.zig");
 
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
 // declarations that are actually used, so an unreferenced `Ring` re-export
@@ -17,10 +18,10 @@ pub const Summary = @import("Summary.zig");
 //
 // IMPORTANT — `refAllDecls` is NOT recursive (`lib/std/testing.zig`'s
 // implementation walks exactly one level of pub decls; 0.16 has no
-// `refAllDeclsRecursive`). It only reaches Ring.zig's tests today because
-// `Ring` is a direct pub decl of this file. The operative rule for every
-// future module (Task 4's Summary, Task 5, Task 6's C ABI, ...): each new
-// source file must be re-exported here as its own
+// `refAllDeclsRecursive`). It reaches Ring.zig's, Summary.zig's, and
+// wav.zig's tests only because each is a direct pub decl of this file.
+// The operative rule for every future module (Task 6's C ABI, ...): each
+// new source file must be re-exported here as its own
 // `pub const X = @import("X.zig");`, or its tests will silently not be
 // compiled by `zig build test`.
 test {
