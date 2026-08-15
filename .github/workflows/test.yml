@@ -23,6 +23,10 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
+      # A missing/broken native build must turn CI red, not quietly skip
+      # the parity harness's native half (see tests/conftest.py). Unset
+      # for local dev runs, which stay green on Zig-less workstations.
+      FLASHBACK_REQUIRE_NATIVE: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +45,14 @@ jobs:
 
       - name: Install package + dev extras
         run: pip install -e ".[dev]"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build native core (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+        working-directory: core
 
       - name: Run unit tests with coverage
         run: >

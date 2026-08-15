@@ -12,7 +12,219 @@ import time
 from typing import Optional, Tuple
 
 
-class AudioCircularBuffer:
+# Cap on samples-per-bin actually inspected when computing peaks. Above
+# this, we stride-sample the bin's range so the per-tick work stays
+# bounded regardless of buffer size. 256 samples × 360 bins × stereo
+# is ~46k inspected values — sub-millisecond — and keeps enough
+# detail that the rendered waveform looks the same to the eye.
+#
+# Module-level (not just a class attribute) because _peak_bins_impl below
+# is a free function shared by both AudioCircularBuffer and
+# NativeAudioCircularBuffer (flashback_sampler/core/native.py) — it has no
+# `self` to read a class attribute off. AudioCircularBuffer keeps the same
+# value available as `self._PEAK_BINS_MAX_SAMPLES_PER_BIN` (assigned from
+# this constant, below) so existing external references to that name keep
+# working unchanged.
+_PEAK_BINS_MAX_SAMPLES_PER_BIN = 256
+
+# Slack left below the readable capacity when the ring is saturated. If a
+# reader snapshots abs_start = total_written - capacity (no slack), any
+# writer advance between snapshot and verify makes the tear check fire —
+# the oldest sample gets overwritten on the writer's very next wrap.
+# 4096 samples ≈ 85 ms at 48 kHz, imperceptible at the edge of a
+# 15-minute ring, and larger than a typical WASAPI period block so the
+# writer can tick several times during our read without invalidating.
+_PEAK_BINS_READ_HEADROOM = 4096
+
+
+def _peak_bins_impl(ring, capacity, snapshot, verify, sample_rate, channels, seconds, n_bins):
+    """
+    Downsample the most recent `seconds` of audio in `ring` into `n_bins`
+    min/max pairs for waveform rendering. Shared by AudioCircularBuffer
+    and NativeAudioCircularBuffer — the only differences between the two
+    implementations are how `ring` is backed (Python-owned array vs a
+    zero-copy numpy view over Zig-owned storage) and how `snapshot`/
+    `verify` synchronize with the writer (a Python lock vs the Zig ring's
+    seqlock counter), so those are the only things passed in as callables.
+
+    `ring` may be LARGER than `capacity` (the native buffer's storage_frames
+    guard band — see native.py) — `len(ring)` is therefore used as the
+    MODULUS for every wrap/index computation below, while `capacity` (the
+    READABLE window) is used only for the headroom clamp. Python's caller
+    passes a `ring` whose length equals `capacity`, so the two collapse to
+    the same number there; native's caller passes a `ring` whose length is
+    `capacity + guard band`, so they diverge. Conflating the two would
+    silently read stale/zeroed guard-band frames into the waveform.
+
+    `snapshot()` returns the writer's current total_written; `verify(abs_start)`
+    returns whether the span starting at `abs_start` is still valid (not
+    yet lapped by the writer) — same seqlock-style retry as get_latest.
+
+    Returns float32 array of shape (n_bins, 2, channels) where
+    result[i, 0, c] = min and result[i, 1, c] = max of channel `c` in
+    bin `i`. An empty buffer returns a zero array of the requested shape.
+
+    Reads ring storage directly via numpy views — does NOT copy the
+    whole window into a new array. This matters at 30 Hz polling on
+    a 15-min × 48 kHz × stereo ring (≈345 MB): a copy-based read
+    would saturate memory bandwidth. Strided sub-sampling caps the
+    worst-case bin work so the call stays sub-millisecond even when
+    the ring is full.
+    """
+    if n_bins <= 0:
+        raise ValueError("n_bins must be positive")
+    out_shape = (n_bins, 2, channels)
+    empty = np.zeros(out_shape, dtype=np.float32)
+
+    # The physical size `ring` is actually indexed/wrapped against — see
+    # the docstring above. For Python this equals `capacity`; for native
+    # it is `capacity + guard band` (native.py's storage_frames).
+    modulus = len(ring)
+
+    # Retry up to 3 times on tear, matching get_latest / _copy_abs_range.
+    # Each retry re-snapshots abs_start so the window rides the writer.
+    for attempt in range(3):
+        out = np.zeros(out_shape, dtype=np.float32)
+
+        total_written = snapshot()
+        # On a production-size ring, always leave headroom below capacity
+        # so the writer can advance during iteration without tripping the
+        # tear path. Consistent n across consecutive calls is what keeps
+        # the stride-aligned sample positions stable — mixing "first-
+        # attempt n=capacity" with "retry n=capacity-headroom" frame-to-
+        # frame shifts each bin's abs range by thousands of samples and
+        # re-rotates which stride-aligned positions fall inside it.
+        # Only the small-ring test case (capacity <= 2 * headroom) skips
+        # the reduction so single-threaded unit tests can still read the
+        # entire buffer.
+        n_avail = min(total_written, capacity)
+        if n_avail >= capacity and capacity > 2 * _PEAK_BINS_READ_HEADROOM:
+            n_avail = capacity - _PEAK_BINS_READ_HEADROOM
+        n = min(int(seconds * sample_rate), n_avail)
+        if n <= 0:
+            return empty
+        abs_start = total_written - n
+        ring_start = abs_start % modulus
+
+        edges = np.linspace(0, n, n_bins + 1, dtype=np.int64)
+        span_ref = int(edges[1]) - int(edges[0])
+        stride = max(1, span_ref // _PEAK_BINS_MAX_SAMPLES_PER_BIN)
+
+        # The stride grid is anchored to ABSOLUTE sample indices, not
+        # to the bin's position in the rolling window — whether audio
+        # sample at abs index Y is picked depends on Y alone. Rolling
+        # the window by a few samples per tick therefore does not
+        # rotate the sampled subset, so bin peaks stay stable across
+        # ticks instead of flickering as stride-offset groups cycle.
+
+        if stride == 1:
+            # Small window / small ring — no sampling needed. Use
+            # per-bin slicing with wrap handling.
+            for i in range(n_bins):
+                a = int(edges[i])
+                b = int(edges[i + 1])
+                if b <= a:
+                    if i > 0:
+                        out[i] = out[i - 1]
+                    continue
+                ra = (ring_start + a) % modulus
+                rb = ra + (b - a)
+                if rb <= modulus:
+                    chunk = ring[ra:rb]
+                else:
+                    chunk = np.concatenate([ring[ra:], ring[:rb - modulus]])
+                out[i, 0] = chunk.min(axis=0)
+                out[i, 1] = chunk.max(axis=0)
+        else:
+            # Vectorized stride sampling: build one (n_bins, k) matrix
+            # of ring positions, fancy-index once, then reduce along
+            # the sample axis. Bin peaks stay stable because first_abs
+            # only shifts in stride-size steps as the window rolls.
+            # k sized to fully cover span_ref regardless of alignment.
+            # Tail bins may pull 1–2 positions from the next bin via
+            # modular wrap — a sub-percent overlap with no visible
+            # effect on a rolling waveform.
+            k = span_ref // stride + 1
+            abs_bin_starts = abs_start + edges[:n_bins]
+            # Smallest multiple of stride >= abs_bin_start.
+            first_abs = -(-abs_bin_starts // stride) * stride
+            offsets = np.arange(k, dtype=np.int64) * stride
+            positions = (first_abs[:, None] + offsets[None, :]) % modulus
+            chunks = ring[positions]  # (n_bins, k, channels)
+            out[:, 0] = chunks.min(axis=1)
+            out[:, 1] = chunks.max(axis=1)
+
+        # Seqlock-style verify: if the writer has lapped our slice while
+        # we were iterating, the data we read may be torn. Retry with a
+        # fresh snapshot rather than returning torn data.
+        if verify(abs_start):
+            return out
+        # Lapped — retry with fresh snapshot.
+
+    # Three attempts failed — return empty rather than torn data.
+    return empty
+
+
+class RingDerivedOps:
+    """
+    Accessors derived purely from a small set of primitives — total_written,
+    write_pos, buffer_size, sample_rate, channels, duration, gain, and
+    get_latest — that both ring implementations expose identically. Shared
+    by AudioCircularBuffer (Python-owned ring, RLock-protected) and
+    NativeAudioCircularBuffer (flashback_sampler/core/native.py; Zig-owned
+    ring via ctypes) so neither has to re-derive the same arithmetic.
+
+    Does not read or write any lock, array, or ring-specific field itself —
+    that keeps it valid for a subclass whose primitives are backed by
+    ctypes calls into Zig instead of Python attributes.
+    """
+
+    @property
+    def gain_db(self) -> float:
+        """Record gain in dB; -inf when muted."""
+        from flashback_sampler.core.source_status import dbfs
+        return dbfs(self.gain)
+
+    @gain_db.setter
+    def gain_db(self, db: float) -> None:
+        self.gain = 0.0 if db == -math.inf else float(10.0 ** (db / 20.0))
+
+    def get_rms_levels(self, window_seconds: float = 0.1) -> np.ndarray:
+        """RMS level per channel for the last window_seconds (for metering)."""
+        audio = self.get_latest(window_seconds)
+        if len(audio) == 0:
+            return np.zeros(self.channels)
+        return np.sqrt(np.mean(audio ** 2, axis=0))
+
+    @property
+    def buffered_seconds(self) -> float:
+        """How many seconds of audio are currently in the buffer."""
+        return min(self.total_written, self.buffer_size) / self.sample_rate
+
+    @property
+    def is_full(self) -> bool:
+        return self.total_written >= self.buffer_size
+
+    def status(self) -> dict:
+        return {
+            "buffered_seconds": round(self.buffered_seconds, 1),
+            "buffer_capacity_seconds": self.duration,
+            "fill_percent": round(100 * self.buffered_seconds / self.duration, 1),
+            "write_pos": self.write_pos,
+            "total_written_samples": self.total_written,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
+            # Same number as self.buffer.nbytes / 1_048_576 for
+            # AudioCircularBuffer, but derived without touching `.buffer`
+            # so a subclass whose buffer is a zero-copy view over
+            # Zig-owned (and possibly larger, guard-banded) storage
+            # reports the READABLE capacity's footprint, not the
+            # physical allocation's.
+            "memory_mb": round(self.buffer_size * self.channels * 4 / 1_048_576, 1),
+        }
+
+
+class AudioCircularBuffer(RingDerivedOps):
     """
     Ring buffer that holds audio data for a configurable duration.
 
@@ -34,6 +246,15 @@ class AudioCircularBuffer:
     # 4096 samples ≈ 85 ms at 48 kHz; fine enough for smooth rolling,
     # coarse enough that the summary stays tiny (≈330 KB for 15 min).
     _SUMMARY_SLOT_SAMPLES = 4096
+
+    # Kept as class attributes (existing external surface: self._PEAK_BINS_*
+    # is read at construction-adjacent call sites) but sourced from the
+    # module-level constants above so there is exactly one number for each
+    # — _peak_bins_impl (shared with NativeAudioCircularBuffer, which has
+    # no class of its own to hang these off) reads the module constants
+    # directly.
+    _PEAK_BINS_MAX_SAMPLES_PER_BIN = _PEAK_BINS_MAX_SAMPLES_PER_BIN
+    _PEAK_BINS_READ_HEADROOM = _PEAK_BINS_READ_HEADROOM
 
     def __init__(
         self,
@@ -72,16 +293,6 @@ class AudioCircularBuffer:
     # ------------------------------------------------------------------
     # Write path
     # ------------------------------------------------------------------
-
-    @property
-    def gain_db(self) -> float:
-        """Record gain in dB; -inf when muted."""
-        from flashback_sampler.core.source_status import dbfs
-        return dbfs(self.gain)
-
-    @gain_db.setter
-    def gain_db(self, db: float) -> None:
-        self.gain = 0.0 if db == -math.inf else float(10.0 ** (db / 20.0))
 
     def write(self, frames: np.ndarray) -> None:
         """
@@ -253,15 +464,6 @@ class AudioCircularBuffer:
     # Utility
     # ------------------------------------------------------------------
 
-    @property
-    def buffered_seconds(self) -> float:
-        """How many seconds of audio are currently in the buffer."""
-        return min(self.total_written, self.buffer_size) / self.sample_rate
-
-    @property
-    def is_full(self) -> bool:
-        return self.total_written >= self.buffer_size
-
     def flush(self) -> None:
         """
         Discard all currently buffered audio. Resets write_pos and
@@ -282,141 +484,19 @@ class AudioCircularBuffer:
             self._sum_count.fill(0)
             self._sum_slot_abs.fill(-1)
 
-    def get_rms_levels(self, window_seconds: float = 0.1) -> np.ndarray:
-        """RMS level per channel for the last window_seconds (for metering)."""
-        audio = self.get_latest(window_seconds)
-        if len(audio) == 0:
-            return np.zeros(self.channels)
-        return np.sqrt(np.mean(audio ** 2, axis=0))
-
-    # Cap on samples-per-bin actually inspected when computing peaks. Above
-    # this, we stride-sample the bin's range so the per-tick work stays
-    # bounded regardless of buffer size. 256 samples × 360 bins × stereo
-    # is ~46k inspected values — sub-millisecond — and keeps enough
-    # detail that the rendered waveform looks the same to the eye.
-    _PEAK_BINS_MAX_SAMPLES_PER_BIN = 256
-
-    # Slack left below buffer_size when the ring is saturated. If a reader
-    # snapshots abs_start = total_written - buffer_size (no slack), any
-    # writer advance between snapshot and verify makes the tear check fire
-    # — the oldest sample gets overwritten on the writer's very next wrap.
-    # 4096 samples ≈ 85 ms at 48 kHz, imperceptible at the edge of a
-    # 15-minute ring, and larger than a typical WASAPI period block so the
-    # writer can tick several times during our read without invalidating.
-    _PEAK_BINS_READ_HEADROOM = 4096
-
     def get_peak_bins(self, seconds: float, n_bins: int) -> np.ndarray:
-        """
-        Downsample the most recent `seconds` of audio into `n_bins` min/max
-        pairs for waveform rendering.
-
-        Returns float32 array of shape (n_bins, 2, channels) where
-        result[i, 0, c] = min and result[i, 1, c] = max of channel `c` in
-        bin `i`. An empty buffer returns a zero array of the requested shape.
-
-        Reads ring storage directly via numpy views — does NOT copy the
-        whole window into a new array. This matters at 30 Hz polling on
-        a 15-min × 48 kHz × stereo ring (≈345 MB): a copy-based read
-        would saturate memory bandwidth. Strided sub-sampling caps the
-        worst-case bin work so the call stays sub-millisecond even when
-        the ring is full.
-        """
-        if n_bins <= 0:
-            raise ValueError("n_bins must be positive")
-        out_shape = (n_bins, 2, self.channels)
-        empty = np.zeros(out_shape, dtype=np.float32)
-
-        bsize = self.buffer_size
-        ring = self.buffer
-
-        # Retry up to 3 times on tear, matching _copy_abs_range. Each
-        # retry re-snapshots abs_start so the window rides the writer.
-        for attempt in range(3):
-            out = np.zeros(out_shape, dtype=np.float32)
-
-            # Snapshot the source range under the lock. Iterate without it.
+        def snapshot():
             with self._lock:
-                n_avail = min(self.total_written, self.buffer_size)
-                # On a production-size ring, always leave headroom below
-                # buffer_size so the writer can advance during iteration
-                # without tripping the tear path. Consistent n across
-                # consecutive calls is what keeps the stride-aligned
-                # sample positions stable — mixing "first-attempt n=bsize"
-                # with "retry n=bsize-headroom" frame-to-frame shifts each
-                # bin's abs range by thousands of samples and re-rotates
-                # which stride-aligned positions fall inside it.
-                # Only the small-ring test case (bsize ≤ 2 × headroom)
-                # skips the reduction so single-threaded unit tests can
-                # still read the entire buffer.
-                if (
-                    n_avail >= bsize
-                    and bsize > 2 * self._PEAK_BINS_READ_HEADROOM
-                ):
-                    n_avail = bsize - self._PEAK_BINS_READ_HEADROOM
-                n = min(int(seconds * self.sample_rate), n_avail)
-                if n <= 0:
-                    return empty
-                abs_start = self.total_written - n
-                ring_start = abs_start % bsize
+                return self.total_written
 
-            edges = np.linspace(0, n, n_bins + 1, dtype=np.int64)
-            span_ref = int(edges[1]) - int(edges[0])
-            stride = max(1, span_ref // self._PEAK_BINS_MAX_SAMPLES_PER_BIN)
-
-            # The stride grid is anchored to ABSOLUTE sample indices, not
-            # to the bin's position in the rolling window — whether audio
-            # sample at abs index Y is picked depends on Y alone. Rolling
-            # the window by a few samples per tick therefore does not
-            # rotate the sampled subset, so bin peaks stay stable across
-            # ticks instead of flickering as stride-offset groups cycle.
-
-            if stride == 1:
-                # Small window / small ring — no sampling needed. Use
-                # per-bin slicing with wrap handling.
-                for i in range(n_bins):
-                    a = int(edges[i])
-                    b = int(edges[i + 1])
-                    if b <= a:
-                        if i > 0:
-                            out[i] = out[i - 1]
-                        continue
-                    ra = (ring_start + a) % bsize
-                    rb = ra + (b - a)
-                    if rb <= bsize:
-                        chunk = ring[ra:rb]
-                    else:
-                        chunk = np.concatenate([ring[ra:], ring[:rb - bsize]])
-                    out[i, 0] = chunk.min(axis=0)
-                    out[i, 1] = chunk.max(axis=0)
-            else:
-                # Vectorized stride sampling: build one (n_bins, k) matrix
-                # of ring positions, fancy-index once, then reduce along
-                # the sample axis. Bin peaks stay stable because first_abs
-                # only shifts in stride-size steps as the window rolls.
-                # k sized to fully cover span_ref regardless of alignment.
-                # Tail bins may pull 1–2 positions from the next bin via
-                # modular wrap — a sub-percent overlap with no visible
-                # effect on a rolling waveform.
-                k = span_ref // stride + 1
-                abs_bin_starts = abs_start + edges[:n_bins]
-                # Smallest multiple of stride >= abs_bin_start.
-                first_abs = -(-abs_bin_starts // stride) * stride
-                offsets = np.arange(k, dtype=np.int64) * stride
-                positions = (first_abs[:, None] + offsets[None, :]) % bsize
-                chunks = ring[positions]  # (n_bins, k, channels)
-                out[:, 0] = chunks.min(axis=1)
-                out[:, 1] = chunks.max(axis=1)
-
-            # Seqlock-style verify: if the writer has lapped our slice while
-            # we were iterating, the data we read may be torn. Retry with a
-            # fresh snapshot rather than returning torn data.
+        def verify(abs_start):
             with self._lock:
-                if self.total_written - abs_start <= bsize:
-                    return out
-            # Lapped — retry with fresh snapshot.
+                return self.total_written - abs_start <= self.buffer_size
 
-        # Three attempts failed — return empty rather than torn data.
-        return empty
+        return _peak_bins_impl(
+            self.buffer, self.buffer_size, snapshot, verify,
+            self.sample_rate, self.channels, seconds, n_bins,
+        )
 
     def get_summary_bins(
         self,
@@ -490,15 +570,3 @@ class AudioCircularBuffer:
                 bin_ss[nonzero] / bin_cnt[nonzero, None]
             ).astype(np.float32)
         return out
-
-    def status(self) -> dict:
-        return {
-            "buffered_seconds": round(self.buffered_seconds, 1),
-            "buffer_capacity_seconds": self.duration,
-            "fill_percent": round(100 * self.buffered_seconds / self.duration, 1),
-            "write_pos": self.write_pos,
-            "total_written_samples": self.total_written,
-            "sample_rate": self.sample_rate,
-            "channels": self.channels,
-            "memory_mb": round(self.buffer.nbytes / 1_048_576, 1),
-        }

@@ -7,6 +7,7 @@ const std = @import("std");
 pub const Ring = @import("Ring.zig");
 pub const Summary = @import("Summary.zig");
 pub const wav = @import("wav.zig");
+pub const abi = @import("abi.zig");
 
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
 // declarations that are actually used, so an unreferenced `Ring` re-export
@@ -26,4 +27,15 @@ pub const wav = @import("wav.zig");
 // compiled by `zig build test`.
 test {
     std.testing.refAllDecls(@This());
+}
+
+// `refAllDecls` above (see the note it carries) reaches abi.zig's own
+// test blocks because `abi` is a direct pub decl of THIS file — but it
+// does nothing for abi.zig's `export fn` symbols themselves. Those are
+// only emitted into the shared library if the compiler's Sema actually
+// walks past their declarations, which happens as a side effect of
+// resolving `abi`'s pub decls here. Force-reference it explicitly so
+// this stays true even if refAllDecls's reach ever changes.
+comptime {
+    _ = abi;
 }
