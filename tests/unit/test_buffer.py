@@ -67,6 +67,18 @@ def test_status_shape(buffer_cls):
         assert key in s
 
 
+def test_capacity_bytes_is_readable_capacity_not_physical_storage(buffer_cls):
+    """capacity_bytes must be derived from buffer_size (the READABLE
+    window), not from len(buf.buffer) -- NativeAudioCircularBuffer's raw
+    storage array is buffer_size PLUS a guard band (see native.py's module
+    docstring), so touching .buffer.nbytes directly over-reports RAM.
+    This is exactly the mistake AppState.total_project_ram_bytes made
+    before routing buffer construction through the native implementation
+    surfaced it."""
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
+    assert buf.capacity_bytes == buf.buffer_size * buf.channels * 4
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Write path
 # ─────────────────────────────────────────────────────────────────────────
@@ -209,6 +221,40 @@ def test_get_segment_clamped_to_available(buffer_cls):
     assert seg.shape[0] == 300
     assert seg[0, 0] == pytest.approx(0.0)
     assert seg[-1, 0] == pytest.approx(299.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# copy_abs_range — the shared-surface entry point checkout.py and
+# mixed_capture.py use to read an absolute [abs_start, abs_end) span
+# without reaching into implementation-private internals (a Python lock
+# for AudioCircularBuffer; a raw ctypes read for NativeAudioCircularBuffer).
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_copy_abs_range_returns_exact_absolute_span(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 900, channels=1))
+    # Absolute samples 400..800 (same span as test_get_segment_non_wrapped)
+    seg = buf.copy_abs_range(400, 800)
+    assert seg.shape[0] == 400
+    assert seg[0, 0] == pytest.approx(400.0)
+    assert seg[-1, 0] == pytest.approx(799.0)
+
+
+def test_copy_abs_range_across_wrap(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 1500, channels=1))  # holds abs 500..1500
+    seg = buf.copy_abs_range(700, 1300)
+    assert seg.shape[0] == 600
+    assert seg[0, 0] == pytest.approx(700.0)
+    assert seg[-1, 0] == pytest.approx(1299.0)
+
+
+def test_copy_abs_range_overwritten_span_returns_empty(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 1500, channels=1))  # holds abs 500..1500
+    seg = buf.copy_abs_range(0, 100)  # long since overwritten
+    assert seg.shape == (0, 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -395,6 +441,20 @@ def test_flush_on_empty_buffer_is_harmless(buffer_cls):
     buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.flush()
     assert buf.total_written == 0
+
+
+def test_close_is_safe_to_call_and_idempotent(buffer_cls):
+    """Both implementations must expose close() so app code (e.g.
+    AppState.rebuild_buffer, discarding the buffer it just replaced) can
+    release a NativeAudioCircularBuffer's Zig-owned handle deterministically
+    instead of waiting on __del__/GC. AudioCircularBuffer's close() is a
+    no-op (pure Python, GC already handles it) but must still exist and be
+    safe to call, including twice, so callers don't need an isinstance
+    check to know which implementation they're holding."""
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(ramp_block(0, 500, channels=1))
+    buf.close()
+    buf.close()  # idempotent — must not raise
 
 
 def test_writer_works_immediately_after_flush(buffer_cls):
@@ -621,3 +681,33 @@ def test_buffer_gain_db_roundtrips_and_mutes(buffer_cls):
     buf.gain_db = float("-inf")  # mute
     assert buf.gain == 0.0
     assert buf.gain_db == float("-inf")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# make_ring_buffer factory
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_make_ring_buffer_prefers_native_when_available():
+    """The single constructor every app call site routes through. On a
+    machine with the native library built (this one), it must return
+    NativeAudioCircularBuffer -- this is the assertion that fails if the
+    factory is ever hardcoded to always return the Python fallback."""
+    from flashback_sampler.core.buffer import make_ring_buffer
+    buf = make_ring_buffer(duration_seconds=1.0, sample_rate=8, channels=2)
+    if native_mod.load() is not None:
+        assert type(buf).__name__ == "NativeAudioCircularBuffer"
+    else:
+        assert isinstance(buf, AudioCircularBuffer)
+    assert buf.sample_rate == 8 and buf.channels == 2
+
+
+def test_make_ring_buffer_falls_back_to_python_when_native_unavailable(monkeypatch):
+    """Covers the other half of the branch: force native.load() to report
+    unavailable and confirm the factory falls back to AudioCircularBuffer
+    rather than raising or still returning a native instance."""
+    from flashback_sampler.core.buffer import make_ring_buffer
+    monkeypatch.setattr(native_mod, "load", lambda: None)
+    buf = make_ring_buffer(duration_seconds=1.0, sample_rate=8, channels=2)
+    assert isinstance(buf, AudioCircularBuffer)
+    assert type(buf).__name__ != "NativeAudioCircularBuffer"

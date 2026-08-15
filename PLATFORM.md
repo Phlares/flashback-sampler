@@ -13,10 +13,23 @@ touching the audio core or the UI. This is the porting checklist.
 | Mic / line-in capture | ✅ `sounddevice` | ✅ | ✅ |
 | System **tray** | ✅ | ✅¹ | ✅¹ |
 | Config / data paths | ✅ `%APPDATA%` | ✅ `~/Library` | ✅ `~/.config` |
-| Packaging | ✅ PyInstaller onedir | ⬜ | ⬜ |
+| Audio ring buffer + WAV encode | ✅ Zig core | ✅ Zig core | ✅ Zig core |
+| Packaging | ✅ PyInstaller onedir + bundled `flashback_core` lib | ⬜ | ⬜ |
 
 ¹ Tray is Qt-provided; availability is detected at runtime via
 `QSystemTrayIcon.isSystemTrayAvailable()`.
+
+**Audio ring buffer + WAV encode are not a platform seam.** They live in
+`core/` — a zero-dependency Zig library built once per OS
+(`flashback_core.dll` / `.dylib` / `.so`) and loaded via ctypes
+(`flashback_sampler/core/native.py`). Unlike loopback capture or global
+hotkeys, this code needs no per-OS backend: `zig build -Doptimize=ReleaseSafe`
+cross-compiles the same source to all three targets (see `.github/workflows/
+test.yml`'s cross-compile health check). `flashback_sampler/core/buffer.py`'s
+`make_ring_buffer()` picks the native implementation when the library for
+the current OS is present and falls back to a pure-Python implementation
+otherwise, so the app runs (with a slower buffer) even on a machine without
+a prebuilt native library.
 
 ## The seams (where platform code lives)
 
@@ -30,7 +43,7 @@ Everything OS-dependent is reachable from these files — see
 | **System tray** | `platform/tray.py` | usually none — `QSystemTrayIcon` is cross-platform; tune behaviour only if needed |
 | **Global hotkeys** | `input/sources/global_hotkey.py` (`_win_register`), gated by `capabilities.global_hotkeys_supported()` | a register/unregister backend (macOS Carbon `RegisterEventHotKey`; Linux/X11 `XGrabKey` — Wayland needs a portal) |
 | **Config / data paths** | `app/config.py` (`config_dir`) | already `%APPDATA%` / `XDG` aware |
-| **Packaging** | `flashback_sampler.spec` | add a mac `.app` / Linux build target |
+| **Packaging** | `flashback_sampler.spec` | add a mac `.app` / Linux build target; bundle that OS's `flashback_core` build (`.dylib` / `.so`) the same way the Windows spec bundles the `.dll` |
 
 ## Adding a platform — checklist
 

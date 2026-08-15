@@ -11,14 +11,17 @@ import numpy as np
 import pytest
 
 from flashback_sampler.app.state import AppState
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.buffer import RingDerivedOps
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.scrub_player import ScrubPlayer
 
 
 def test_appstate_wires_core_objects_with_matching_sample_rate_and_channels():
     st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=2)
-    assert isinstance(st.buffer, AudioCircularBuffer)
+    # RingDerivedOps, not AudioCircularBuffer specifically -- st.buffer is
+    # constructed via make_ring_buffer, which returns whichever ring
+    # implementation (Python or native) the machine has available.
+    assert isinstance(st.buffer, RingDerivedOps)
     assert isinstance(st.checkout_manager, CheckoutManager)
     assert isinstance(st.scrub_player, ScrubPlayer)
     assert st.sample_rate == 16_000
@@ -169,8 +172,11 @@ def test_total_project_ram_bytes_counts_every_slot():
     from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
-    # Main slot ~1.92 MB (5s * 48k * 2 * 4)
-    main_bytes = st.slots[0].buffer.buffer.nbytes
+    # Main slot ~1.92 MB (5s * 48k * 2 * 4). capacity_bytes, not
+    # .buffer.nbytes -- the latter is the raw storage array, which on
+    # NativeAudioCircularBuffer is larger than the readable window by a
+    # guard band (see buffer.py's RingDerivedOps.capacity_bytes docstring).
+    main_bytes = st.slots[0].buffer.capacity_bytes
     assert main_bytes == 5 * 48_000 * 2 * 4
 
     st.add_slot(preset_by_name("SCRATCH"))  # +~11 MB
@@ -183,7 +189,7 @@ def test_total_project_ram_bytes_counts_every_slot():
 
 def test_total_project_ram_includes_checkouts():
     st = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1)
-    buf_bytes = st.slots[0].buffer.buffer.nbytes
+    buf_bytes = st.slots[0].buffer.capacity_bytes
     assert st.total_project_ram_bytes() == buf_bytes
     # Write some audio and create a checkout
     st.slots[0].buffer.write(
@@ -377,6 +383,24 @@ def test_cli_mono_override():
     args = _parse_args(["--channels", "1", "--sample-rate", "16000"])
     assert args.channels == 1
     assert args.sample_rate == 16_000
+
+
+def test_rebuild_buffer_closes_the_old_buffer():
+    """rebuild_buffer discards the active slot's ring buffer and builds a
+    fresh one via make_ring_buffer -- the OLD buffer's close() must be
+    called so a NativeAudioCircularBuffer's Zig-owned handle is released
+    deterministically instead of relying only on eventual GC/__del__."""
+    from flashback_sampler.app.state import AppState
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    try:
+        old_buf = st.active_slot.buffer
+        calls = []
+        old_buf.close = lambda: calls.append(True)
+        st.rebuild_buffer(2.0)
+        assert calls, "rebuild_buffer did not close the old buffer"
+        assert st.active_slot.buffer is not old_buf
+    finally:
+        st.shutdown()
 
 
 def test_rebuild_buffer_preserves_record_gain():

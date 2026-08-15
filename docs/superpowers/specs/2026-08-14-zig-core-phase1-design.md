@@ -1,7 +1,7 @@
 # Zig core, phase 1 — lock-free memory engine + WAV writer
 
 **Date:** 2026-08-14
-**Status:** approved (owner sign-off in session)
+**Status:** implemented (PRs #18, #19, #22, #24, #25, #27, #29)
 **Arc:** first step of the native-core arc: Zig engine under the existing
 Python/Qt app → CLAP plugin → mobile shells. This spec covers phase 1 only.
 
@@ -105,9 +105,13 @@ report as such, never return silently corrupt data.
 
 ## WAV writer (`wav.zig`)
 
-- Real API is Zig-generic — `write(writer: anytype, frames, …)` — testable
-  against an in-memory buffer with golden-byte tests. The file-path
-  convenience lives at the ABI (`fb_wav_write`).
+- The API is three small functions, not one generic writer: `writeHeader`
+  (fills a 44-byte RIFF/WAVE header buffer), `encodeSamples` (converts a
+  slice of `f32` samples to the requested subtype's on-disk bytes), and
+  `writeFile` (the path-based convenience — header + encode + write to
+  disk — that the ABI's `fb_wav_write` thinly wraps). Golden-byte tests
+  exercise `writeHeader`/`encodeSamples` directly against in-memory
+  buffers, no `anytype` writer needed.
 - Subtypes: `FLOAT32` (default — bit-perfect, file payload == RAM),
   `PCM_24`, `PCM_16` (explicit quantized options, matching today's
   `_VALID_SUBTYPES`). Dithered quantization is future flair, not phase 1.
@@ -154,9 +158,16 @@ smaller, truer surface):
   `bin_span_frames = 0` → window/n_bins), because that is the only summary
   consumer. YAGNI on per-bin min/max.
 - **`total_written` is the single source of truth.** There is no stored
-  `write_pos`; the writer derives its ring position as
-  `total_written % capacity`. Readers never address beyond
-  `total_written`, so stale bytes past it are unreachable — which makes…
+  `write_pos`; the writer derives its physical ring position as
+  `total_written % storage_frames` — **not** `% capacity`. The ring
+  allocates `storage_frames = capacity + max_write_frames` frames (a guard
+  band sized to the largest single write), so an accepted reader's span and
+  the writer's in-flight, not-yet-published block are always provably
+  disjoint in physical storage. `capacity` — the smaller, readable window —
+  stays what every clamp (`get_latest`, `is_full`, the overwritten check)
+  is checked against; only the modulo for physical indexing uses the
+  larger size. Readers never address beyond `total_written`, so stale
+  bytes past it are unreachable — which makes…
 - **…`fb_ring_flush` one release-store of `total_written = 0`** plus
   poisoning every summary slot generation (`slot_abs = -1`) plus a hygiene
   zeroing of storage (off the audio thread). Flush during active capture

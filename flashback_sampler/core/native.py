@@ -30,10 +30,10 @@ from flashback_sampler.core.buffer import RingDerivedOps, _peak_bins_impl
 
 _OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG = range(5)
 # Public: mirrors flashback_core.h's FbSubtype and checkout.py's
-# CheckoutSubtype strings. Not yet wired into checkout.py (that routing
-# is future work, not current behavior) -- when it is, only subtypes
-# present here should go to the native encoder, with anything else
-# falling back to soundfile.
+# CheckoutSubtype strings. checkout.py's save() routes a WAV write here
+# only when the requested subtype is a key of this dict AND the native
+# library is loaded; any subtype absent from this dict (or a non-WAV
+# format, or no native library) falls back to soundfile.
 SUBTYPE_INTS = {"FLOAT": 0, "PCM_24": 1, "PCM_16": 2}
 
 _lib: C.CDLL | None = None
@@ -237,7 +237,7 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         # Without a retry here, get_segment silently returns empty under
         # writer contention where the Python implementation (which holds
         # the lock across the whole snapshot-and-retry loop in
-        # _copy_abs_range) returns data -- a real parity divergence on
+        # copy_abs_range) returns data -- a real parity divergence on
         # the exact path checkout.py's create()/create_from_abs_range use.
         for _ in range(3):
             tw = self.total_written
@@ -251,6 +251,31 @@ class NativeAudioCircularBuffer(RingDerivedOps):
             if span <= 0:
                 return np.zeros((0, self.channels), dtype=np.float32)
             got = self._read_abs(tw - n_start, span)
+            if len(got):
+                return got
+        return np.zeros((0, self.channels), dtype=np.float32)
+
+    def copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
+        """Public counterpart to AudioCircularBuffer.copy_abs_range — the
+        shared surface checkout.py (create_from_abs_range, the drag-select
+        checkout path) and mixed_capture.py (the mixer thread, polling a
+        live sub-source ring every 10ms) read an absolute span through
+        instead of implementation-private internals.
+
+        Retries up to 3 times on the SAME fixed (abs_start, abs_end) --
+        unlike get_latest/get_segment, which re-resolve abs_start from a
+        relative window on each attempt, this method's range is pinned by
+        the caller and never moves. The retry still matters: a torn read
+        (the writer mid-copy during our read) can make a single
+        fb_ring_read report OVERWRITTEN for a span that is not actually
+        gone -- the exact same request would succeed on the next attempt.
+        Matches AudioCircularBuffer.copy_abs_range's 3-attempt retry so
+        both implementations answer a transient tear the same way."""
+        n = abs_end - abs_start
+        if n <= 0:
+            return np.zeros((0, self.channels), dtype=np.float32)
+        for _ in range(3):
+            got = self._read_abs(abs_start, n)
             if len(got):
                 return got
         return np.zeros((0, self.channels), dtype=np.float32)

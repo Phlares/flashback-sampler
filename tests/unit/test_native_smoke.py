@@ -26,7 +26,7 @@ def test_zero_copy_storage_view_sees_writes():
 
 def test_get_segment_retries_on_transient_read_failure(monkeypatch):
     """native-impl internal: deterministically pins get_segment's 3-attempt
-    retry loop (matching get_latest's own, and Python's _copy_abs_range).
+    retry loop (matching get_latest's own, and Python's copy_abs_range).
     A live writer/reader race is inherently probabilistic -- pounding the
     buffer from a background thread does NOT reliably prove the retry
     loop matters, since most single-attempt reads still succeed by luck
@@ -51,6 +51,36 @@ def test_get_segment_retries_on_transient_read_failure(monkeypatch):
     seg = buf.get_segment(start_ago=0.3, end_ago=0.05)
     assert calls["n"] == 3, "get_segment did not retry 3 times"
     assert seg.shape[0] > 0, "get_segment gave up instead of succeeding on the 3rd attempt"
+    buf.close()
+
+
+def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
+    """native-impl internal: copy_abs_range must retry a transient seqlock
+    tear the same way get_latest/get_segment do (see the retry test above
+    for why a live writer/reader race can't deterministically prove this --
+    monkeypatching fb_ring_read forces two synthetic failures before
+    success). Without a retry, checkout.py's create_from_abs_range (drag-
+    select) and MixedCaptureSource's mixer thread (mixed_capture.py,
+    polling a live sub-source ring every 10ms) both see a torn read as a
+    hard failure -- an empty array / RuntimeError -- on a request that
+    would have succeeded a moment later, a real behavior gap against
+    AudioCircularBuffer.copy_abs_range's 3-attempt retry."""
+    buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf.write(np.arange(500, dtype=np.float32)[:, None])
+
+    real_read = buf._lib.fb_ring_read
+    calls = {"n": 0}
+
+    def flaky_read(ring, abs_start, n_frames, out_ptr):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return native._OVERWRITTEN  # simulate a transient seqlock tear
+        return real_read(ring, abs_start, n_frames, out_ptr)
+
+    monkeypatch.setattr(buf._lib, "fb_ring_read", flaky_read)
+    seg = buf.copy_abs_range(100, 200)
+    assert calls["n"] == 3, "copy_abs_range did not retry 3 times"
+    assert seg.shape[0] == 100, "copy_abs_range gave up instead of succeeding on the 3rd attempt"
     buf.close()
 
 
