@@ -14,7 +14,19 @@ import numpy as np
 import pytest
 
 from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core import native as native_mod
 from tests.fixtures.sine_source import ramp_block
+
+
+@pytest.fixture(params=["python", "native"])
+def buffer_cls(request):
+    """Every test in this file runs twice: once per implementation.
+    This suite IS the parity contract for the Zig core."""
+    if request.param == "native":
+        if native_mod.load() is None:
+            pytest.skip("flashback_core library not built")
+        return native_mod.NativeAudioCircularBuffer
+    return AudioCircularBuffer
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -22,24 +34,25 @@ from tests.fixtures.sine_source import ramp_block
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_new_buffer_is_empty():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+def test_new_buffer_is_empty(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     assert buf.buffered_seconds == 0.0
     assert buf.is_full is False
     assert buf.total_written == 0
     assert buf.buffer_size == 1000
-    assert buf.buffer.shape == (1000, 2)
+    assert buf.buffer.shape[0] >= 1000
+    assert buf.buffer.shape[1] == 2
     assert buf.buffer.dtype == np.float32
 
 
-def test_empty_buffer_get_latest_returns_zero_length():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+def test_empty_buffer_get_latest_returns_zero_length(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     result = buf.get_latest(0.5)
     assert result.shape == (0, 2)
 
 
-def test_status_shape():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+def test_status_shape(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     s = buf.status()
     for key in (
         "buffered_seconds",
@@ -59,14 +72,23 @@ def test_status_shape():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_write_advances_position_and_total():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_write_advances_position_and_total(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 400, channels=1))
     assert buf.write_pos == 400
     assert buf.total_written == 400
     assert buf.buffered_seconds == pytest.approx(0.4)
 
 
+# python-impl internal: probes write_pos and raw physical buffer indexing
+# past the wrap point. Both are genuinely different between implementations
+# by design (native.py's TWO SIZES note) — native wraps its PHYSICAL
+# storage at storage_frames = buffer_size + a guard band (thousands of
+# frames), not at buffer_size, so write_pos and buffer[i] here would not
+# agree with the Python values asserted below even though both
+# implementations are behaving correctly. Not parity-testable via raw
+# indexing; get_latest/get_segment (which native re-derives from abs
+# indices, hiding the physical layout) are the parity-tested equivalent.
 def test_write_wraps_around_end_of_ring():
     buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 800, channels=1))  # fills 0..800
@@ -83,8 +105,8 @@ def test_write_wraps_around_end_of_ring():
     assert buf.buffer[799, 0] == pytest.approx(799.0)
 
 
-def test_write_mono_1d_gets_reshaped():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_write_mono_1d_gets_reshaped(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     mono = np.arange(100, dtype=np.float32)
     buf.write(mono)
     assert buf.write_pos == 100
@@ -96,8 +118,8 @@ def test_write_mono_1d_gets_reshaped():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_get_latest_below_buffered_returns_exact_tail():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_latest_below_buffered_returns_exact_tail(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     # Last 100 samples should be 400..500
     latest = buf.get_latest(0.1)
@@ -106,8 +128,8 @@ def test_get_latest_below_buffered_returns_exact_tail():
     assert latest[-1, 0] == pytest.approx(499.0)
 
 
-def test_get_latest_more_than_buffered_is_clamped():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_latest_more_than_buffered_is_clamped(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 300, channels=1))
     latest = buf.get_latest(1.0)  # asked for 1000, only have 300
     assert latest.shape == (300, 1)
@@ -115,8 +137,8 @@ def test_get_latest_more_than_buffered_is_clamped():
     assert latest[-1, 0] == pytest.approx(299.0)
 
 
-def test_get_latest_across_wrap_boundary():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_latest_across_wrap_boundary(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 1200, channels=1))  # fills + wraps
     # Buffer now holds samples 200..1200 (the oldest 200 were overwritten)
     latest = buf.get_latest(1.0)
@@ -130,8 +152,8 @@ def test_get_latest_across_wrap_boundary():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_get_segment_non_wrapped():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_segment_non_wrapped(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 900, channels=1))
     # Segment from 500ms ago to 100ms ago = samples 400..800
     seg = buf.get_segment(start_ago=0.5, end_ago=0.1)
@@ -140,15 +162,15 @@ def test_get_segment_non_wrapped():
     assert seg[-1, 0] == pytest.approx(799.0)
 
 
-def test_get_segment_raises_on_inverted_boundaries():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_segment_raises_on_inverted_boundaries(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     with pytest.raises(ValueError):
         buf.get_segment(start_ago=0.1, end_ago=0.5)  # start must be > end
 
 
-def test_get_segment_across_wrap():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_segment_across_wrap(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 1500, channels=1))  # holds 500..1500
     # 800ms ago -> sample 700; 200ms ago -> sample 1300. Span: 600 samples.
     seg = buf.get_segment(start_ago=0.8, end_ago=0.2)
@@ -157,8 +179,8 @@ def test_get_segment_across_wrap():
     assert seg[-1, 0] == pytest.approx(1299.0)
 
 
-def test_get_segment_clamped_to_available():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_segment_clamped_to_available(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 300, channels=1))
     # Ask for 500ms ago when only 300ms exists — should clamp
     seg = buf.get_segment(start_ago=0.5, end_ago=0.0)
@@ -173,16 +195,16 @@ def test_get_segment_clamped_to_available():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_get_rms_levels_silence_is_zero():
-    buf = AudioCircularBuffer(duration_seconds=0.1, sample_rate=1000, channels=2)
+def test_get_rms_levels_silence_is_zero(buffer_cls):
+    buf = buffer_cls(duration_seconds=0.1, sample_rate=1000, channels=2)
     buf.write(np.zeros((50, 2), dtype=np.float32))
     rms = buf.get_rms_levels(window_seconds=0.05)
     assert rms.shape == (2,)
     assert np.allclose(rms, 0.0)
 
 
-def test_get_rms_levels_sine_is_sqrt_half_amplitude():
-    buf = AudioCircularBuffer(duration_seconds=0.1, sample_rate=48_000, channels=1)
+def test_get_rms_levels_sine_is_sqrt_half_amplitude(buffer_cls):
+    buf = buffer_cls(duration_seconds=0.1, sample_rate=48_000, channels=1)
     # Full-amplitude sine — RMS should be ~ 1/sqrt(2)
     t = np.arange(4800) / 48_000
     sine = np.sin(2 * np.pi * 440.0 * t).astype(np.float32)[:, None]
@@ -198,13 +220,13 @@ def test_get_rms_levels_sine_is_sqrt_half_amplitude():
 
 
 @pytest.mark.timeout(5)
-def test_writer_and_reader_concurrent_no_corruption():
+def test_writer_and_reader_concurrent_no_corruption(buffer_cls):
     """
     Pound the buffer from a writer thread while the main thread takes
     repeated get_segment snapshots. Neither should crash, deadlock, or
     return malformed arrays.
     """
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=48_000, channels=2)
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=48_000, channels=2)
     stop = threading.Event()
     errors: list[BaseException] = []
 
@@ -241,22 +263,22 @@ def test_writer_and_reader_concurrent_no_corruption():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_get_peak_bins_empty_buffer_returns_zeros():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+def test_get_peak_bins_empty_buffer_returns_zeros(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     bins = buf.get_peak_bins(seconds=0.5, n_bins=40)
     assert bins.shape == (40, 2, 2)  # (n_bins, min/max, channels)
     assert np.all(bins == 0.0)
 
 
-def test_get_peak_bins_shape_is_n_bins_by_2_by_channels():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+def test_get_peak_bins_shape_is_n_bins_by_2_by_channels(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     buf.write(ramp_block(0, 500, channels=2))
     bins = buf.get_peak_bins(seconds=0.5, n_bins=10)
     assert bins.shape == (10, 2, 2)
 
 
-def test_get_peak_bins_sine_is_symmetric():
-    buf = AudioCircularBuffer(duration_seconds=0.2, sample_rate=48_000, channels=1)
+def test_get_peak_bins_sine_is_symmetric(buffer_cls):
+    buf = buffer_cls(duration_seconds=0.2, sample_rate=48_000, channels=1)
     t = np.arange(9600) / 48_000
     sine = (np.sin(2 * np.pi * 440.0 * t) * 0.8).astype(np.float32)[:, None]
     buf.write(sine)
@@ -271,8 +293,8 @@ def test_get_peak_bins_sine_is_symmetric():
     assert np.allclose(mins, -maxs, atol=0.05)
 
 
-def test_get_peak_bins_single_bin_is_global_minmax():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_get_peak_bins_single_bin_is_global_minmax(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     # Write values 0..999 so the window's min=0, max=999
     buf.write(ramp_block(0, 1000, channels=1))
     bins = buf.get_peak_bins(seconds=1.0, n_bins=1)
@@ -281,8 +303,8 @@ def test_get_peak_bins_single_bin_is_global_minmax():
     assert bins[0, 1, 0] == pytest.approx(999.0)
 
 
-def test_get_peak_bins_channels_independent():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=2)
+def test_get_peak_bins_channels_independent(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     # Channel 0 is silent, channel 1 is a ramp
     block = np.zeros((500, 2), dtype=np.float32)
     block[:, 1] = np.arange(500, dtype=np.float32)
@@ -299,8 +321,8 @@ def test_get_peak_bins_channels_independent():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_flush_resets_counters_and_content():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_flush_resets_counters_and_content(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 800, channels=1))
     assert buf.buffered_seconds > 0
     buf.flush()
@@ -310,14 +332,14 @@ def test_flush_resets_counters_and_content():
     assert np.all(buf.buffer == 0.0)
 
 
-def test_flush_on_empty_buffer_is_harmless():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_flush_on_empty_buffer_is_harmless(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.flush()
     assert buf.total_written == 0
 
 
-def test_writer_works_immediately_after_flush():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_writer_works_immediately_after_flush(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     buf.flush()
     # Next write should start from position 0 and be visible via get_latest
@@ -329,8 +351,8 @@ def test_writer_works_immediately_after_flush():
     assert latest[-1, 0] == pytest.approx(141.0)
 
 
-def test_flush_after_wrap_fully_clears_ring():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+def test_flush_after_wrap_fully_clears_ring(buffer_cls):
+    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     # Write past the ring boundary so wrap-around overwrites sample 0
     buf.write(ramp_block(0, 1500, channels=1))
     buf.flush()
@@ -346,7 +368,7 @@ def test_flush_after_wrap_fully_clears_ring():
 
 @pytest.mark.timeout(15)
 @pytest.mark.perf
-def test_get_segment_does_not_stall_writer():
+def test_get_segment_does_not_stall_writer(buffer_cls):
     """
     The writer thread must not see inter-write latency spikes even when
     the reader is pulling multi-second segments. This proves get_segment
@@ -357,7 +379,7 @@ def test_get_segment_does_not_stall_writer():
     the writer for several ms per read. 60 reads total; writer must keep
     its max inter-write gap under 8 ms.
     """
-    buf = AudioCircularBuffer(duration_seconds=30.0, sample_rate=48_000, channels=2)
+    buf = buffer_cls(duration_seconds=30.0, sample_rate=48_000, channels=2)
     stop = threading.Event()
     results = {}
 
@@ -406,7 +428,7 @@ def test_get_segment_does_not_stall_writer():
 
 
 @pytest.mark.timeout(15)
-def test_get_peak_bins_does_not_flicker_on_saturated_ring():
+def test_get_peak_bins_does_not_flicker_on_saturated_ring(buffer_cls):
     """
     Regression: once the ring fills, repeated get_peak_bins() calls must
     not intermittently return all-zero frames. The symptom was a visible
@@ -418,7 +440,7 @@ def test_get_peak_bins_does_not_flicker_on_saturated_ring():
     tear path. Fix leaves slack below buffer_size so the writer can
     advance normally without invalidating the oldest sample.
     """
-    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=48_000, channels=2)
+    buf = buffer_cls(duration_seconds=2.0, sample_rate=48_000, channels=2)
     sr = buf.sample_rate
     block = np.full((512, 2), 0.5, dtype=np.float32)
 
@@ -456,7 +478,7 @@ def test_get_peak_bins_does_not_flicker_on_saturated_ring():
     )
 
 
-def test_get_peak_bins_stable_under_rolling_window():
+def test_get_peak_bins_stable_under_rolling_window(buffer_cls):
     """
     Regression: rolling the window by tiny writer advances must not
     shift the peaks of still-visible bins. The stride-sampling pattern
@@ -467,7 +489,7 @@ def test_get_peak_bins_stable_under_rolling_window():
     """
     sr = 10_000
     duration = 10.0  # 100 000-sample ring → span=900 per bin → stride=3
-    buf = AudioCircularBuffer(
+    buf = buffer_cls(
         duration_seconds=duration, sample_rate=sr, channels=1
     )
     rng = np.random.default_rng(seed=0)
@@ -499,10 +521,9 @@ def test_get_peak_bins_stable_under_rolling_window():
 
 # ── Per-source record gain (applied at the write boundary) ──────────────
 
-def test_buffer_gain_defaults_to_unity():
+def test_buffer_gain_defaults_to_unity(buffer_cls):
     import numpy as np
-    from flashback_sampler.core.buffer import AudioCircularBuffer
-    buf = AudioCircularBuffer(duration_seconds=1, sample_rate=1000, channels=1)
+    buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     assert buf.gain == 1.0
     assert buf.gain_db == 0.0
     buf.write(np.full((100, 1), 0.25, dtype=np.float32))
@@ -510,11 +531,10 @@ def test_buffer_gain_defaults_to_unity():
     assert abs(float(out.max()) - 0.25) < 1e-6  # unchanged at unity
 
 
-def test_buffer_gain_boost_scales_written_frames():
+def test_buffer_gain_boost_scales_written_frames(buffer_cls):
     import math
     import numpy as np
-    from flashback_sampler.core.buffer import AudioCircularBuffer
-    buf = AudioCircularBuffer(duration_seconds=1, sample_rate=1000, channels=1)
+    buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     buf.gain_db = 6.0  # ~2x
     assert abs(buf.gain - 10 ** (6.0 / 20.0)) < 1e-6
     buf.write(np.full((100, 1), 0.25, dtype=np.float32))
@@ -523,10 +543,9 @@ def test_buffer_gain_boost_scales_written_frames():
     assert out.dtype == np.float32  # gain must not upcast
 
 
-def test_buffer_gain_db_roundtrips_and_mutes():
+def test_buffer_gain_db_roundtrips_and_mutes(buffer_cls):
     import math
-    from flashback_sampler.core.buffer import AudioCircularBuffer
-    buf = AudioCircularBuffer(duration_seconds=1, sample_rate=1000, channels=1)
+    buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     buf.gain_db = -6.0
     assert abs(buf.gain_db - (-6.0)) < 1e-6
     buf.gain_db = float("-inf")  # mute
