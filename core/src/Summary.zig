@@ -116,6 +116,16 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
 /// Mirror of buffer.py get_summary_bins (buffer.py:421); n_avail clamps
 /// against `capacity_frames` (the RING's readable window), matching
 /// Python's clamp to `buffer_size` exactly.
+///
+/// THREADING: called from a control/UI thread (Task 6 exposes this as
+/// `fb_ring_summary_bins`, polled at ~30 Hz), reading `Summary` fields
+/// that `update` — running concurrently on the audio thread — mutates
+/// with no atomics and no seqlock (unlike `Ring.read`/`write`, this pair
+/// has no synchronization at all). Worst case is one inconsistent or
+/// NaN bin for one frame: `bin_cnt[b] == 0` is guarded above, and a
+/// torn `ss` read produces NaN through the sqrt rather than trapping —
+/// no memory unsafety, no crash path. A design decision for the arc,
+/// not fixed here. See issue #23.
 pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
     const chans = self.channels;
     const n_bins = out.len / chans;
@@ -130,11 +140,13 @@ pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin
     else
         @as(f64, @floatFromInt(n_samples)) / @as(f64, @floatFromInt(n_bins));
 
-    // Small fixed accumulators would need allocation for arbitrary n_bins;
-    // instead accumulate straight into out's shape using two stack-free
-    // passes over slots (n_slots is small: capacity/4096).
-    // Pass 1 must accumulate ss (f64) and count per bin — allocation-free
-    // by bounding n_bins: callers ask for display bins (≤ ~4096). Assert it.
+    // Two fixed-size stack scratch arrays, sized to the asserted maximum
+    // (never a heap allocation): `bin_ss`/`bin_cnt` accumulate ss (f64,
+    // for precision) and count per bin across a first pass over slots
+    // (n_slots is small: capacity/slot_frames). `out` itself is only
+    // written in the second pass below, once each bin's final sqrt(ss/
+    // count) is known — allocation-free by bounding n_bins: callers ask
+    // for display bins (≤ ~4096). Assert it.
     std.debug.assert(n_bins <= 4096);
     std.debug.assert(chans <= 2);
     var bin_ss: [4096 * 2]f64 = undefined; // max bins * max channels
@@ -195,4 +207,46 @@ test "rmsBins aggregates frozen slots into display bins" {
     s.rmsBins(8, 8, 0, &out); // tw=8, all 8 samples, auto bin span
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[1], 1e-6);
+}
+
+test "rmsBins window clamp uses true capacity, not n_slots*slot_frames" {
+    // capacity=13, slot_frames=4 -> n_slots = 13/4 = 3 (floor), so
+    // n_slots*slot_frames = 12 UNDER-counts the ring's true 13-frame
+    // capacity — the exact non-slot-aligned case the brief's comment on
+    // `capacity_frames` warns about (48000/4096 isn't aligned either).
+    // Only slot 0 (tag=0) is ever written, so it sits right at the low
+    // edge of the window — the one place the two possible clamp values
+    // produce different behavior (see below).
+    var s = try Summary.init(std.testing.allocator, 13, 4, 1);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(u64, 3), s.n_slots);
+    try std.testing.expectEqual(@as(u64, 13), s.capacity_frames); // NOT n_slots*slot_frames (12)
+    s.update(&[_]f32{ 2, 2, 2, 2 }, 1.0, 0); // slot 0, tag=0, ss=16, count=4 -> RMS=2.0
+
+    var out: [1]f32 = undefined; // 1 bin, mono
+    // total_written is a literal 13 here (Summary doesn't validate it
+    // against real write history) specifically to probe the clamp:
+    // n_avail = min(13, capacity_frames). With the CORRECT capacity_frames
+    // (13): n_avail=13, n_samples=13, abs_start=0 -> slot 0's tag (0)
+    // sits exactly at the window's low edge and IS included -> RMS 2.0.
+    // With the BUGGY n_slots*slot_frames (12): n_avail=12, n_samples=12,
+    // abs_start=1 -> slot 0's tag (0) is now BELOW the window
+    // (0 < abs_start=1) and is excluded -> out stays 0. This is the one
+    // slot/window combination where the two clamp values disagree.
+    s.rmsBins(13, 0, 0, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), out[0], 1e-6);
+}
+
+test "rmsBins with n_bins exceeding the number of populated slots leaves the rest at zero" {
+    var s = try Summary.init(std.testing.allocator, 16, 4, 1); // 4 slots total
+    defer s.deinit();
+    s.update(&[_]f32{ 0.5, 0.5, 0.5, 0.5 }, 1.0, 0); // slot 0 only
+    s.update(&[_]f32{ 1, 1, 1, 1 }, 1.0, 4); // slot 1 only
+    // Slots 2 and 3 are never written — still poisoned (tag == -1).
+    var out: [4]f32 = undefined; // 4 bins requested, only 2 slots ever populated
+    s.rmsBins(16, 0, 0, &out); // full 16-frame window, bin_span = 16/4 = 4 (== slot_frames)
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[1], 1e-6);
+    try std.testing.expectEqual(@as(f32, 0), out[2]);
+    try std.testing.expectEqual(@as(f32, 0), out[3]);
 }
