@@ -97,7 +97,7 @@ pub fn deinit(self: *Ring) void {
 /// is now zero, with no observable indication a flush happened at all).
 /// Up to a full capacity of silence, not one block, can result. This is
 /// a known race in the flush-vs-writer relationship, tracked as a
-/// separate design question for the arc — not fixed here.
+/// separate design question for the arc — not fixed here. See issue #20.
 pub fn flush(self: *Ring) void {
     self.total_written.store(0, .release);
     @memset(self.frames, 0);
@@ -122,6 +122,14 @@ pub fn write(self: *Ring, interleaved: []const f32) void {
     var remaining = interleaved;
     while (remaining.len > 0) {
         const chunk_frames: u64 = @min(@as(u64, remaining.len / self.channels), max_write_frames);
+        // In an asserts-off build (ReleaseFast/ReleaseSmall — shipped
+        // mode is ReleaseSafe, so this is latent, not live), a leftover
+        // partial frame (interleaved.len not a multiple of channels)
+        // would otherwise leave `chunk_frames == 0`, `remaining` never
+        // shrinking, and this loop republishing `tw + 0` forever — a
+        // hang on the RT audio thread, worse than the silently-dropped
+        // partial frame this guards against instead.
+        if (chunk_frames == 0) return;
         const chunk_floats = chunk_frames * self.channels;
         const chunk = remaining[0..chunk_floats];
         remaining = remaining[chunk_floats..];
@@ -157,10 +165,11 @@ pub fn write(self: *Ring, interleaved: []const f32) void {
 /// Seqlock read: copy, then re-check. `out.len` must be a multiple of
 /// channels; the span is [abs_start, abs_start + out.len/channels).
 ///
-/// GUARD BAND: `write()` publishes once per call, atomically, for the
-/// WHOLE block it was handed — while a call is still copying, that
-/// entire block can already be physically sitting in `frames` before
-/// `total_written` reflects any of it. A read whose validity check uses
+/// GUARD BAND: `write()` publishes once per CHUNK of at most
+/// `max_write_frames` frames (see `write`'s own doc comment) — while a
+/// chunk is still copying, that whole chunk can already be physically
+/// sitting in `frames` before `total_written` reflects any of it. A
+/// read whose validity check uses
 /// the full physical size as its threshold can be fooled: it can land
 /// exactly inside an in-flight, unpublished block and observe an
 /// identical `t1`/`t2` (zero *apparent* writer progress) while the bytes
@@ -338,12 +347,19 @@ test "write with zero-length input is a no-op" {
     try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
 }
 
-test "read with zero-length output is a no-op" {
+test "read with zero-length output is a no-op, even at an out-of-range start" {
+    // Reading at abs_start=0 with a zero-length `out` would pass trivially
+    // regardless of whether `read`'s `if (n == 0) return;` special case
+    // exists — the OutOfRange check further down never gets a chance to
+    // fire either way. abs_start=100, past what's been written, is what
+    // actually PINS the special case: without it, this call would fall
+    // through to `abs_start + n > t1` (100 + 0 > 2) and return
+    // error.OutOfRange instead of succeeding.
     var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 8, .channels = 1, .seconds = 1.0 });
     defer ring.deinit();
-    ring.write(&[_]f32{ 1, 2 });
+    ring.write(&[_]f32{ 1, 2 }); // total_written = 2
     var out: [0]f32 = undefined;
-    try ring.read(0, &out); // succeeds trivially; would OutOfRange/panic if n==0 weren't special-cased
+    try ring.read(100, &out);
 }
 
 test "gain path wraps around the physical end of the storage buffer" {
@@ -402,8 +418,48 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     //    guard band — see the note above `read`) rather than by shrinking
     //    what a reader can request or via test-side margin tuning — the
     //    false positive this section describes is no longer POSSIBLE,
-    //    not just improbable, which is why margin_frames below can stay
-    //    a straightforward stress parameter rather than a safety one.
+    //    not just improbable.
+    //
+    // 3. `margin_frames` is NOT the lever for mutation-3 detection, and it
+    //    was wrong to imply otherwise. With the guard band in place,
+    //    mutation 3 (deleting the t2 re-check) can only be caught by a
+    //    FULL-LAP overrun during the copy: the reader's oldest slot
+    //    `A = tw - read_frames` is only clobbered when the writer reaches
+    //    `A + storage_frames = tw + margin_frames + max_write_frames`,
+    //    while acceptance caps the writer at `tw + margin_frames` when
+    //    `t1` is loaded — so the writer must advance exactly
+    //    `max_write_frames` (4096) frames DURING the copy, independent of
+    //    `margin_frames`. Margin only helps indirectly, by growing
+    //    `read_frames = cap_frames - margin_frames` and thus copy
+    //    duration; shrinking it from 512 to 0 buys roughly 14%, not worth
+    //    tuning on its own. `cap_frames` was predicted to be the real
+    //    lever instead: the writer's requirement stays pinned at
+    //    `max_write_frames` regardless of ring size, while the reader's
+    //    copy-and-verify work scales linearly with `cap_frames` — a
+    //    bigger copy should mean more wall-clock time for the writer to
+    //    overlap it.
+    //
+    // 4. That prediction did NOT hold up empirically. `cap_frames` was
+    //    raised to 32768 (8x) and measured (see the numbers below this
+    //    comment block): holding the attempt budget roughly constant
+    //    (10,000 successes at both sizes) gives statistically the SAME
+    //    ~30% mutation-3 detection rate at cap_frames=32768 as it did at
+    //    4096 — the bigger copy does not measurably raise per-attempt
+    //    detection probability in this implementation. What actually
+    //    changes with `cap_frames` is the verify loop's cost, which
+    //    forces `target_successes` down to keep CI runtime bounded —
+    //    and that reduction in attempts is NOT offset by any per-attempt
+    //    gain, so the runtime-bounded configuration below measures
+    //    WORSE (5%) than the original cap_frames=4096/10,000-successes
+    //    baseline (30%). More importantly, removing the guard band
+    //    entirely (mutating `storage_frames = capacity` in `init`) was
+    //    caught by NEITHER 2,000 nor 10,000 successes at cap_frames=32768
+    //    — the guard band remains pinned only by the init test's
+    //    allocation-arithmetic assertion, not by any test that exercises
+    //    the race it exists to prevent. `cap_frames` is documented here
+    //    as measured, not removed, since it's still a defensible stress
+    //    parameter — but it is NOT the fix for "the guard band has no
+    //    behavioral test," and nothing in this file currently is.
     //
     // This test deliberately does NOT race a flusher (see the separate
     // "flush racing..." test below): a flush racing an in-flight write
@@ -415,10 +471,10 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     // becomes ambiguous between "real bug" and "accepted race artifact".
     // Splitting the two properties into two tests keeps each one able to
     // fail unambiguously.
-    const cap_frames = 4096;
+    const cap_frames = 32768;
     const chans = 2;
     const block_frames = 128; // realistic: one audio-callback-sized block
-    const margin_frames = 512; // stress parameter for mutation 3, not a safety margin
+    const margin_frames = 512; // stress parameter, not a safety margin — see points 3-4 above
     const read_frames = cap_frames - margin_frames;
     var ring = try Ring.init(std.testing.allocator, .{
         .sample_rate = 48_000,
@@ -458,13 +514,29 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     // OutOfRange/Overwritten while the writer catches up) so a
     // regression that makes reads never converge fails fast instead of
     // hanging CI.
-    // Measured (warm cache, this workstation): ~0.6s at 10,000 successes,
-    // ~0.3s at 3,000 — cheap enough for CI on three OSes. Mutation 3
-    // (delete the t2 re-check below) reddens 6/20 runs (30%) at this
-    // count — a real, not-great detection rate; noted honestly rather
-    // than picked to look good. See the task report for the full
-    // measurement and the tradeoff against runtime.
-    const target_successes: u64 = 10_000;
+    // Measured (warm cache, this workstation, cap_frames=32768):
+    //   2,000 successes: ~0.96s; unmutated clean-run rate 20/20 (100%).
+    //   Mutation 3 (delete the t2 re-check) at 2,000 successes: 2/40 (5%)
+    //     — WORSE than the pre-round-2 30% at cap_frames=4096/10,000
+    //     successes. Isolating cap_frames's own effect (holding
+    //     successes at 10,000 despite the ~5s runtime that implies):
+    //     3/10 (30%) — statistically indistinguishable from the OLD
+    //     cap_frames=4096 baseline. cap_frames does NOT measurably raise
+    //     per-attempt detection probability in this implementation
+    //     (contrary to the "bigger copy -> more overlap opportunity"
+    //     prediction); the number of attempts a fixed runtime budget
+    //     allows is what actually drives detection, and that shrinks as
+    //     cap_frames grows because the verify loop scales with it too.
+    //     Separately, and more importantly: removing the guard band
+    //     entirely (storage_frames = capacity) was caught by NEITHER
+    //     2,000 successes (0/20) NOR 10,000 successes (0/10) at this
+    //     cap_frames — the guard band remains pinned only by the init
+    //     test's allocation-arithmetic assertion, not by any test that
+    //     exercises the race it prevents. Reported as found, not tuned
+    //     further — see the task report for the full measurement set
+    //     and why cap_frames turned out not to be the lever it looked
+    //     like on paper.
+    const target_successes: u64 = 2_000;
     const max_attempts: u64 = target_successes * 2000;
     var attempts: u64 = 0;
     var successes: u64 = 0;
@@ -473,7 +545,26 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     while (successes < target_successes and attempts < max_attempts) {
         attempts += 1;
         const tw = ring.total_written.load(.acquire);
-        if (tw < read_frames) continue;
+        if (tw < read_frames) {
+            // Hardware hint for a spin-wait: cheap, doesn't change
+            // behavior, but reduces how hard this busy-loop contends
+            // for execution resources against the writer thread while
+            // waiting for it to catch up — cap_frames=32768 needs ~252
+            // writer calls before the FIRST read is even attemptable
+            // (vs. ~28 at the old cap_frames=4096), which showed up
+            // during verification as one observed flake (out of ~30
+            // total runs at these settings): a full-suite run that
+            // exhausted max_attempts with 0 successes and last_err ==
+            // null, meaning total_written never even reached
+            // read_frames — consistent with the writer thread being
+            // starved of scheduling, not with any regression in read()
+            // or write(). Did not reproduce in 25 immediately-following
+            // runs. This hint is a standard, zero-risk mitigation for
+            // that class of flake; it does not touch the oracle, the
+            // guard band, or chunking.
+            std.atomic.spinLoopHint();
+            continue;
+        }
         const abs_start = tw - read_frames;
         ring.read(abs_start, &out) catch |err| {
             last_err = err; // OutOfRange/Overwritten are FINE; torn is not
