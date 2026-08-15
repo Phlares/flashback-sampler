@@ -109,6 +109,59 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
     }
 }
 
+/// out.len = n_bins * channels. n_samples_req = 0 → all available.
+/// bin_span_frames = 0 → derived from window (n_samples / n_bins).
+/// Slots whose generation tag falls inside [abs_start, abs_start+n)
+/// scatter-add ss and count into their bin; out = sqrt(ss/count).
+/// Mirror of buffer.py get_summary_bins (buffer.py:421); n_avail clamps
+/// against `capacity_frames` (the RING's readable window), matching
+/// Python's clamp to `buffer_size` exactly.
+pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
+    const chans = self.channels;
+    const n_bins = out.len / chans;
+    @memset(out, 0);
+    if (n_bins == 0) return;
+    const n_avail = @min(total_written, self.capacity_frames);
+    const n_samples = if (n_samples_req == 0) n_avail else @min(n_samples_req, n_avail);
+    if (n_samples == 0) return;
+    const abs_start = total_written - n_samples;
+    const bin_span: f64 = if (bin_span_frames > 0)
+        @floatFromInt(bin_span_frames)
+    else
+        @as(f64, @floatFromInt(n_samples)) / @as(f64, @floatFromInt(n_bins));
+
+    // Small fixed accumulators would need allocation for arbitrary n_bins;
+    // instead accumulate straight into out's shape using two stack-free
+    // passes over slots (n_slots is small: capacity/4096).
+    // Pass 1 must accumulate ss (f64) and count per bin — allocation-free
+    // by bounding n_bins: callers ask for display bins (≤ ~4096). Assert it.
+    std.debug.assert(n_bins <= 4096);
+    std.debug.assert(chans <= 2);
+    var bin_ss: [4096 * 2]f64 = undefined; // max bins * max channels
+    var bin_cnt: [4096]u64 = undefined;
+    @memset(bin_ss[0 .. n_bins * chans], 0);
+    @memset(bin_cnt[0..n_bins], 0);
+
+    for (0..@intCast(self.n_slots)) |slot_idx| {
+        const tag = self.slot_abs[slot_idx];
+        if (tag < 0) continue;
+        const tag_u: u64 = @intCast(tag);
+        if (tag_u < abs_start or tag_u >= abs_start + n_samples) continue;
+        var bin: usize = @intFromFloat(@as(f64, @floatFromInt(tag_u - abs_start)) / bin_span);
+        if (bin >= n_bins) bin = n_bins - 1;
+        for (0..chans) |c| {
+            bin_ss[bin * chans + c] += self.ss[slot_idx * chans + c];
+        }
+        bin_cnt[bin] += self.count[slot_idx];
+    }
+    for (0..n_bins) |b| {
+        if (bin_cnt[b] == 0) continue;
+        for (0..chans) |c| {
+            out[b * chans + c] = @floatCast(@sqrt(bin_ss[b * chans + c] / @as(f64, @floatFromInt(bin_cnt[b]))));
+        }
+    }
+}
+
 test "one slot accumulates min/max/ss/count across writes" {
     var s = try Summary.init(std.testing.allocator, 8, 4, 1); // 8-frame ring, 4-frame slots, mono
     defer s.deinit();
@@ -130,4 +183,16 @@ test "a new generation overwrites a recycled slot" {
     try std.testing.expectEqual(@as(f32, 3), s.min[0]);
     try std.testing.expectEqual(@as(u64, 2), s.count[0]);
     try std.testing.expectEqual(@as(i64, 8), s.slot_abs[0]);
+}
+
+test "rmsBins aggregates frozen slots into display bins" {
+    var s = try Summary.init(std.testing.allocator, 16, 4, 1); // 4 slots
+    defer s.deinit();
+    // Two full slots: constant 0.5 (ss=1.0/slot) then constant 1.0 (ss=4.0/slot)
+    s.update(&[_]f32{ 0.5, 0.5, 0.5, 0.5 }, 1.0, 0);
+    s.update(&[_]f32{ 1, 1, 1, 1 }, 1.0, 4);
+    var out: [2]f32 = undefined; // 2 bins, mono
+    s.rmsBins(8, 8, 0, &out); // tw=8, all 8 samples, auto bin span
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[1], 1e-6);
 }
