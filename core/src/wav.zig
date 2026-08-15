@@ -78,3 +78,73 @@ pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, 
     @memcpy(out[36..40], "data");
     std.mem.writeInt(u32, out[40..44], data_len, .little);
 }
+
+/// Encode f32 samples into `out` per the subtype's quantization
+/// contract. Returns bytes written. `out` must hold at least
+/// `samples.len * st.bytesPerSample()` bytes.
+///
+/// FLOAT32 is a raw memcpy of the f32 bits — no per-sample conversion —
+/// so the ring's payload lands byte-identical in the file; this is the
+/// bit-perfect pull the module doc references, and it depends on the
+/// little-endian comptime assert above.
+///
+/// pcm_16 / pcm_24 quantize x in [-1, 1] to the widest signed range
+/// that keeps `round(1.0 * scale)` in range: scale = 32767 / 8388607
+/// (not 32768 / 8388608), so +full-scale and -full-scale are NOT
+/// symmetric — -1.0 lands one LSB short of the negative rail. That
+/// asymmetry is the documented contract Task 7 checks against
+/// soundfile, not a bug.
+pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
+    switch (st) {
+        .float32 => {
+            const bytes = std.mem.sliceAsBytes(samples);
+            @memcpy(out[0..bytes.len], bytes);
+            return bytes.len;
+        },
+        .pcm_16 => {
+            for (samples, 0..) |s, i| {
+                const clamped = std.math.clamp(s, -1.0, 1.0);
+                const v: i16 = @intFromFloat(std.math.clamp(@round(clamped * 32767.0), -32768.0, 32767.0));
+                std.mem.writeInt(i16, out[i * 2 ..][0..2], v, .little);
+            }
+            return samples.len * 2;
+        },
+        .pcm_24 => {
+            for (samples, 0..) |s, i| {
+                const clamped = std.math.clamp(s, -1.0, 1.0);
+                const v: i32 = @intFromFloat(std.math.clamp(@round(clamped * 8388607.0), -8388608.0, 8388607.0));
+                const bits: u32 = @bitCast(v);
+                out[i * 3] = @truncate(bits);
+                out[i * 3 + 1] = @truncate(bits >> 8);
+                out[i * 3 + 2] = @truncate(bits >> 16);
+            }
+            return samples.len * 3;
+        },
+    }
+}
+
+test "float32 encode is the raw bits" {
+    const in = [_]f32{ 0.5, -1.0 };
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), encodeSamples(.float32, &in, &out));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&in), &out);
+}
+
+test "pcm16 quantization: round-half-away, clamped" {
+    const in = [_]f32{ 0.0, 1.0, -1.0, 0.5, 1.5 }; // 1.5 must clamp
+    var out: [10]u8 = undefined;
+    _ = encodeSamples(.pcm_16, &in, &out);
+    try std.testing.expectEqual(@as(i16, 0), std.mem.readInt(i16, out[0..2], .little));
+    try std.testing.expectEqual(@as(i16, 32767), std.mem.readInt(i16, out[2..4], .little));
+    try std.testing.expectEqual(@as(i16, -32767), std.mem.readInt(i16, out[4..6], .little));
+    try std.testing.expectEqual(@as(i16, 16384), std.mem.readInt(i16, out[6..8], .little)); // round(0.5*32767)=16384 (16383.5 → away from zero)
+    try std.testing.expectEqual(@as(i16, 32767), std.mem.readInt(i16, out[8..10], .little));
+}
+
+test "pcm24 writes 3 little-endian bytes per sample" {
+    const in = [_]f32{ 1.0, -1.0 };
+    var out: [6]u8 = undefined;
+    _ = encodeSamples(.pcm_24, &in, &out);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xFF, 0xFF, 0x7F }, out[0..3]); // 8388607
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x00, 0x80 }, out[3..6]); // -8388607
+}
