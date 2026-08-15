@@ -94,6 +94,11 @@ pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, 
 /// symmetric — -1.0 lands one LSB short of the negative rail. That
 /// asymmetry is the documented contract Task 7 checks against
 /// soundfile, not a bug.
+///
+/// A NaN sample silently becomes full-scale positive here: `clamp`'s
+/// `@min`/`@max` always return the finite bound when compared against
+/// NaN, so NaN never reaches `@intFromFloat` as NaN — it reads as
+/// "loud", not silence or an error.
 pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
     switch (st) {
         .float32 => {
@@ -104,6 +109,14 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
         .pcm_16 => {
             for (samples, 0..) |s, i| {
                 const clamped = std.math.clamp(s, -1.0, 1.0);
+                // The outer clamp's lower rail (-32768) is dead for every
+                // finite input: the inner clamp above already bounds
+                // `clamped` to ±1.0, so the most negative value @round
+                // ever sees is -1.0 * 32767 = -32767, one LSB inside this
+                // floor. Kept anyway as a defensive guard at this
+                // ABI-adjacent boundary, in case the inner clamp is ever
+                // moved or removed — see the "did not redden" mutation
+                // finding in the Task 5 report.
                 const v: i16 = @intFromFloat(std.math.clamp(@round(clamped * 32767.0), -32768.0, 32767.0));
                 std.mem.writeInt(i16, out[i * 2 ..][0..2], v, .little);
             }
@@ -112,6 +125,9 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
         .pcm_24 => {
             for (samples, 0..) |s, i| {
                 const clamped = std.math.clamp(s, -1.0, 1.0);
+                // Same dead lower rail as pcm_16 above (-8388608 here):
+                // unreachable given the inner clamp, kept as a defensive
+                // guard rather than relied on.
                 const v: i32 = @intFromFloat(std.math.clamp(@round(clamped * 8388607.0), -8388608.0, 8388607.0));
                 const bits: u32 = @bitCast(v);
                 out[i * 3] = @truncate(bits);
@@ -139,6 +155,18 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
 /// `std.Io.Threaded.global_single_threaded`, the singleton std reserves
 /// for exactly this "hardcode a synchronous Io" case. It needs no
 /// `deinit`.
+///
+/// Concurrency caveat: `global_single_threaded` is documented by std
+/// (`std/Io/Threaded.zig`) as not supporting concurrency or
+/// cancelation — that doc comment is written against `Io.async` /
+/// `Io.concurrent` / task groups, none of which `writeFile` uses, but
+/// it has not been exhaustively traced against every syscall wrapper
+/// this function does call (`createFile`, `writeStreamingAll`,
+/// `close`) for other shared mutable state in the singleton. Whether
+/// concurrent or re-entrant calls to `writeFile` from multiple threads
+/// are safe is therefore an open question, not a verified guarantee.
+/// A caller that may issue concurrent writes (Task 6's C ABI is a
+/// plausible one) must serialize them itself.
 pub fn writeFile(path: []const u8, samples: []const f32, rate: u32, channels: u16, st: Subtype) !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
@@ -172,6 +200,23 @@ test "pcm16 quantization: round-half-away, clamped" {
     try std.testing.expectEqual(@as(i16, -32767), std.mem.readInt(i16, out[4..6], .little));
     try std.testing.expectEqual(@as(i16, 16384), std.mem.readInt(i16, out[6..8], .little)); // round(0.5*32767)=16384 (16383.5 → away from zero)
     try std.testing.expectEqual(@as(i16, 32767), std.mem.readInt(i16, out[8..10], .little));
+}
+
+test "pcm16 quantization: negative exact-half rounds away from zero" {
+    // The positive-direction half case above (0.5 -> 16384) only pins
+    // @round's away-from-zero behavior for positive inputs. -0.5 * 32767
+    // = -16383.5, an exact half in the negative direction; round-half-
+    // away-from-zero must give -16384, not -16383. Verified this test
+    // actually distinguishes the contract by mutating @round to @trunc
+    // (round-toward-zero), which gives -16383 and reddens here —
+    // round-half-to-even was tried first and rejected as a mutation
+    // because it coincidentally also picks -16384 (the even neighbor)
+    // for this particular value, so it wouldn't have caught a
+    // half-to-even regression here.
+    const in = [_]f32{-0.5};
+    var out: [2]u8 = undefined;
+    _ = encodeSamples(.pcm_16, &in, &out);
+    try std.testing.expectEqual(@as(i16, -16384), std.mem.readInt(i16, out[0..2], .little));
 }
 
 test "pcm24 writes 3 little-endian bytes per sample" {
