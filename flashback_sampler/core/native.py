@@ -61,7 +61,18 @@ def load() -> C.CDLL | None:
     for path in _candidates():
         if not path.exists():
             continue
-        lib = C.CDLL(str(path))
+        try:
+            lib = C.CDLL(str(path))
+        except OSError:
+            # Exists but won't load: an architecture mismatch, a missing
+            # runtime dependency, or a corrupted/truncated file -- the
+            # realistic way a BUNDLED library breaks (a dev-build path
+            # that exists but is empty/garbage would hit this too). This
+            # is the bundled-but-broken case load()'s own docstring and
+            # make_ring_buffer()'s fallback contract promise to handle
+            # the same as a missing candidate: skip it and keep looking,
+            # never let a crash here take down app startup.
+            continue
         _declare(lib)
         _lib = lib
         break
@@ -196,6 +207,20 @@ class NativeAudioCircularBuffer(RingDerivedOps):
     def write(self, frames: np.ndarray) -> None:
         if frames.ndim == 1:
             frames = frames[:, np.newaxis]
+        # fb_ring_write trusts len(frames) and reads n_frames * self.channels
+        # floats from whatever buffer we hand it -- a caller that passes a
+        # narrower array (e.g. mono into a stereo ring) would otherwise make
+        # it read past the array's end into uninitialized heap (confirmed:
+        # the tail frames come back as garbage floats, not zeros or an
+        # error). AudioCircularBuffer.write instead silently broadcasts a
+        # narrower array across channels; raising here is a deliberate
+        # parity divergence -- broadcasting would mask a real caller bug by
+        # writing plausible-looking wrong audio into the recording.
+        if frames.shape[1] != self.channels:
+            raise ValueError(
+                f"write() frames has {frames.shape[1]} channel(s), "
+                f"ring has {self.channels}"
+            )
         frames = np.ascontiguousarray(frames, dtype=np.float32)
         self._lib.fb_ring_write(self._h, _as_f32p(frames), len(frames))
 
@@ -289,10 +314,23 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         )
 
     def get_summary_bins(self, n_bins: int, seconds=None, bin_span_samples=None) -> np.ndarray:
+        """See AudioCircularBuffer.get_summary_bins's docstring for the
+        shared contract. One divergence: n_bins > 4096 raises ValueError
+        here (Summary.rmsBins's max_bins stack-scratch bound), where
+        AudioCircularBuffer accepts any positive n_bins -- unreachable
+        today since the UI never requests more than 360 bins."""
         if n_bins <= 0:
             raise ValueError("n_bins must be positive")
         out = np.zeros((n_bins, self.channels), dtype=np.float32)
         n_samples = 0 if seconds is None else int(seconds * self.sample_rate)
+        # fb_ring_summary_bins/Summary.rmsBins overload n_samples=0 as ITS
+        # OWN sentinel for "all available" (mirroring get_summary_bins's
+        # seconds=None default) -- so an explicit seconds=0 (a real,
+        # deliberate zero-length request) must never reach the wire as 0,
+        # or it collides with that sentinel and silently returns the FULL
+        # window instead of an empty one. `out` is already all-zero.
+        if seconds is not None and n_samples <= 0:
+            return out
         span = 0 if not bin_span_samples else int(bin_span_samples)
         status = self._lib.fb_ring_summary_bins(self._h, n_bins, n_samples, span, _as_f32p(out))
         if status != _OK:
@@ -300,6 +338,22 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         return out
 
     def close(self) -> None:
+        """Destroys the Zig-owned ring and frees its storage. Unlike
+        AudioCircularBuffer.close() (a no-op), this one does real work,
+        with two consequences a caller must respect:
+
+        - Never retain a reference to `self.buffer` across a call to
+          close() -- it is a zero-copy numpy VIEW over storage that
+          fb_ring_destroy frees; a view held past this point points at
+          freed memory.
+        - `self.buffer` itself becomes None (see below), so any method
+          that reads it -- get_peak_bins, for instance -- raises
+          TypeError if called after close(). AudioCircularBuffer has no
+          such post-close failure mode (its close() does nothing), so
+          this is implementation-specific behavior a caller holding a
+          RingDerivedOps generically should not rely on either way:
+          don't use a buffer after closing it.
+        """
         if self._h:
             self.buffer = None
             self._lib.fb_ring_destroy(self._h)

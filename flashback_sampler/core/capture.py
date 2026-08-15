@@ -11,7 +11,7 @@ import numpy as np
 import threading
 import time
 from typing import Optional, Callable
-from .buffer import AudioCircularBuffer
+from .buffer import RingDerivedOps
 
 # Lazy import — only fails at runtime if PortAudio isn't installed,
 # not at module import time (lets buffer.py be used standalone in tests).
@@ -26,7 +26,9 @@ def _get_sd():
 
 class AudioCapture:
     """
-    Wraps a sounddevice InputStream and pipes frames into an AudioCircularBuffer.
+    Wraps a sounddevice InputStream and pipes frames into a ring buffer
+    (AudioCircularBuffer or NativeAudioCircularBuffer -- whichever
+    make_ring_buffer's factory returns).
 
     Usage:
         buf = make_ring_buffer(duration_seconds=900)
@@ -38,7 +40,7 @@ class AudioCapture:
 
     def __init__(
         self,
-        buffer: AudioCircularBuffer,
+        buffer: RingDerivedOps,
         device: Optional[int | str] = None,   # None = default device
         sample_rate: int = 48_000,
         channels: int = 2,

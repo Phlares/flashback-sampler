@@ -49,7 +49,8 @@ core/
 ```
 
 Artifacts: shared library (`flashback_core.dll` / `.so` / `.dylib`) for the
-ctypes host + static lib for future hosts. Tests are colocated `test` blocks.
+ctypes host (`core/build.zig`'s only `addLibrary` call, `linkage = .dynamic`
+— no static archive is built). Tests are colocated `test` blocks.
 
 ## Idiomatic commitments
 
@@ -127,8 +128,10 @@ FbRing*      fb_ring_create(uint32_t rate, uint16_t channels, double seconds); /
 void         fb_ring_destroy(FbRing*);
 void         fb_ring_write(FbRing*, const float* frames, size_t n_frames); // RT-safe
 uint64_t     fb_ring_total_written(const FbRing*);
-uint64_t     fb_ring_capacity(const FbRing*);        // in frames
-const float* fb_ring_storage(const FbRing*);         // zero-copy view, see below
+uint64_t     fb_ring_capacity(const FbRing*);        // in frames -- the READABLE window
+uint64_t     fb_ring_storage_frames(const FbRing*);  // PHYSICAL frame count backing fb_ring_storage
+                                                      // (capacity + guard band -- the whole two-sizes design)
+const float* fb_ring_storage(const FbRing*);         // zero-copy view, shaped with storage_frames
 void         fb_ring_set_gain(FbRing*, float);
 float        fb_ring_gain(const FbRing*);
 void         fb_ring_flush(FbRing*);
@@ -170,10 +173,17 @@ smaller, truer surface):
   bytes past it are unreachable — which makes…
 - **…`fb_ring_flush` one release-store of `total_written = 0`** plus
   poisoning every summary slot generation (`slot_abs = -1`) plus a hygiene
-  zeroing of storage (off the audio thread). Flush during active capture
-  races at most one audio block into silence — silence is a valid sample,
-  never torn garbage — and one summary slot may transiently mix epochs
-  (~85 ms, self-heals at the slot's next generation). Documented, accepted.
+  zeroing of storage (off the audio thread). Racing an active writer is
+  NOT bounded to "one block of silence": a writer that already loaded
+  `tw` before the flush will still publish `tw + n` afterward, silently
+  UNDOING the reset — `total_written` lands back near its pre-flush value
+  even though every readable frame is now zero, with no observable
+  indication a flush happened at all. Up to a FULL CAPACITY of silence,
+  not one block, can result. One summary slot may also transiently mix
+  epochs (~85 ms, self-heals at the slot's next generation). This is a
+  known race in the flush-vs-writer relationship, documented in
+  `Ring.zig`'s `flush()` doc comment, tracked as a separate design
+  question for the arc — not fixed here. See issue #20.
 - **A single factory swaps the app**: five call sites construct buffers
   today (`app/state.py`, `core/capture.py`, `core/capture_slot.py`,
   `core/loopback_capture.py`, `core/mixed_capture.py`); the swap PR routes

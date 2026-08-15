@@ -37,6 +37,12 @@ pub const Config = struct {
     sample_rate: u32,
     channels: u16,
     seconds: f64,
+    // Must equal Python's AudioCircularBuffer._SUMMARY_SLOT_SAMPLES
+    // (flashback_sampler/core/buffer.py) for get_summary_bins/rmsBins
+    // parity -- per-bin RMS of a constant-amplitude signal is the SAME
+    // number regardless of slot size, so the existing constant-amplitude
+    // parity test cannot detect the two constants drifting apart. A
+    // change to either number is a parity change; change both together.
     summary_slot_frames: u32 = 4096,
 };
 
@@ -436,9 +442,11 @@ test "seqlock stress: concurrent writer never yields torn reads" {
     //    THINNER than one writer block) made mutation 3 reliably red, but
     //    also intermittently reddened the CORRECT, unmutated code. This
     //    turned out to be a REAL bug, not a test artifact: `write()`
-    //    publishes once per call, atomically, for the WHOLE block — while
-    //    a call is still copying, the entire block can already be
-    //    physically in memory before `total_written` reflects any of it.
+    //    published once per call, atomically, for the WHOLE block (this
+    //    was PRE-CHUNKING — see the doc comments on `write`/`read` above
+    //    for the current, chunked-at-max_write_frames behavior) — while
+    //    a call was still copying, the entire block could already be
+    //    physically in memory before `total_written` reflected any of it.
     //    A margin thinner than the writer's block size let a single
     //    in-flight write straddle the read's validity boundary invisibly
     //    (confirmed by instrumenting read()'s internal t1/t2: every false

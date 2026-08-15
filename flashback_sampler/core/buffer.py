@@ -215,9 +215,14 @@ class RingDerivedOps:
         array is sized exactly to buffer_size, so the two numbers agree
         there, but NativeAudioCircularBuffer's raw storage array is sized
         to storage_frames -- buffer_size plus a guard band (see native.py's
-        module docstring) -- so reading `.buffer.nbytes` on that
-        implementation over-reports the resident footprint by the guard
-        band's size.
+        module docstring). That guard band IS resident memory (it's a real
+        allocation, not padding) -- `.buffer.nbytes` does not over-report
+        the resident footprint, it reports it correctly. What it gets
+        wrong for RAM ACCOUNTING is disagreeing with the READABLE window:
+        a caller like AppState.total_project_ram_bytes wants "how much
+        audio can this buffer give me back", which is capacity_bytes, not
+        "how many bytes did the allocator hand out", which is
+        `.buffer.nbytes`.
         """
         return self.buffer_size * self.channels * 4
 
@@ -255,6 +260,14 @@ class AudioCircularBuffer(RingDerivedOps):
     # ONCE from all of a slot's samples, not stride-sampled per read.
     # 4096 samples ≈ 85 ms at 48 kHz; fine enough for smooth rolling,
     # coarse enough that the summary stays tiny (≈330 KB for 15 min).
+    #
+    # Must equal Ring.Config.summary_slot_frames's default (core/src/
+    # Ring.zig) for get_summary_bins/rmsBins parity -- per-bin RMS of a
+    # constant-amplitude signal is the SAME number regardless of slot
+    # size, so the existing constant-amplitude parity test
+    # (test_get_summary_bins_constant_amplitude_is_exact_rms) cannot
+    # detect these two drifting apart. A change to either number is a
+    # parity change; change both together.
     _SUMMARY_SLOT_SAMPLES = 4096
 
     # Kept as class attributes (existing external surface: self._PEAK_BINS_*
@@ -553,6 +566,13 @@ class AudioCircularBuffer(RingDerivedOps):
 
         Aggregates frozen summary slots into n_bins display bins via
         scatter-add. Cost: O(n_sum) per call, a single numpy pass.
+
+        Parity note: this implementation accepts any n_bins > 0.
+        NativeAudioCircularBuffer.get_summary_bins raises ValueError for
+        n_bins > 4096 (Summary.rmsBins's max_bins, a fixed-size stack
+        scratch bound -- see Summary.zig) where this one would happily
+        return a larger array. Currently unreachable in practice: the UI
+        requests at most 360 bins.
         """
         if n_bins <= 0:
             raise ValueError("n_bins must be positive")
