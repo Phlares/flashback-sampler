@@ -13,6 +13,7 @@
 //! `total_written % storage_frames`) are deliberately different sizes.
 //! See the guard-band note above `read` for why.
 const std = @import("std");
+const Summary = @import("Summary.zig");
 
 const Ring = @This();
 
@@ -30,6 +31,7 @@ channels: u16,
 sample_rate: u32,
 total_written: std.atomic.Value(u64),
 gain: std.atomic.Value(f32),
+summary: Summary, // pre-decimated stats ring; fed per-chunk by write(), poisoned by flush()
 
 pub const Config = struct {
     sample_rate: u32,
@@ -66,6 +68,13 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Ring {
     const frames = try allocator.alloc(f32, storage_frames * config.channels);
     errdefer allocator.free(frames); // runs only if a later `try` fails
     @memset(frames, 0);
+    // Summary.init is constructed with `capacity` (the READABLE window),
+    // never `storage_frames` — rmsBins clamps n_avail against
+    // capacity_frames to mirror Python's clamp to buffer_size exactly;
+    // using storage_frames here would silently diverge from the Python
+    // reference whenever capacity isn't slot-aligned.
+    var summary = try Summary.init(allocator, capacity, config.summary_slot_frames, config.channels);
+    errdefer summary.deinit(); // multi-errdefer init: unwinds frames above too if this succeeded but a later field failed
     return .{
         .allocator = allocator,
         .frames = frames,
@@ -75,11 +84,13 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Ring {
         .sample_rate = config.sample_rate,
         .total_written = std.atomic.Value(u64).init(0),
         .gain = std.atomic.Value(f32).init(1.0),
+        .summary = summary,
     };
 }
 
 pub fn deinit(self: *Ring) void {
     self.allocator.free(self.frames);
+    self.summary.deinit();
     self.* = undefined; // poison: use-after-deinit becomes loud in Debug
 }
 
@@ -99,6 +110,14 @@ pub fn deinit(self: *Ring) void {
 /// a known race in the flush-vs-writer relationship, tracked as a
 /// separate design question for the arc — not fixed here. See issue #20.
 pub fn flush(self: *Ring) void {
+    // Poison BEFORE the total_written store, same ordering rationale as
+    // the frames-then-store below: a racing writer that wins a slot's
+    // tag write between this poison and the store leaves one slot
+    // transiently mixing pre- and post-flush data (~85 ms at typical
+    // slot sizes) — it self-heals on the writer's next pass through that
+    // slot's new generation. Spec-documented, same family as the
+    // total_written-vs-writer race described above, not fixed here.
+    self.summary.poison();
     self.total_written.store(0, .release);
     @memset(self.frames, 0);
 }
@@ -153,6 +172,14 @@ pub fn write(self: *Ring, interleaved: []const f32) void {
                 if (pos == total_floats) pos = 0;
             }
         }
+        // Summary.update takes PRE-gain data (`chunk`, never mutated by
+        // either write path above) and re-applies gain itself — see the
+        // doc comment on Summary.update. Critically this is called with
+        // `tw`, THIS chunk's own start_abs, not the original call's tw:
+        // write() chunks internally at max_write_frames, so a caller
+        // passing a multi-second block would otherwise tag every chunk
+        // past the first with the wrong slot generation.
+        self.summary.update(chunk, g, tw);
         // The release-store PUBLISHES this chunk: everything written
         // above becomes visible to any reader that acquire-loads a
         // value >= tw + chunk_frames. Publishing once per CHUNK, not
@@ -812,4 +839,64 @@ test "flush empties the ring; writer restarts cleanly at abs 0" {
     ring.write(&[_]f32{ 9, 8 });
     try ring.read(0, &out);
     try std.testing.expectEqual(@as(f32, 9), out[0]);
+}
+
+test "write feeds the summary; flush poisons it" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0, .summary_slot_frames = 4 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 0.5, 0.5, 0.5, 0.5 });
+    var out: [1]f32 = undefined;
+    ring.summary.rmsBins(ring.total_written.load(.acquire), 0, 0, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-6);
+    ring.flush();
+    ring.summary.rmsBins(0, 0, 0, &out);
+    try std.testing.expectEqual(@as(f32, 0), out[0]);
+}
+
+test "flush poisons stale slot generations, not just resets total_written" {
+    // The test above calls rmsBins(0, ...) post-flush, which returns
+    // early on n_samples == 0 before ever reading slot_abs — it cannot
+    // tell poison() ran from poison() being skipped. This test targets
+    // the actual bug poisoning prevents: post-flush, abs indices restart
+    // at 0, so a slot touched again by a NEW write can collide with its
+    // OWN stale pre-flush tag (same numeric abs value) and wrongly take
+    // the "same generation, accumulate" branch instead of "new
+    // generation, overwrite" — silently merging pre- and post-flush
+    // audio into one slot's stats.
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0, .summary_slot_frames = 4 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 1, 1, 1, 1 }); // fills slot 0, tag=0, ss=4, count=4
+    ring.flush(); // total_written -> 0; slot 0's tag must become -1
+    ring.write(&[_]f32{ 3, 3 }); // abs 0..2, slot 0 again, tag recomputed to 0
+    var out: [1]f32 = undefined;
+    ring.summary.rmsBins(ring.total_written.load(.acquire), 0, 0, &out);
+    // If poisoned correctly: slot 0 was reset fresh, holding only the
+    // two post-flush 3.0 samples -> RMS = 3.0. If poison() were a
+    // no-op, slot 0's stale tag (0) still equals the recomputed
+    // slot_start_abs (0), so update() would take the "same generation"
+    // accumulate branch and merge in the pre-flush 1.0 samples too ->
+    // RMS = sqrt((4*1 + 2*9) / 6) ~= 1.915, not 3.0.
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), out[0], 1e-6);
+}
+
+test "write chunks a single large call correctly, tagging each summary chunk with its own start_abs" {
+    const slot_frames = 1000;
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 10_000, .channels = 1, .seconds = 1.0, .summary_slot_frames = slot_frames });
+    defer ring.deinit();
+    // 9000 frames > 2 * max_write_frames (4096), so write() chunks this
+    // single call into three release-stores: [0,4096), [4096,8192),
+    // [8192,9000). Slot 4 (frames [4000,5000)) straddles the FIRST
+    // chunk boundary at 4096 -- frames 4000..4095 come from chunk 0,
+    // frames 4096..4999 from chunk 1. If write() passed each chunk's
+    // summary.update() the ORIGINAL call's tw (0) instead of THAT
+    // chunk's own start_abs, every frame from chunk 1 onward would be
+    // mis-tagged into the wrong slot and this slot would come up short
+    // or with the wrong bounds.
+    var buf: [9000]f32 = undefined;
+    for (&buf, 0..) |*s, i| s.* = @floatFromInt(i);
+    ring.write(&buf);
+    try std.testing.expectEqual(@as(i64, 4000), ring.summary.slot_abs[4]);
+    try std.testing.expectEqual(@as(f32, 4000), ring.summary.min[4]);
+    try std.testing.expectEqual(@as(f32, 4999), ring.summary.max[4]);
+    try std.testing.expectEqual(@as(u64, 1000), ring.summary.count[4]);
 }
