@@ -222,3 +222,24 @@ the RAM-readout wording, CLAP/VST hosts, the UI arc (#16).
   threads are MTA and Qt's are STA; they do not share interface
   pointers, so this should be safe. Verify on hardware.
 - Cross-compile legs must still build with `wasapi.zig` present.
+
+## Deviations recorded by the part-1 plan (2026-08-16)
+
+The plan (`docs/superpowers/plans/2026-08-16-zig-core-phase2-capture.md`)
+is authoritative where it differs below; the spec is amended, not
+overruled.
+
+- `fb_capture_create(ring, spec)` — no separate `summary` argument; the
+  `Summary` lives inside `Ring`.
+- Device enumeration ships in PR a (opening a device by id needs it) and
+  process enumeration in PR b; output-device enumeration moves with
+  playback. The spec's PR f (enumeration) folds into a/b/e, so the phase
+  is six PRs: a capture, b process loopback, c flush + summary, d mixer,
+  e playback, f delete Python buffer + deps.
+- Flush (#20) is fixed inside `Ring` (`writer_active` + `flush_pending`;
+  the writer executes a pending flush before its next write), not in
+  `Capture`. `fb_ring_flush` and Python are unchanged.
+- Loopback, input, and process streams all poll WASAPI (no
+  `EVENTCALLBACK`): one loop for every kind, and it sidesteps the known
+  event-driven-loopback quirk.
+- The plan covers PRs a–c. PRs d–f get a second plan after PR a merges.
