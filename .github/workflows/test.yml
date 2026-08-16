@@ -1,10 +1,18 @@
 name: test
 
+# Minutes budget: private-repo Actions minutes are scarce. Every job bills
+# rounded up to a whole minute; Windows costs 2x, macOS 10x. So:
+#   - one Windows pytest job (py3.12, the version release.yml ships)
+#   - Zig unit tests on ubuntu (1x); the Windows job builds the DLL anyway
+#   - run only when main moves (feature PRs target dev, tests run locally)
+#   - hard timeouts, so a hung test costs minutes, not hours
+# Expected cost per run: ~5 billed minutes. Worst case (both hang): 15.
 on:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   workflow_dispatch:
 
 concurrency:
@@ -13,12 +21,9 @@ concurrency:
 
 jobs:
   pytest:
-    name: pytest (windows / py${{ matrix.python-version }})
+    name: pytest (windows / py3.12)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+    timeout-minutes: 6
 
     env:
       QT_QPA_PLATFORM: offscreen
@@ -31,17 +36,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: |
             pyproject.toml
             requirements.txt
-
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
 
       - name: Install package + dev extras
         run: pip install -e ".[dev]"
@@ -54,48 +55,13 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe
         working-directory: core
 
-      - name: Run unit tests with coverage
-        run: >
-          pytest tests/unit
-          --cov=flashback_sampler
-          --cov-branch
-          --cov-report=term-missing
-          --cov-report=xml:coverage.xml
-          --cov-report=html:htmlcov
-          --junitxml=junit.xml
-          -m "not audio_hw and not perf"
-
-      - name: Upload coverage XML
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-xml-py${{ matrix.python-version }}
-          path: coverage.xml
-          if-no-files-found: warn
-
-      - name: Upload coverage HTML
-        if: always() && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-html
-          path: htmlcov
-          if-no-files-found: warn
-
-      - name: Upload JUnit results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: junit-py${{ matrix.python-version }}
-          path: junit.xml
-          if-no-files-found: warn
+      - name: Run unit tests
+        run: pytest tests/unit -m "not audio_hw and not perf"
 
   zig:
-    name: zig (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    name: zig (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
     defaults:
       run:
         working-directory: core
@@ -108,11 +74,3 @@ jobs:
         run: zig fmt --check build.zig src
       - name: Unit tests (Debug — full safety checks)
         run: zig build test
-      - name: Build shared library (ReleaseSafe)
-        run: zig build -Doptimize=ReleaseSafe
-      - name: Cross-compile health check
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows
-          zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos
-          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu
