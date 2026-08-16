@@ -83,10 +83,12 @@ Tests run headless with `QT_QPA_PLATFORM=offscreen`. Hardware-dependent tests ar
 
 ## CI / CD
 
-Two GitHub Actions workflows live under `.github/workflows/`:
+Two GitHub Actions workflows live under `.github/workflows/`. Private-repo minutes are scarce (Windows bills 2x, macOS 10x, per job rounded up), so CI is deliberately minimal:
 
-- **`test.yml`** — every push & PR. Windows runner, Python 3.10–3.12 matrix, installs `.[dev]`, runs `pytest tests/unit` with branch coverage. Coverage / JUnit XML are uploaded as artifacts (no threshold enforced yet).
-- **`release.yml`** — on a semver tag (`vX.Y.Z`): runs the suite as a smoke check, builds a Windows standalone with `pyinstaller flashback_sampler.spec`, zips `dist/flashback-sampler/` with a `.sha256`, and publishes a GitHub Release. Tags with a hyphen (`v0.1.0-rc1`) publish as pre-releases. Can also be run manually via `workflow_dispatch`.
+- **`test.yml`** — runs only on push to `main` (and manual dispatch); docs-only changes skip it. Two jobs: `pytest tests/unit` on Windows / Python 3.12 (the version `release.yml` ships) and `zig build test` on Ubuntu. ~5 billed minutes per run; hard timeouts cap a hang at 15.
+- **`release.yml`** — manual dispatch only while releases are paused. Builds a Windows standalone with `pyinstaller flashback_sampler.spec`, zips `dist/flashback-sampler/` with a `.sha256`, and publishes a GitHub Release when run from a `vX.Y.Z` tag. Tags with a hyphen (`v0.1.0-rc1`) publish as pre-releases.
+
+Branch flow: feature branches → PR into `dev` (default branch, no CI) → one PR `dev` → `main` when a batch is ready. Run `pytest tests/unit` and `zig build test` locally before pushing; that is where the Python 3.10/3.11 and macOS coverage now lives.
 
 ## License
 
