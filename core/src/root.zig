@@ -13,6 +13,15 @@ pub const Backend = @import("Backend.zig");
 pub const FakeBackend = @import("FakeBackend.zig");
 pub const Capture = @import("Capture.zig");
 
+// OS-gated: these two files only compile for Windows targets. On other
+// targets `wasapi`/`WasapiBackend` are empty structs and abi.zig's
+// capture exports return null/0. builtin.os.tag is a comptime constant, so the
+// dead branch is never analyzed on macOS/Linux — that is what keeps the
+// cross-compile legs green.
+const builtin = @import("builtin");
+pub const wasapi = if (builtin.os.tag == .windows) @import("wasapi.zig") else struct {};
+pub const WasapiBackend = if (builtin.os.tag == .windows) @import("WasapiBackend.zig") else struct {};
+
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
 // declarations that are actually used, so an unreferenced `Ring` re-export
 // would leave its `test` blocks (and any compile errors inside them)
