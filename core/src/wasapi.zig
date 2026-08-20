@@ -284,3 +284,122 @@ pub const IAudioCaptureClient = extern struct {
         _ = self.vtbl.base.Release(self);
     }
 };
+
+pub const IID_IActivateAudioInterfaceCompletionHandler = guid("{41D949AB-9862-444A-80F6-C261334DA5EB}");
+pub const IID_IAgileObject = guid("{94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90}");
+pub const VT_BLOB: u16 = 0x41;
+pub const AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK: u32 = 1;
+pub const PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE: u32 = 0;
+pub const VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = std.unicode.utf8ToUtf16LeStringLiteral("VAD\\Process_Loopback");
+
+pub const AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS = extern struct { TargetProcessId: u32, ProcessLoopbackMode: u32 };
+pub const AUDIOCLIENT_ACTIVATION_PARAMS = extern struct {
+    ActivationType: u32,
+    params: extern union { ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS },
+};
+
+pub const IActivateAudioInterfaceAsyncOperation = extern struct {
+    vtbl: *const VTable,
+    pub const VTable = extern struct {
+        base: IUnknownVTable,
+        GetActivateResult: *const fn (*IActivateAudioInterfaceAsyncOperation, *HRESULT, *?*anyopaque) callconv(.winapi) HRESULT,
+    };
+    pub fn release(self: *IActivateAudioInterfaceAsyncOperation) void {
+        _ = self.vtbl.base.Release(self);
+    }
+};
+
+/// A COM object WE implement: the completion handler. COM only needs the
+/// vtable pointer first; the fields after it are ours. `done` is set from
+/// COM's thread; the opener spins on it. Also claims IAgileObject so
+/// ActivateAudioInterfaceAsync accepts a handler from an MTA thread.
+/// `done` is a plain u32 accessed with @atomicStore/@atomicLoad —
+/// std.atomic.Value is not an extern-compatible type, and this struct
+/// must be extern for COM to read `vtbl` at offset 0.
+pub const CompletionHandler = extern struct {
+    vtbl: *const VTable = &vtable,
+    refs: u32 = 1,
+    done: u32 = 0,
+    op: ?*IActivateAudioInterfaceAsyncOperation = null,
+
+    pub const VTable = extern struct {
+        base: IUnknownVTable,
+        ActivateCompleted: *const fn (*CompletionHandler, *IActivateAudioInterfaceAsyncOperation) callconv(.winapi) HRESULT,
+    };
+    const vtable = VTable{
+        .base = .{ .QueryInterface = qi, .AddRef = addRef, .Release = release },
+        .ActivateCompleted = activateCompleted,
+    };
+    fn qi(this: *anyopaque, riid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+        if (std.meta.eql(riid.*, IID_IUnknown) or std.meta.eql(riid.*, IID_IActivateAudioInterfaceCompletionHandler) or std.meta.eql(riid.*, IID_IAgileObject)) {
+            out.* = this;
+            _ = addRef(this);
+            return 0;
+        }
+        out.* = null;
+        return @bitCast(@as(u32, 0x80004002)); // E_NOINTERFACE
+    }
+    fn addRef(this: *anyopaque) callconv(.winapi) u32 {
+        const self: *CompletionHandler = @ptrCast(@alignCast(this));
+        self.refs += 1;
+        return self.refs;
+    }
+    fn release(this: *anyopaque) callconv(.winapi) u32 {
+        const self: *CompletionHandler = @ptrCast(@alignCast(this));
+        self.refs -= 1; // stack-owned by the opener; never freed here
+        return self.refs;
+    }
+    fn activateCompleted(self: *CompletionHandler, op: *IActivateAudioInterfaceAsyncOperation) callconv(.winapi) HRESULT {
+        _ = op.vtbl.base.AddRef(op);
+        self.op = op;
+        @atomicStore(u32, &self.done, 1, .release);
+        return 0;
+    }
+};
+
+pub const ActivateAudioInterfaceAsyncFn = *const fn ([*:0]const u16, *const GUID, ?*PROPVARIANT, *CompletionHandler, *?*IActivateAudioInterfaceAsyncOperation) callconv(.winapi) HRESULT;
+
+pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+
+/// Mmdevapi.dll is resolved at call time, not linked: the export exists
+/// only on Windows 10 2004+, and a missing export must be a clean error,
+/// not a failed process start. The module handle is deliberately never
+/// freed — the function pointer must outlive this call.
+///
+/// Reuses the same LoadLibraryW/GetProcAddress declared above for
+/// combase.dll's RoInitialize — one resolve-at-call-time mechanism for
+/// every Windows-10-2004+-or-later export this file needs, not two.
+pub fn activateAudioInterfaceAsync() ?ActivateAudioInterfaceAsyncFn {
+    const module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("Mmdevapi.dll")) orelse return null;
+    const p = GetProcAddress(module, "ActivateAudioInterfaceAsync") orelse return null;
+    return @ptrCast(p);
+}
+
+// ── Toolhelp32 (process list) ────────────────────────────────────────
+pub const TH32CS_SNAPPROCESS: u32 = 2;
+pub const INVALID_HANDLE_VALUE: usize = std.math.maxInt(usize);
+pub const PROCESSENTRY32W = extern struct {
+    dwSize: u32,
+    cntUsage: u32,
+    th32ProcessID: u32,
+    th32DefaultHeapID: usize,
+    th32ModuleID: u32,
+    cntThreads: u32,
+    th32ParentProcessID: u32,
+    pcPriClassBase: i32,
+    dwFlags: u32,
+    szExeFile: [260]u16,
+};
+pub extern "kernel32" fn CreateToolhelp32Snapshot(flags: u32, pid: u32) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn Process32FirstW(snap: HANDLE, entry: *PROCESSENTRY32W) callconv(.winapi) i32;
+pub extern "kernel32" fn Process32NextW(snap: HANDLE, entry: *PROCESSENTRY32W) callconv(.winapi) i32;
+
+test "AUDIOCLIENT_ACTIVATION_PARAMS is 12 bytes and PROCESS params sit at offset 4" {
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(AUDIOCLIENT_ACTIVATION_PARAMS));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(AUDIOCLIENT_ACTIVATION_PARAMS, "params"));
+}
+
+test "PROCESSENTRY32W layout: szExeFile at 44, size 568" {
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(PROCESSENTRY32W, "szExeFile"));
+    try std.testing.expectEqual(@as(usize, 568), @sizeOf(PROCESSENTRY32W));
+}
