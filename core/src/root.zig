@@ -7,6 +7,7 @@ const std = @import("std");
 pub const Ring = @import("Ring.zig");
 pub const Summary = @import("Summary.zig");
 pub const wav = @import("wav.zig");
+pub const convert = @import("convert.zig");
 pub const abi = @import("abi.zig");
 
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
