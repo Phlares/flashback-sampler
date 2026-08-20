@@ -13,7 +13,7 @@ The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt i
 pip install -e ".[dev]"
 ```
 
-Installs the package plus test deps. **All capture (loopback, mic / line-in, per-process) is Windows-only**, via WASAPI through the Zig core (`flashback_sampler/core/native_capture.py`). Preview output still uses `sounddevice`, which is cross-platform. The test suite runs anywhere via fake audio sources.
+Installs the package plus test deps. **All capture (loopback, mic / line-in, per-process) is Windows-only**, via WASAPI through the Zig core (`flashback_sampler/core/native_capture.py`). `soundcard` and `sounddevice` no longer do any capture; they remain only for output-device listing and preview playback, until phase 2 PR e moves that to the Zig core too. The test suite runs anywhere via fake audio sources.
 
 ## Run
 

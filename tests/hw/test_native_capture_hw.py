@@ -34,6 +34,8 @@ def test_default_endpoint_captures_two_seconds(lib, kind):
     running = src.is_running()
     frames = src.frames_written()
     err = src.last_error()
+    xruns = src.xrun_count()
+    mix_rate = src.mix_rate()
     src.stop()
     src.close()
     buf.close()
@@ -41,7 +43,7 @@ def test_default_endpoint_captures_two_seconds(lib, kind):
     assert err is None, err
     # 2 s at 48 kHz, minus start-up: comfortably above 1 s of frames.
     assert frames > 48_000, frames
-    print(f"{kind}: frames={frames} xruns={src.xrun_count()} mix_rate={src.mix_rate()}")
+    print(f"{kind}: frames={frames} xruns={xruns} mix_rate={mix_rate}")
 
 
 def test_loopback_at_96k_when_mix_is_48k_reports_mix_rate(lib):
