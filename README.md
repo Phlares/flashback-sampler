@@ -13,7 +13,7 @@ The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt i
 pip install -e ".[dev]"
 ```
 
-Installs the package plus test deps. **Loopback capture of system audio is Windows-only** (needs the `soundcard` library for WASAPI loopback). Mic / line-in capture works cross-platform via `sounddevice`, and the test suite runs anywhere via fake audio sources.
+Installs the package plus test deps. **All capture (loopback, mic / line-in, per-process) is Windows-only**, via WASAPI through the Zig core (`flashback_sampler/core/native_capture.py`). Preview output still uses `sounddevice`, which is cross-platform. The test suite runs anywhere via fake audio sources.
 
 ## Run
 
@@ -51,8 +51,8 @@ flashback_sampler/
     buffer.py            # AudioCircularBuffer — seqlock non-blocking reads
     checkout.py          # Checkout + CheckoutManager (+ WAV/FLAC save)
     scrub_player.py      # ScrubPlayer — callback-driven preview engine
-    capture.py           # AudioCapture (sounddevice — mic / line-in)
-    loopback_capture.py  # LoopbackCapture (soundcard WASAPI — Windows output)
+    native.py            # ctypes bindings for the Zig core
+    native_capture.py    # NativeCaptureSource (Zig/WASAPI — loopback + mic / line-in)
     mixed_capture.py     # sum multiple inputs into one slot
     capture_slot.py      # one buffer + its source(s) + checkout manager
     quality_presets.py   # sample-rate / channel presets
