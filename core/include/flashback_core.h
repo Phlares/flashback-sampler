@@ -18,6 +18,11 @@ typedef enum FbStatus {
 
 typedef enum FbSubtype { FB_FLOAT32 = 0, FB_PCM_24 = 1, FB_PCM_16 = 2 } FbSubtype;
 
+typedef struct FbCapture FbCapture; /* opaque */
+typedef struct FbDevice { uint8_t kind; uint8_t is_default; uint32_t mix_rate; uint16_t mix_channels; char id[128]; char name[128]; } FbDevice;
+typedef struct FbCaptureSpec { uint8_t kind; uint32_t pid; uint32_t rate; uint16_t channels; const char *device_id; } FbCaptureSpec;
+typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; } FbCaptureStats;
+
 FbRing *fb_ring_create(uint32_t rate, uint16_t channels, double seconds);
 void fb_ring_destroy(FbRing *);
 void fb_ring_write(FbRing *, const float *frames, size_t n_frames);
@@ -51,4 +56,12 @@ FbStatus fb_ring_summary_bins(FbRing *, size_t n_bins, uint64_t n_samples,
  * discipline per the Ring's own concurrency model. */
 FbStatus fb_wav_write(const char *path, const float *frames, size_t n_frames,
                       uint32_t rate, uint16_t channels, FbSubtype subtype);
+
+size_t     fb_devices_list(FbDevice *out, size_t max);        /* 0 on non-Windows */
+FbCapture *fb_capture_create(FbRing *, const FbCaptureSpec *);/* NULL on non-Windows or bad spec */
+FbStatus   fb_capture_start(FbCapture *);                      /* FB_INVALID_ARG if already running, FB_IO_ERROR if spawn failed */
+void       fb_capture_stop(FbCapture *);
+void       fb_capture_destroy(FbCapture *);                    /* stops first */
+void       fb_capture_stats(const FbCapture *, FbCaptureStats *out);
+const char*fb_capture_last_error(const FbCapture *);           /* "" when none; valid until destroy */
 #endif
