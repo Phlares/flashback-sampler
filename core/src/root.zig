@@ -11,6 +11,7 @@ pub const convert = @import("convert.zig");
 pub const abi = @import("abi.zig");
 pub const Backend = @import("Backend.zig");
 pub const FakeBackend = @import("FakeBackend.zig");
+pub const Capture = @import("Capture.zig");
 
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
 // declarations that are actually used, so an unreferenced `Ring` re-export
