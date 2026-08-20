@@ -7,6 +7,9 @@ const std = @import("std");
 const Ring = @import("Ring.zig");
 const Summary = @import("Summary.zig");
 const wav = @import("wav.zig");
+const Capture = @import("Capture.zig");
+const Backend = @import("Backend.zig");
+const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
 // std's thread-safe general-purpose choice, confirmed present in the
@@ -272,4 +275,83 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
         else => .io_error,
     };
     return .ok;
+}
+
+pub const FbCaptureSpec = extern struct { kind: u8, pid: u32, rate: u32, channels: u16, device_id: [*:0]const u8 };
+
+test "fb_capture_create rejects an unknown kind and a bad channel count" {
+    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 9, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }));
+    try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 3, .device_id = "" }));
+}
+
+test "fb_capture stats/last_error on a never-started capture are zero/empty (Windows only)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    const cap = fb_capture_create(ring, &.{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }) orelse return error.CreateFailed;
+    defer fb_capture_destroy(cap);
+    var st: Capture.Stats = undefined;
+    fb_capture_stats(cap, &st);
+    try std.testing.expectEqual(@as(u8, 0), st.running);
+    try std.testing.expectEqual(@as(u64, 0), st.frames_written);
+    try std.testing.expectEqualStrings("", std.mem.span(fb_capture_last_error(cap)));
+}
+
+test "fb_devices_list with max 0 writes nothing and returns 0" {
+    try std.testing.expectEqual(@as(usize, 0), fb_devices_list(undefined, 0));
+}
+
+// The one backend this build ships. On non-Windows there is none yet:
+// capture creation returns null and enumeration returns 0, and the
+// Python side reports "capture unavailable on this OS".
+fn nativeBackend() ?Backend.Backend {
+    if (builtin.os.tag == .windows) return @import("WasapiBackend.zig").backend();
+    return null;
+}
+
+export fn fb_devices_list(out: [*]Backend.Device, max: usize) usize {
+    if (max == 0) return 0;
+    const be = nativeBackend() orelse return 0;
+    return be.enumerate(out[0..max]);
+}
+
+export fn fb_capture_create(ring: *Ring, spec: *const FbCaptureSpec) ?*Capture {
+    if (spec.kind > 2 or spec.channels == 0 or spec.channels > 2 or spec.rate == 0) return null;
+    const be = nativeBackend() orelse return null;
+    const cap = allocator.create(Capture) catch return null;
+    cap.* = Capture.init(ring, be, .{
+        .kind = @enumFromInt(spec.kind),
+        .device_id = std.mem.span(spec.device_id),
+        .pid = spec.pid,
+        .rate = spec.rate,
+        .channels = spec.channels,
+    });
+    return cap;
+}
+
+export fn fb_capture_start(cap: *Capture) FbStatus {
+    cap.start() catch |e| return switch (e) {
+        error.AlreadyRunning => .invalid_arg,
+        else => .io_error,
+    };
+    return .ok;
+}
+
+export fn fb_capture_stop(cap: *Capture) void {
+    cap.stop();
+}
+
+export fn fb_capture_destroy(cap: *Capture) void {
+    cap.stop();
+    allocator.destroy(cap);
+}
+
+export fn fb_capture_stats(cap: *const Capture, out: *Capture.Stats) void {
+    out.* = cap.stats();
+}
+
+export fn fb_capture_last_error(cap: *const Capture) [*:0]const u8 {
+    return cap.lastError().ptr;
 }
