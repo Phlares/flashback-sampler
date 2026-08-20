@@ -22,6 +22,7 @@ typedef struct FbCapture FbCapture; /* opaque */
 typedef struct FbDevice { uint8_t kind; uint8_t is_default; uint32_t mix_rate; uint16_t mix_channels; char id[128]; char name[128]; } FbDevice;
 typedef struct FbCaptureSpec { uint8_t kind; uint32_t pid; uint32_t rate; uint16_t channels; const char *device_id; } FbCaptureSpec;
 typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; } FbCaptureStats;
+typedef struct FbProcess { uint32_t pid; uint32_t ppid; char name[128]; } FbProcess;
 
 FbRing *fb_ring_create(uint32_t rate, uint16_t channels, double seconds);
 void fb_ring_destroy(FbRing *);
@@ -64,4 +65,6 @@ void       fb_capture_stop(FbCapture *);
 void       fb_capture_destroy(FbCapture *);                    /* stops first */
 void       fb_capture_stats(const FbCapture *, FbCaptureStats *out);
 const char*fb_capture_last_error(const FbCapture *);           /* "" when none; valid until destroy */
+
+size_t     fb_processes_list(FbProcess *out, size_t max);      /* every running process, Toolhelp32; 0 on non-Windows */
 #endif
