@@ -10,10 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-16-zig-core-phase2-design.md` — read it first. Deviations recorded there by this plan: `fb_capture_create` takes `(ring, spec)` (the `Summary` lives inside `Ring`); device enumeration lands in PR a (needed to open a device by id) and process enumeration in PR b, so the spec's PR f collapses into a/b/e; flush (#20) is fixed inside `Ring` (`writer_active` + `flush_pending`), not in `Capture`; loopback and input streams poll (no `EVENTCALLBACK`) — one loop for every kind.
 
+**Amended 2026-08-20** after a pre-flight verification pass (~160 claims checked against the working tree; 27 findings). Material changes: branches and PRs target `dev`, not `main` (CI budget is spent — no CI runs on feature branches or PRs; local gates are the merge gate); capture threads init with `RoInitialize`, not `CoInitializeEx` (the port proved `ActivateAudioInterfaceAsync` fails with `E_ILLEGAL_METHOD_CALL` under COM-only init); the process-loopback build floor stays 19041 (the plan had silently raised it to 20348); `FbProcess` carries `ppid` so the `resolve_audio_root_pid` behaviour (same-named ancestor walk — Spotify/Chrome child PIDs) survives the port; Task 12's generation assertions account for `Summary.init` calling `poison()`; the sequester steps account for `_ToRemove/` being gitignored; the straggler sweeps now reach `flashback_sampler.spec`, `core/__init__.py`, `packaging/`, and `soak_test.py`.
+
 ## Global Constraints
 
 - **Zero external Zig dependencies.** `core/build.zig.zon` never gains a `.dependencies` entry. No zigwin32, no miniaudio, no translate-c.
-- **Zig 0.16.0 pinned** in `core/build.zig.zon` (`minimum_zig_version = "0.16.0"`) and both CI `mlugg/setup-zig` `version:` fields. Never float.
+- **Zig 0.16.0 pinned** in `core/build.zig.zon` (`minimum_zig_version = "0.16.0"`) and all three CI `mlugg/setup-zig` `version:` fields (`test.yml` pytest job, `test.yml` zig job, `release.yml`). Never float.
 - **Pre-1.0 std drift is expected.** Snippets target 0.16; if a std call does not resolve, fix the call site to the pinned std API and keep the design. Tests define behaviour. Known 0.16 facts from phase 1: `std.Thread.spawn/join/yield` exist; there is no `std.Thread.sleep` (use kernel32 `Sleep` on Windows, spin+yield in tests); `std.Io.Mutex` needs an `Io` (`std.Io.Threaded.global_single_threaded.io()`); `refAllDecls` is one level deep.
 - **RT-safety invariant:** `Ring.write` and the capture loop never lock, allocate, or fail. Any change adding a lock/alloc/error path to the loop is wrong regardless of what it fixes.
 - **Windows-only backend, OS-gated.** `wasapi.zig` and `WasapiBackend.zig` are imported only under `builtin.os.tag == .windows`. The cross-compile legs (`x86_64-windows`, `aarch64-macos`, `x86_64-linux-gnu`) must stay green.
@@ -21,14 +23,15 @@
 - **Instructional comments** (owner directive): where a Zig concept first load-bears (`callconv(.winapi)`, `extern struct` vtables, `*anyopaque` interfaces, atomics, `builtin.os.tag`), a short comment says what it buys. Each PR description carries a "Zig concepts in this PR" section.
 - **TDD + mutation-check:** every test seen red before green; compound guards get one mutation per clause; verify by edit-then-revert on the real source. **The gate for Zig tests is "the count rose"**, not "it passed" — a new file not re-exported from `root.zig` runs zero tests silently.
 - **Shipped optimize mode is ReleaseSafe.** Zig tests run in Debug.
-- **PRs → `main`**, one per task-group below; the app must work at every merge. Owner merges. Deletion policy: sequester to `_ToRemove/`, never `rm -rf`. `CLAUDE.md` is gitignored — restate load-bearing rules in dispatches.
+- **PRs → `dev`** (the default branch), one per task-group below; the app must work at every merge. Owner merges. **The CI-minutes budget is spent: no workflow runs on feature branches, `dev`, or PRs.** The merge gate is local: `python -m pytest tests/unit -q -m "not audio_hw and not perf"` + `zig build --build-file core/build.zig test --summary all` + the cross-compile builds, run before every push. CI fires only when the owner promotes `dev` → `main` in a batch — that is where the phase-1 "watch the zig job's duration, a hang shows as cancelled" lesson applies. Deletion policy: sequester to `_ToRemove/`, never `rm -rf` — and note `_ToRemove/` is **gitignored**, so moves into it stage nothing; see the sequester recipes in Tasks 7 and 10. `CLAUDE.md` is gitignored — restate load-bearing rules in dispatches.
+- **Execute in the primary checkout, not a worktree.** `soak_test.py` and `ZIG-101.md` are untracked repo-root files and `CLAUDE.md` is gitignored; a worktree has none of them. Branch-per-PR in the main checkout.
 - **Shell on this machine:** no `cd` compounds, no `$( )`, no `&&`. Use `zig build --build-file core/build.zig test` and `--build-file` for every zig invocation.
 - Python side: no new pip dependencies; `native.py` / `native_capture.py` are ctypes + numpy only.
 - **Issues are status truth.** Open a sub-issue when a PR is scoped, comment when something material is learned, close via `Closes #NN` in the PR body. Tick the epic (#17) checkbox on merge.
 
 **Task → PR map:** Task 0 = setup (no PR) · Tasks 1–8 = PR **a** `feat/zig-capture` · Tasks 9–10 = PR **b** `feat/zig-process-loopback` · Tasks 11–13 = PR **c** `feat/zig-flush-summary`.
 
-**Windows constants used throughout** (from the Windows SDK; the same values the Python port declares):
+**Windows constants used throughout** (from the Windows SDK; where the Python port declares one — about half of these — the value below matches it byte-for-byte; the rest are SDK-only, trust this table):
 
 | Name | Value |
 |---|---|
@@ -93,7 +96,7 @@ Record the three numbers as `<A>`, `<B>`, `<C>` — used in PR bodies below.
 
 - [ ] **Step 5: Branch**
 
-Run: `git checkout -b feat/zig-capture main`
+Run: `git checkout -b feat/zig-capture dev`
 
 ---
 
@@ -113,7 +116,7 @@ Run: `git checkout -b feat/zig-capture main`
   /// Asserts out.len >= n_frames * dst_channels. No allocation.
   pub fn packet(src: [*]const u8, n_frames: usize, fmt: SourceFormat, silent: bool, dst_channels: u16, out: []f32) []f32
   ```
-  Channel rule (mirrors `win32_process_loopback.py:1130-1147`): equal → copy; 2→1 mean; 1→2 duplicate; else copy `min(src,dst)` channels and zero the rest.
+  Channel rule (mirrors `win32_process_loopback.py:1143-1154`): equal → copy; 2→1 mean; 1→2 duplicate; else copy `min(src,dst)` channels and zero the rest.
 
 - [ ] **Step 1: Failing tests**
 
@@ -303,7 +306,7 @@ git commit -m "feat(core): convert.zig — one WASAPI packet to interleaved f32"
   // observed
   opened: std.atomic.Value(bool), stopped: std.atomic.Value(bool), delivered: std.atomic.Value(usize), last_spec: ?Backend.Spec
   pub fn init(packets: []const []const f32) FakeBackend
-  pub fn backend(self: *FakeBackend) Backend
+  pub fn backend(self: *FakeBackend) Backend.Backend
   ```
   Fake `next` semantics: hand out the next packet immediately; when exhausted, spin-yield until `stopped` then return `null`.
 
@@ -367,8 +370,9 @@ Expected: compile error (missing `init`/`backend`).
 ```zig
 //! Test double for Backend. Scripted packets, injectable failures,
 //! observable lifecycle. Lives in src/ (not a test dir) so Capture.zig's
-//! tests can @import it, but nothing outside `test` blocks references
-//! it, so it never reaches the shared library.
+//! tests can @import it. root.zig's refAllDecls does analyze it, but
+//! nothing in abi.zig references it, so none of it is exported from the
+//! shared library.
 const std = @import("std");
 const Backend = @import("Backend.zig");
 const FakeBackend = @This();
@@ -808,7 +812,7 @@ git commit -m "fix(core): Ring.init validates its config; wav.writeFile guards t
 - Produces: `WasapiBackend.backend() Backend.Backend` (a stateless singleton: `pub var instance: WasapiBackend = .{};`), `wasapi.guid(comptime str) GUID`, `wasapi.wtf16ToUtf8Z(dst: []u8, src: [*:0]const u16) []u8`. Everything else is private to the two files.
 - Hardware-only behaviour; Zig unit tests cover the pure helpers (GUID parser, wide-string copy, format-candidate table) and that the file compiles for `x86_64-windows`.
 
-**Reference for every vtable:** `flashback_sampler/io/win32_process_loopback.py:181-425` declares the same interfaces in ctypes; the method order there is the SDK's order and is what you transcribe. Do not reorder.
+**Vtable reference:** `flashback_sampler/io/win32_process_loopback.py:181-425` declares `IAudioClient`, `IAudioCaptureClient`, and the activation interfaces in ctypes — for those, the method order there is the SDK's order; cross-check against it. `IMMDeviceEnumerator`, `IMMDeviceCollection`, `IMMDevice`, and `IPropertyStore` exist nowhere in this repo: for those four, the Step 3 snippet below IS the reference (its method order was taken from the SDK headers). Transcribe the snippet exactly. Do not reorder any vtable.
 
 - [ ] **Step 1: Failing tests (pure helpers)**
 
@@ -896,8 +900,8 @@ Add to `core/src/root.zig`:
 
 ```zig
 // OS-gated: these two files only compile for Windows targets. On other
-// targets `wasapi`/`WasapiBackend` are void and abi.zig's capture
-// exports return null/0. builtin.os.tag is a comptime constant, so the
+// targets `wasapi`/`WasapiBackend` are empty structs and abi.zig's
+// capture exports return null/0. builtin.os.tag is a comptime constant, so the
 // dead branch is never analyzed on macOS/Linux — that is what keeps the
 // cross-compile legs green.
 const builtin = @import("builtin");
@@ -925,6 +929,14 @@ pub extern "ole32" fn CoTaskMemFree(p: ?*anyopaque) callconv(.winapi) void;
 pub extern "ole32" fn PropVariantClear(p: *PROPVARIANT) callconv(.winapi) HRESULT;
 pub extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 pub extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) i32;
+// WinRT apartment init. The capture threads use this, NOT CoInitializeEx:
+// the port proved ActivateAudioInterfaceAsync (Task 9) returns
+// E_ILLEGAL_METHOD_CALL (0x8000000E) under COM-only init, and RoInitialize
+// is a superset of CoInitializeEx(MTA) — CoUninitialize is the paired
+// teardown for both (win32_process_loopback.py:816-824). One init path
+// for every capture kind. NOTE: RoInitialize takes ONE argument.
+pub extern "combase" fn RoInitialize(init_type: u32) callconv(.winapi) HRESULT;
+pub const RO_INIT_MULTITHREADED: u32 = 1;
 
 pub const COINIT_MULTITHREADED: u32 = 0;
 pub const CLSCTX_ALL: u32 = 0x17;
@@ -1084,14 +1096,18 @@ pub const IAudioCaptureClient = extern struct {
 In `core/build.zig`, after `const mod = b.addModule(...)`:
 
 ```zig
-    // The WASAPI backend calls ole32 (CoCreateInstance & co). Zig ships
-    // import libraries for the Windows system DLLs, so this links without
-    // an SDK. Only meaningful for Windows targets; harmless elsewhere
-    // because wasapi.zig is not even analyzed there (see root.zig).
-    if (target.result.os.tag == .windows) mod.linkSystemLibrary("ole32", .{});
+    // The WASAPI backend calls ole32 (CoCreateInstance & co) and combase
+    // (RoInitialize). Zig ships import libraries for the Windows system
+    // DLLs, so this links without an SDK. Only meaningful for Windows
+    // targets; harmless elsewhere because wasapi.zig is not even analyzed
+    // there (see root.zig).
+    if (target.result.os.tag == .windows) {
+        mod.linkSystemLibrary("ole32", .{});
+        mod.linkSystemLibrary("combase", .{});
+    }
 ```
 
-Run: `zig build --build-file core/build.zig test` and `zig build --build-file core/build.zig -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu`. Expected: both green (declarations compile; Linux target never sees them). If `linkSystemLibrary` on a `*std.Build.Module` has a different shape in 0.16, use `lib.linkSystemLibrary("ole32")` on the artifact instead.
+Run: `zig build --build-file core/build.zig test` and `zig build --build-file core/build.zig -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu`. Expected: both green (declarations compile; Linux target never sees them). If `linkSystemLibrary` on a `*std.Build.Module` has a different shape in 0.16, use `lib.linkSystemLibrary(...)` on the artifact instead. If Zig's bundled import libs turn out to lack `combase`, drop the extern and resolve `RoInitialize` at runtime with the same `LoadLibraryW`/`GetProcAddress` pattern Task 9 uses for `ActivateAudioInterfaceAsync` — record which path shipped.
 
 - [ ] **Step 4: Implement `WasapiBackend.zig`**
 
@@ -1123,8 +1139,10 @@ const max_streams = 16;
 
 /// Format candidates in preference order. First = "what we asked for";
 /// AUTOCONVERTPCM makes the engine convert to it. The rest are the
-/// Python port's fallbacks for the process-loopback client, whose
-/// GetMixFormat returns E_NOTIMPL (win32_process_loopback.py:955-975).
+/// Python port's fallbacks for the process-loopback client, which has
+/// no device attached so GetMixFormat is not meaningful there — the
+/// port never queries it and tries this chain instead
+/// (win32_process_loopback.py:955-975).
 pub fn candidates(rate: u32, channels: u16) [5]w.WAVEFORMATEX {
     return .{
         w.waveFormat(w.WAVE_FORMAT_IEEE_FLOAT, 32, rate, channels),
@@ -1247,8 +1265,11 @@ fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
     const self: *WasapiBackend = @ptrCast(@alignCast(ptr));
     if (spec.channels == 0 or spec.channels > 2) return error.Unsupported;
     // Called on the capture thread, which stays alive for the stream's
-    // life — so CoInitializeEx here pairs with CoUninitialize in deinit.
-    _ = w.CoInitializeEx(null, w.COINIT_MULTITHREADED);
+    // life — so the init here pairs with CoUninitialize in deinit.
+    // RoInitialize, not CoInitializeEx: see the declaration in wasapi.zig
+    // — process activation (Task 9) hard-requires the WinRT apartment,
+    // and it is a superset of COM MTA for the other kinds.
+    _ = w.RoInitialize(w.RO_INIT_MULTITHREADED);
     errdefer w.CoUninitialize();
     const slot = self.acquireSlot() orelse return error.OutOfMemory;
     errdefer slot.in_use = false;
@@ -1839,7 +1860,7 @@ git commit -m "feat(core): capture + device ABI, ctypes bindings, NativeCaptureS
 ### Task 7: `audio_devices.py` runs on the native backend; sequester the Python backends
 
 **Files:**
-- Modify: `flashback_sampler/app/audio_devices.py`, `tests/unit/test_audio_devices.py`, `tests/unit/test_capture_source.py`, `flashback_sampler/platform/capabilities.py` (docstring seam map), `PLATFORM.md`
+- Modify: `flashback_sampler/app/audio_devices.py`, `flashback_sampler/core/__init__.py` (drops the module-scope `from .capture import AudioCapture` — without this edit every `import flashback_sampler.core.*` breaks the moment `capture.py` moves), `tests/unit/test_audio_devices.py`, `tests/unit/test_capture_source.py`, `flashback_sampler/platform/capabilities.py` (docstring seam map), `PLATFORM.md`
 - Move to `_ToRemove/`: `flashback_sampler/core/capture.py`, `flashback_sampler/core/loopback_capture.py`, `tests/test_loopback_soundcard.py`
 - Create: `tests/hw/__init__.py`, `tests/hw/test_native_capture_hw.py`
 
@@ -1849,7 +1870,7 @@ git commit -m "feat(core): capture + device ABI, ctypes bindings, NativeCaptureS
 
 - [ ] **Step 1: Failing tests**
 
-In `tests/unit/test_audio_devices.py`, delete the tests that monkeypatch `sd` (`test_probe_input_ok`, `test_probe_input_falls_back_to_device_default`, `test_probe_loopback_over_mix_rate_falls_back`, `test_probe_loopback_at_or_below_mix_rate_ok`, `test_probe_loopback_unknown_mix_rate_is_permissive`, `test_probe_input_passes_integer_device_to_check_input_settings`, `test_probe_input_fallback_passes_integer_device_to_query_devices`, `test_probe_loopback_hint_strips_loopback_suffix_to_match_real_name`, `test_build_capture_source_input_kind_requires_integer_id`) and add:
+In `tests/unit/test_audio_devices.py`, delete the tests built on the `sounddevice` probing that dies here (`test_probe_input_ok`, `test_probe_input_falls_back_to_device_default`, `test_probe_loopback_over_mix_rate_falls_back`, `test_probe_loopback_at_or_below_mix_rate_ok`, `test_probe_loopback_unknown_mix_rate_is_permissive`, `test_probe_input_passes_integer_device_to_check_input_settings`, `test_probe_input_fallback_passes_integer_device_to_query_devices`, `test_probe_loopback_hint_strips_loopback_suffix_to_match_real_name`, and `test_build_capture_source_input_kind_requires_integer_id` — input ids become endpoint strings, so that rule is gone) and add:
 
 ```python
 def _fake_devices():
@@ -1901,7 +1922,9 @@ def test_build_capture_source_loopback_and_input_use_native(monkeypatch):
     assert seen == dict(kind="input", device_id="{mic}", pid=0, sample_rate=44_100, channels=1)
 ```
 
-Keep `test_default_loopback_sentinel_follows_live_os_default`, `test_named_loopback_still_pins_to_that_speaker` only if they assert on `CaptureDevice` fields (they do — `follow_default`); if they instantiate `LoopbackCapture`, rewrite them to assert `device_id` passed to `NativeCaptureSource` via the same monkeypatch as above.
+`test_default_loopback_sentinel_follows_live_os_default` and `test_named_loopback_still_pins_to_that_speaker` (tests/unit/test_audio_devices.py:77-92) both build a real `LoopbackCapture` and assert on `cap.speaker_name` — rewrite them to the `NativeCaptureSource` monkeypatch used above, asserting `device_id == ""` for `DEFAULT_LOOPBACK` (follow-default) and `device_id == device.id` for a named device.
+
+`test_apply_rate_probe_rebuilds_preset` (tests/unit/test_audio_devices.py:~269) monkeypatches `_wasapi_output_mix_rate`, which this task deletes — rewrite it to the new mechanism: build `dev = audio_devices.CaptureDevice(kind="loopback", name="X", id="{x}", mix_rate=48_000)` and call `apply_rate_probe(preset_96k, dev)` expecting the 48 000 Hz adjustment with a notice, then `apply_rate_probe(preset_48k, dev)` expecting the same preset back with no notice. (With `device=None` the new probe is permissive, so the old None-device fixture cannot express this test.)
 
 In `tests/unit/test_capture_source.py`, replace `test_audio_capture_conforms_without_starting` and `test_loopback_capture_conforms_without_starting` with:
 
@@ -1974,7 +1997,17 @@ def _list_native_devices() -> list[CaptureDevice]:
   Docstring: "Loopback and input rates above the endpoint's mix format add no information."
 - `list_output_devices` / `default_output_device` / `OutputDevice` stay on `sounddevice` for now (imported lazily inside the function, as today) — playback moves in PR e.
 
-Sequester: `git mv flashback_sampler/core/capture.py _ToRemove/flashback_sampler/core/capture.py`, same for `loopback_capture.py` and `tests/test_loopback_soundcard.py` (a `git mv` is a staged rename, not a delete; the owner approves the final removal). Grep for remaining importers: `grep -rn "core.capture import\|loopback_capture import\|AudioCapture\b\|LoopbackCapture\b" flashback_sampler tests docs README.md PLATFORM.md` — fix each hit (`capabilities.py` docstring seam list, `PLATFORM.md` seam table row "Loopback backends" → `core/native_capture.py` + `core/WasapiBackend.zig`, `README.md` if it names them). `mixed_capture.py` imports nothing from them (verify).
+Sequester — **`_ToRemove/` is gitignored, so `git mv` into it fails and stages nothing.** The recipe (per file: `capture.py`, `loopback_capture.py`, `tests/test_loopback_soundcard.py`):
+
+```bash
+mkdir -p _ToRemove/flashback_sampler/core _ToRemove/tests
+mv flashback_sampler/core/capture.py _ToRemove/flashback_sampler/core/
+mv flashback_sampler/core/loopback_capture.py _ToRemove/flashback_sampler/core/
+mv tests/test_loopback_soundcard.py _ToRemove/tests/
+git add -u flashback_sampler tests
+```
+
+The PR diff shows plain deletions; the bytes survive locally under `_ToRemove/` and the PR body lists them for the owner's one-shot removal approval. Edit `flashback_sampler/core/__init__.py`: delete `from .capture import AudioCapture` (module scope — the package import breaks otherwise). Grep for remaining importers: `grep -rn "core.capture import\|loopback_capture import\|AudioCapture\b\|LoopbackCapture\b" flashback_sampler tests docs soak_test.py flashback_sampler.spec packaging README.md PLATFORM.md` — fix each hit (`capabilities.py` docstring seam list, `PLATFORM.md` seam table row "Loopback backends" → `core/native_capture.py` + `core/WasapiBackend.zig`, `README.md` if it names them). `soak_test.py` still imports `LoopbackCapture` — leave it broken for now, Task 8 Step 1 ports it before the "after" soak. `mixed_capture.py` imports nothing from them (verify).
 
 Create `tests/hw/__init__.py` (empty) and `tests/hw/test_native_capture_hw.py`:
 
@@ -2042,7 +2075,7 @@ def test_loopback_at_96k_when_mix_is_48k_reports_mix_rate(lib):
 - [ ] **Step 3: Run unit tests, verify green; run hardware tests by hand**
 
 Run: `python -m pytest tests/unit -q -m "not audio_hw and not perf"`
-Expected: green. Report the count: Task 0's baseline, minus the tests deleted here, plus the 8 from Task 6 and the 6 added here.
+Expected: green. Report the count: Task 0's baseline, minus the 9 deleted here, plus the 8 from Task 6 and the 6 added here (the three rewrites — the two loopback tests and `test_apply_rate_probe_rebuilds_preset` — are count-neutral).
 
 Run (Windows box, audio playing): `python -m pytest tests/hw -m audio_hw -s -q`
 Expected: all pass. **If `test_default_endpoint_captures_two_seconds[loopback]` fails with `open failed: FormatRejected`**, the AUTOCONVERTPCM-on-loopback risk fired: comment the finding on `<A>` with the HRESULT, and switch `open()` to request the mix format when `kind != .input` (call `GetMixFormat`, pass that `WAVEFORMATEX` to `Initialize` without the two AUTOCONVERT flags, and set `src_fmt` from it — `WAVEFORMATEXTENSIBLE` float has `wFormatTag == 0xFFFE` and `wBitsPerSample == 32`; treat as `.f32`). `convert.packet` already handles the channel conform. Record which path shipped in the PR body.
@@ -2054,7 +2087,8 @@ Run the app (`python -m flashback_sampler` or the project's `run` skill), add a 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A flashback_sampler/app/audio_devices.py flashback_sampler/platform/capabilities.py PLATFORM.md tests/unit/test_audio_devices.py tests/unit/test_capture_source.py tests/hw _ToRemove
+git add flashback_sampler/app/audio_devices.py flashback_sampler/core/__init__.py flashback_sampler/platform/capabilities.py PLATFORM.md tests/unit/test_audio_devices.py tests/unit/test_capture_source.py tests/hw
+git add -u flashback_sampler tests
 git commit -m "feat: capture runs on the Zig backend -- audio_devices enumerates/opens via native, Python capture backends sequestered"
 ```
 
@@ -2067,20 +2101,27 @@ git commit -m "feat: capture runs on the Zig backend -- audio_devices enumerates
 
 - [ ] **Step 1: The "after" soak and the #26 number**
 
-Run: `python soak_test.py` exactly as in Task 0 Step 3 (same duration, audio playing). Post the table on epic #17 as "Phase 2 — after PR a". Then measure write-tail latency the way #26's original measurement did (see the issue for the script; it timed `NativeAudioCircularBuffer.write` from Python) — that path no longer exists on the capture path, so instead report `xruns` and `frames_written` vs wall clock from `fb_capture_stats` over a 5-minute run, and the app's idle-armed RSS/CPU from Task Manager beside Task 0's numbers. Comment the comparison on #26 and on `<A>`.
+First port `soak_test.py` (untracked, repo root) to the native path — Task 7 sequestered the `LoopbackCapture` it imports:
+
+- `from flashback_sampler.core.native_capture import NativeCaptureSource` replaces the `loopback_capture` import.
+- `cap = NativeCaptureSource(buf, kind="loopback")` replaces the `LoopbackCapture(...)` construction (there is no `on_level` callback any more).
+- `cap._dropped_callbacks` → `cap.xrun_count()` (both print sites); label the column `xruns`. The `warnings`-based discontinuity counter counted warnings the Python capture thread emitted — that thread is gone, so drop the `warnings` plumbing and report `cap.xrun_count()` as the discontinuity signal too.
+- The `peaks` signal check: each 5 s tick, append `float(np.max(np.abs(buf.get_latest(0.5))))` — the "blocks with signal" line at the end keeps its meaning.
+
+Then run `python soak_test.py` with the same duration and audio playing as Task 0 Step 3. Post the table on epic #17 as "Phase 2 — after PR a". Then measure write-tail latency the way #26's original measurement did (see the issue for the script; it timed `NativeAudioCircularBuffer.write` from Python) — that path no longer exists on the capture path, so instead report `xruns` and `frames_written` vs wall clock from `fb_capture_stats` over a 5-minute run, and the app's idle-armed RSS/CPU from Task Manager beside Task 0's numbers. Comment the comparison on #26 and on `<A>`.
 
 - [ ] **Step 2: Docs**
 
-`README.md`: dependency section drops the mention of `soundcard` for capture (it is still installed until PR f; say "capture runs in the Zig core; `soundcard`/`sounddevice` remain only for output-device listing and preview playback until phase 2 PR e"). Spec: add the "Deviations" section.
+`README.md`: dependency section drops the mention of `soundcard` for capture (it is still installed until PR f; say "capture runs in the Zig core; `soundcard`/`sounddevice` remain only for output-device listing and preview playback until phase 2 PR e"). Spec: the "Deviations" section already exists (it landed with this plan's commit) — verify it still matches; do not add a duplicate. Record any NEW deviation this PR produced.
 
-- [ ] **Step 3: CI + PR**
+- [ ] **Step 3: Local gates + PR**
 
-Run: `zig fmt --check core/build.zig core/src`; `python -m pytest tests/unit -q -m "not audio_hw and not perf"`; `zig build --build-file core/build.zig test --summary all` (record the count; it must be Task 0's + 24: 7 convert + 3 fake + 6 capture + 5 guards + 4 wasapi + 3 abi — adjust if a task changed its count and say so).
+Run: `zig fmt --check core/build.zig core/src`; `python -m pytest tests/unit -q -m "not audio_hw and not perf"`; `zig build --build-file core/build.zig test --summary all` (record the count; it must be Task 0's + 28: 7 convert + 3 fake + 6 capture + 5 guards + 4 wasapi + 3 abi = 72 from a 44 baseline — adjust if a task changed its count and say so); `zig build --build-file core/build.zig -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu` and `-Dtarget=aarch64-macos` (the cross-compile legs, locally — no CI runs on this PR).
 
-Push `feat/zig-capture`; open the PR against `main` with:
+Push `feat/zig-capture`; open the PR against `dev` with:
 - Title: `feat(core): capture runs on the Zig backend -- WASAPI bindings, Capture thread, device enumeration`
-- Body: what/why (3 bullets), `Closes #<A>`, `Closes #21`, `Closes #28`, the soak/RSS comparison table, the AUTOCONVERTPCM finding, **"Zig concepts in this PR"** (COM vtables as `extern struct` + `callconv(.winapi)`; `*anyopaque` + vtable interfaces; `std.Thread.spawn` + atomics for a producer thread; `builtin.os.tag` comptime gating; `errdefer` chains in `open`), and an explicit "findings open/closed" statement.
-- Watch CI: all 6 legs green, and **check the zig job's duration** — a hang shows as `cancelled`, not red.
+- Body: what/why (3 bullets), `Closes #<A>`, `Closes #21`, `Closes #28`, the soak/RSS comparison table, the AUTOCONVERTPCM finding, the `_ToRemove/` contents list (deletion approval), **"Zig concepts in this PR"** (COM vtables as `extern struct` + `callconv(.winapi)`; `*anyopaque` + vtable interfaces; `std.Thread.spawn` + atomics for a producer thread; `builtin.os.tag` comptime gating; `errdefer` chains in `open`), and an explicit "findings open/closed" statement.
+- No CI fires on this PR (budget) — state in the body that the local gates above all passed, with the counts.
 
 Hand the link to the owner. Do not merge.
 
@@ -2089,16 +2130,19 @@ Hand the link to the owner. Do not merge.
 ### Task 9: Process loopback on the Zig backend (PR b)
 
 **Files:**
-- Modify: `core/src/wasapi.zig` (activation params, completion handler, `ActivateAudioInterfaceAsync` via `std.DynLib`, Toolhelp32), `core/src/WasapiBackend.zig` (`activate` gains the `.process` arm; `enumerateProcesses`), `core/src/abi.zig`, `core/include/flashback_core.h`, `flashback_sampler/core/native.py`
-- Branch: `git checkout -b feat/zig-process-loopback main` after PR a merges.
+- Modify: `core/src/wasapi.zig` (activation params, completion handler, `ActivateAudioInterfaceAsync` resolved at call time via `LoadLibraryW`/`GetProcAddress`, Toolhelp32), `core/src/WasapiBackend.zig` (`activate` gains the `.process` arm; `enumerateProcesses`), `core/src/abi.zig`, `core/include/flashback_core.h`, `flashback_sampler/core/native.py`
+- Branch: `git checkout -b feat/zig-process-loopback dev` after PR a merges.
 
 **Interfaces:**
 - Produces:
   ```c
-  typedef struct FbProcess { uint32_t pid; char name[128]; } FbProcess;
+  typedef struct FbProcess { uint32_t pid; uint32_t ppid; char name[128]; } FbProcess;
   size_t fb_processes_list(FbProcess *out, size_t max);  /* every running process, Toolhelp32; 0 on non-Windows */
   ```
-  Python: `native.list_processes() -> list[tuple[int, str]]` sorted by `(name.lower(), pid)` — the shape `enumerate_audio_processes` returns today (`win32_process_loopback.py:552`).
+  `ppid` is in the struct because the port's `resolve_audio_root_pid` (`win32_process_loopback.py:521-549`) needs the parent chain — see Task 10, which keeps that behaviour.
+  Python, all derived from one private `native._process_entries() -> list[tuple[int, int, str]]` (pid, ppid, name — one `fb_processes_list` call):
+  - `native.list_processes() -> list[tuple[int, str]]` sorted by `(name.lower(), pid)` — the shape `enumerate_audio_processes` returns today (`win32_process_loopback.py:552`); the picker keeps unpacking `(pid, name)`.
+  - `native.resolve_root_pid(pid: int) -> int` — port of `resolve_audio_root_pid` (`win32_process_loopback.py:521-549`): walk up same-named ancestors (Spotify/Discord/Chrome children share an exe; only the root's audio session covers the tree); return `pid` unchanged when it is absent from the snapshot or the parent chain breaks. Same cycle guard (visited set).
 - `Backend.Spec.kind == .process` + `pid` opens the `VAD\Process_Loopback` virtual device including the target process tree.
 
 - [ ] **Step 1: Failing tests**
@@ -2266,9 +2310,12 @@ Add:
 ```zig
 /// Mirrors win32_process_loopback.py:855-935: activation params in a
 /// VT_BLOB PROPVARIANT, our CompletionHandler, then spin (bounded) until
-/// ActivateCompleted fires, then GetActivateResult → IAudioClient. The
-/// Python port used RoInitialize; CoInitializeEx(MTA) is expected to be
-/// equivalent for this call — verify on hardware (Task 10 Step 3).
+/// ActivateCompleted fires, then GetActivateResult → IAudioClient.
+/// Apartment: this call HARD-REQUIRES a WinRT apartment — the port
+/// measured E_ILLEGAL_METHOD_CALL under plain CoInitializeEx
+/// (win32_process_loopback.py:816-819). open() already ran
+/// RoInitialize(RO_INIT_MULTITHREADED) on this thread (Task 5), so no
+/// per-kind branch is needed here.
 fn activateProcess(pid: u32) Backend.Error!*w.IAudioClient {
     const activate_fn = w.activateAudioInterfaceAsync() orelse return error.Unsupported;
     var params = w.AUDIOCLIENT_ACTIVATION_PARAMS{
@@ -2294,7 +2341,7 @@ fn activateProcess(pid: u32) Backend.Error!*w.IAudioClient {
     return @ptrCast(@alignCast(raw.?));
 }
 
-pub const Process = extern struct { pid: u32, name: [128]u8 };
+pub const Process = extern struct { pid: u32, ppid: u32, name: [128]u8 };
 
 pub fn enumerateProcesses(out: []Process) usize {
     const snap = w.CreateToolhelp32Snapshot(w.TH32CS_SNAPPROCESS, 0) orelse return 0;
@@ -2307,6 +2354,7 @@ pub fn enumerateProcesses(out: []Process) usize {
     while (n < out.len) {
         if (entry.th32ProcessID != 0) {
             out[n].pid = entry.th32ProcessID;
+            out[n].ppid = entry.th32ParentProcessID;
             const z: [*:0]const u16 = @ptrCast(&entry.szExeFile);
             _ = w.wtf16ToUtf8Z(&out[n].name, z);
             n += 1;
@@ -2320,7 +2368,7 @@ pub fn enumerateProcesses(out: []Process) usize {
 `abi.zig`:
 
 ```zig
-pub const FbProcess = if (builtin.os.tag == .windows) @import("WasapiBackend.zig").Process else extern struct { pid: u32, name: [128]u8 };
+pub const FbProcess = if (builtin.os.tag == .windows) @import("WasapiBackend.zig").Process else extern struct { pid: u32, ppid: u32, name: [128]u8 };
 
 export fn fb_processes_list(out: [*]FbProcess, max: usize) usize {
     if (max == 0) return 0;
@@ -2329,18 +2377,44 @@ export fn fb_processes_list(out: [*]FbProcess, max: usize) usize {
 }
 ```
 
-Header: add `FbProcess` + `fb_processes_list`. `native.py`: `class FbProcess(C.Structure): _fields_ = [("pid", C.c_uint32), ("name", C.c_char * 128)]`, `_declare` lines, and:
+Header: add `FbProcess` + `fb_processes_list`. `native.py`: `class FbProcess(C.Structure): _fields_ = [("pid", C.c_uint32), ("ppid", C.c_uint32), ("name", C.c_char * 128)]`, `_declare` lines, and:
 
 ```python
-def list_processes(max_processes: int = 4096) -> list[tuple[int, str]]:
+def _process_entries(max_processes: int = 4096) -> list[tuple[int, int, str]]:
+    """One Toolhelp32 snapshot via the core: (pid, ppid, exe_name) rows.
+    Both public views below derive from this."""
     lib = load()
     if lib is None:
         return []
     arr = (FbProcess * max_processes)()
     n = int(lib.fb_processes_list(arr, max_processes))
-    rows = [(int(p.pid), p.name.decode("utf-8", "replace")) for p in arr[:n] if p.pid > 0 and p.name]
+    return [(int(p.pid), int(p.ppid), p.name.decode("utf-8", "replace"))
+            for p in arr[:n] if p.pid > 0 and p.name]
+
+
+def list_processes(max_processes: int = 4096) -> list[tuple[int, str]]:
+    rows = [(pid, name) for pid, _ppid, name in _process_entries(max_processes)]
     rows.sort(key=lambda t: (t[1].lower(), t[0]))
     return rows
+
+
+def resolve_root_pid(pid: int) -> int:
+    """Walk up from `pid` to the highest ancestor sharing the same exe
+    name (port of win32_process_loopback.resolve_audio_root_pid — apps
+    like Spotify/Chrome play audio from the ROOT of a same-exe tree).
+    Returns `pid` unchanged if it is absent or the chain breaks."""
+    procs = {p: (pp, name) for p, pp, name in _process_entries()}
+    if pid not in procs:
+        return pid
+    name_lc = procs[pid][1].lower()
+    current, visited = pid, set()
+    while current not in visited:
+        visited.add(current)
+        parent, _ = procs.get(current, (0, ""))
+        if parent <= 0 or parent not in procs or procs[parent][1].lower() != name_lc:
+            break
+        current = parent
+    return current
 ```
 
 - [ ] **Step 4: Run, verify green, count +3; cross-compile leg**
@@ -2359,15 +2433,30 @@ git commit -m "feat(core): per-process loopback via ActivateAudioInterfaceAsync 
 ### Task 10: Python switches process loopback to native; sequester the COM port
 
 **Files:**
-- Modify: `flashback_sampler/app/audio_devices.py` (`process_loopback` branch), `flashback_sampler/app/process_picker_dialog.py` (imports), `tests/unit/test_process_loopback.py`, `tests/hw/test_native_capture_hw.py`, `pyproject.toml` (`[tool.coverage.run] omit`), `flashback_sampler/platform/capabilities.py`, `PLATFORM.md`
+- Modify: `flashback_sampler/app/audio_devices.py` (`process_loopback` branch), `flashback_sampler/app/process_picker_dialog.py` (imports), `flashback_sampler/core/native_capture.py` (`is_process_loopback_supported`), `flashback_sampler/io/__init__.py` (docstring names the moved module), `flashback_sampler.spec` (`hiddenimports` — a hard PyInstaller failure if left), `packaging/README.md`, `README.md`, `tests/unit/test_process_loopback.py`, `tests/hw/test_native_capture_hw.py`, `pyproject.toml` (`[tool.coverage.run] omit`), `flashback_sampler/platform/capabilities.py`, `PLATFORM.md`
 - Move to `_ToRemove/`: `flashback_sampler/io/win32_process_loopback.py`
 
 **Interfaces:**
-- Produces: `native_capture.is_process_loopback_supported() -> bool` (`sys.platform == "win32"` and `sys.getwindowsversion().build >= 20348`) replaces `win32_process_loopback.is_supported`. `native.list_processes()` replaces `enumerate_audio_processes()`.
+- Produces: `native_capture.is_process_loopback_supported() -> bool` (`sys.platform == "win32"` and `sys.getwindowsversion().build >= 19041` — the SAME floor the port enforces, `win32_process_loopback.py:76-88`; do not raise it) replaces `win32_process_loopback.is_supported`. `native.list_processes()` replaces `enumerate_audio_processes()`; `native.resolve_root_pid()` (Task 9) replaces `resolve_audio_root_pid()`.
 
 - [ ] **Step 1: Failing tests**
 
-Rewrite `tests/unit/test_process_loopback.py`: delete the GUID/struct-layout tests (they tested the ctypes port; the Zig side now owns those layouts and tests them). Keep and retarget:
+Rewrite `tests/unit/test_process_loopback.py`: delete the GUID/struct-layout tests (they tested the ctypes port; the Zig side now owns those layouts and tests them). The rewritten file opens with its own imports and fake buffer — the old file's per-test `FakeBuffer` classes go with it:
+
+```python
+import pytest
+
+import flashback_sampler.app.audio_devices as audio_devices
+from flashback_sampler.core import native
+
+
+class _FakeBuffer:  # mirrors tests/unit/test_audio_devices.py
+    _h = 0xB0B
+    channels = 2
+    sample_rate = 48_000
+```
+
+Keep and retarget:
 
 ```python
 def test_is_supported_matches_platform(monkeypatch):
@@ -2400,6 +2489,22 @@ def test_build_capture_source_rejects_non_integer_pid():
     dev = audio_devices.CaptureDevice(kind="process_loopback", name="x", id="nope")
     with pytest.raises(ValueError):
         audio_devices.build_capture_source(dev, _FakeBuffer(), 48_000, 2)
+
+
+def test_resolve_root_pid_walks_same_named_chain(monkeypatch):
+    # spotify 300 -> 200 -> 100 (all same exe); 100's parent is explorer.
+    entries = [(1, 0, "explorer.exe"), (100, 1, "spotify.exe"),
+               (200, 100, "spotify.exe"), (300, 200, "spotify.exe")]
+    monkeypatch.setattr(native, "_process_entries", lambda *a: entries)
+    assert native.resolve_root_pid(300) == 100
+    assert native.resolve_root_pid(100) == 100
+
+
+def test_resolve_root_pid_unknown_or_broken_chain_is_identity(monkeypatch):
+    entries = [(200, 999, "game.exe")]  # parent absent from snapshot
+    monkeypatch.setattr(native, "_process_entries", lambda *a: entries)
+    assert native.resolve_root_pid(200) == 200
+    assert native.resolve_root_pid(555) == 555
 ```
 
 Add to `tests/hw/test_native_capture_hw.py`:
@@ -2428,30 +2533,42 @@ Run: `python -m pytest tests/unit/test_process_loopback.py -q` → FAIL.
 import sys
 
 def is_process_loopback_supported() -> bool:
-    """Per-process WASAPI loopback needs Windows 10 build 20348+."""
+    """Per-process WASAPI loopback needs Windows 10 build 19041 (20H1,
+    May 2020) or newer — the same floor the ctypes port enforced."""
     if sys.platform != "win32":
         return False
     try:
-        return sys.getwindowsversion().build >= 20348
+        return sys.getwindowsversion().build >= 19041
     except Exception:
         return False
 ```
 
-`audio_devices.py`: `process_loopback` branch → `return NativeCaptureSource(buffer=buffer, kind="process", pid=pid, sample_rate=sample_rate, channels=channels)` (keep the `int(device.id)` ValueError). `process_picker_dialog.py`: import `native.list_processes` and `native_capture.is_process_loopback_supported`; `self._all_rows = native.list_processes()`; `if not is_process_loopback_supported():`. `pyproject.toml`: drop `flashback_sampler/io/win32_process_loopback.py` and `flashback_sampler/core/loopback_capture.py` from `omit`. `git mv flashback_sampler/io/win32_process_loopback.py _ToRemove/flashback_sampler/io/`. Grep for stragglers: `grep -rn "win32_process_loopback\|enumerate_audio_processes\|ProcessLoopbackCapture" flashback_sampler tests docs *.md`.
+`audio_devices.py`: `process_loopback` branch → `return NativeCaptureSource(buffer=buffer, kind="process", pid=native.resolve_root_pid(pid), sample_rate=sample_rate, channels=channels)` (keep the `int(device.id)` ValueError; the resolve keeps the port's same-exe-ancestor behaviour at the same seam — construction time). `process_picker_dialog.py`: import `native.list_processes` and `native_capture.is_process_loopback_supported`; `self._all_rows = native.list_processes()`; `if not is_process_loopback_supported():`. `pyproject.toml`: drop `flashback_sampler/io/win32_process_loopback.py` and `flashback_sampler/core/loopback_capture.py` from `omit`. `flashback_sampler.spec`: delete the `"flashback_sampler.io.win32_process_loopback"` entry from `hiddenimports` (keep `"flashback_sampler.io"`) and its comment — PyInstaller hard-fails on a hiddenimport that no longer resolves. `flashback_sampler/io/__init__.py`: rewrite the docstring paragraph naming `win32_process_loopback`. `packaging/README.md` + `README.md`: fix the lines naming the module.
+
+Sequester (same gitignored-`_ToRemove/` recipe as Task 7):
+
+```bash
+mkdir -p _ToRemove/flashback_sampler/io
+mv flashback_sampler/io/win32_process_loopback.py _ToRemove/flashback_sampler/io/
+git add -u flashback_sampler
+```
+
+Grep for stragglers: `grep -rn "win32_process_loopback\|enumerate_audio_processes\|ProcessLoopbackCapture\|resolve_audio_root_pid" flashback_sampler tests docs packaging soak_test.py flashback_sampler.spec *.md` — fix every live reference (historical docs — the spec, `PHASE2-HANDOFF.md` — stay as they are).
 
 - [ ] **Step 3: Verify**
 
 Run: `python -m pytest tests/unit -q -m "not audio_hw and not perf"` → green.
-Hardware: `python -m pytest tests/hw -m audio_hw -s -q` → the process test passes. If it fails with `open failed: ActivationFailed`, retry `open()` with `RoInitialize(1)` from `combase.dll` (extern, same shape as `CoInitializeEx`) instead of `CoInitializeEx` for `.process` and record it on `<B>`. Then the app: pick a playing process in the picker, arm, confirm frames.
+Hardware: `python -m pytest tests/hw -m audio_hw -s -q` → the process test passes. (`open()` already inits with `RoInitialize` — the apartment requirement is handled since Task 5.) If activation still fails, surface the `HRESULT` in `last_error`, comment it on `<B>`, and check it against the port's HRESULT constants (`win32_process_loopback.py:92` onward) before changing anything. Then the app: pick a playing process in the picker, arm, confirm frames.
 
 - [ ] **Step 4: Commit + PR b**
 
 ```bash
-git add -A flashback_sampler/app/audio_devices.py flashback_sampler/app/process_picker_dialog.py flashback_sampler/core/native_capture.py flashback_sampler/platform/capabilities.py PLATFORM.md pyproject.toml tests/unit/test_process_loopback.py tests/hw _ToRemove
+git add flashback_sampler/app/audio_devices.py flashback_sampler/app/process_picker_dialog.py flashback_sampler/core/native_capture.py flashback_sampler/io/__init__.py flashback_sampler/platform/capabilities.py flashback_sampler.spec packaging/README.md README.md PLATFORM.md pyproject.toml tests/unit/test_process_loopback.py tests/hw
+git add -u flashback_sampler
 git commit -m "feat: per-process loopback and process list run on the Zig backend; COM port sequestered"
 ```
 
-Push, open PR: title `feat: per-process loopback on the Zig backend`, `Closes #<B>`, "Zig concepts in this PR" (implementing a COM object in Zig — a vtable we own; `std.DynLib` for optional OS exports; `extern union`; `@offsetOf`/`@sizeOf` layout tests as the ABI gate). CI green ×6. Hand over.
+Push, open PR against `dev`: title `feat: per-process loopback on the Zig backend`, `Closes #<B>`, the `_ToRemove/` contents list, "Zig concepts in this PR" (implementing a COM object in Zig — a vtable we own; `LoadLibraryW`/`GetProcAddress` for an export that only exists on newer Windows; `extern union`; `@offsetOf`/`@sizeOf` layout tests as the ABI gate). Local gates green (state counts in the body; no CI fires). Hand over.
 
 ---
 
@@ -2459,7 +2576,7 @@ Push, open PR: title `feat: per-process loopback on the Zig backend`, `Closes #<
 
 **Files:**
 - Modify: `core/src/Ring.zig`, `core/src/Capture.zig`
-- Branch: `git checkout -b feat/zig-flush-summary main` after PR b merges.
+- Branch: `git checkout -b feat/zig-flush-summary dev` after PR b merges.
 
 **Interfaces:**
 - Produces: `Ring` gains `writer_active: std.atomic.Value(bool)` and `flush_pending: std.atomic.Value(bool)`. `Ring.flush()` (control thread) becomes: if `writer_active` → set `flush_pending` and return; else the old immediate flush. `Ring.write()` checks `flush_pending` at entry; if set, performs the immediate flush then clears it, then writes. `Capture` stores `writer_active = true` before its loop and `false` after. `fb_ring_flush` unchanged; Python unchanged.
@@ -2498,17 +2615,23 @@ test "flush with no active writer is immediate (unchanged behaviour)" {
 Append to `core/src/Capture.zig`:
 
 ```zig
-test "capture marks the ring's writer active for the life of the loop" {
+test "capture marks the ring's writer active for the life of the loop, and stop drains a pending flush" {
     var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
     defer ring.deinit();
-    var fake = FakeBackend.init(&.{});
+    var fake = FakeBackend.init(&.{&[_]f32{ 1, 1 }});
     var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "", .rate = 48_000, .channels = 2 });
     try std.testing.expect(!ring.writer_active.load(.acquire));
     try cap.start();
-    try waitUntil(&cap, struct { fn f(c: *Capture) bool { return c.running.load(.acquire); } }.f);
+    try waitUntil(&cap, struct { fn f(c: *Capture) bool { return c.frames_written.load(.acquire) == 1; } }.f);
     try std.testing.expect(ring.writer_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), ring.total_written.load(.acquire));
+    // A flush that arrives while the loop is winding down must not be lost:
+    // stop() drains it after the join, when the writer is inactive.
+    ring.flush_pending.store(true, .release);
     cap.stop();
     try std.testing.expect(!ring.writer_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
 }
 ```
 
@@ -2550,7 +2673,7 @@ At the top of `write`, before the gain load:
 
 (The memset is ~50 ms for a 345 MB ring; the WASAPI buffer is 200 ms, so a flush mid-capture costs no frames — state this in the comment. `write` stays lock-free and allocation-free.)
 
-Update the doc comment on `flush` (delete the "known race … #20" paragraph). `Capture.run`: after `self.running.store(true, .release)` add `self.ring.writer_active.store(true, .release);` and a `defer self.ring.writer_active.store(false, .release);` placed so it runs before `running` flips false (declare it after the `running` defer). `Capture.stop`: after `t.join()`, drain a flush that arrived while the loop was winding down — `if (self.ring.flush_pending.load(.acquire)) { self.ring.flush_pending.store(false, .release); self.ring.flush(); }` (the writer is inactive now, so `flush` runs immediately). Add this assertion to the Capture test in Step 1: set `ring.flush_pending` to true right before `cap.stop()`, and after `cap.stop()` expect `total_written == 0` and `flush_pending == false`.
+Prose sweep — this task replaces a mechanism, so grep the prose that names the old one: the doc comment on `flush` loses its "known race … #20" paragraph, AND the inline comment INSIDE `flush` (`Ring.zig:124-130`) whose closing line says "same family as the … race **described above**, not fixed here" — its referent is the paragraph being deleted and its ordering rationale changes now that `flushNow` can run on the writer; rewrite both together. `Capture.run`: after `self.running.store(true, .release)` add `self.ring.writer_active.store(true, .release);` and a `defer self.ring.writer_active.store(false, .release);` placed so it runs before `running` flips false (declare it after the `running` defer). `Capture.stop`: after `t.join()`, drain a flush that arrived while the loop was winding down — `if (self.ring.flush_pending.load(.acquire)) { self.ring.flush_pending.store(false, .release); self.ring.flush(); }` (the writer is inactive now, so `flush` runs immediately; the Step 1 Capture test pins this drain).
 
 - [ ] **Step 3: Run, verify green, count +3; run the stress tests 3×**
 
@@ -2581,17 +2704,19 @@ Append to `core/src/Summary.zig`:
 test "update and poison bump the generation twice; rmsBins re-reads until it sees a stable even generation" {
     var s = try Summary.init(std.testing.allocator, 4096 * 4, 4096, 1);
     defer s.deinit();
-    try std.testing.expectEqual(@as(u64, 0), s.gen.load(.acquire));
+    // init itself calls poison() (Summary.zig:50), so a fresh Summary
+    // already sits at generation 2 — not 0.
+    try std.testing.expectEqual(@as(u64, 2), s.gen.load(.acquire));
     const block = [_]f32{0.5} ** 4096;
     s.update(&block, 1.0, 0);
-    try std.testing.expectEqual(@as(u64, 2), s.gen.load(.acquire));
-    s.poison();
     try std.testing.expectEqual(@as(u64, 4), s.gen.load(.acquire));
+    s.poison();
+    try std.testing.expectEqual(@as(u64, 6), s.gen.load(.acquire));
     // A torn snapshot: force gen odd, rmsBins must not spin forever and must return.
-    s.gen.store(5, .release);
+    s.gen.store(7, .release);
     var out: [1]f32 = undefined;
     s.rmsBins(4096, 0, 0, &out);
-    s.gen.store(6, .release);
+    s.gen.store(8, .release);
 }
 
 test "rmsBins result equals the value read after the writer finished (no torn read across a full slot rewrite)" {
@@ -2641,7 +2766,7 @@ pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin
 fn rmsBinsOnce(... the existing rmsBins body, renamed ...) void
 ```
 
-Update the module/struct doc comment that says "no synchronization" (grep the prose for it — the phase-1 handoff's "replacing a mechanism means grepping the prose" rule).
+Prose sweep: the "no synchronization" paragraph lives in the **`rmsBins` function doc comment** (`Summary.zig:127-136` — "…this pair has no synchronization at all … See issue #23"), not the module comment; rewrite that THREADING paragraph to describe the seqlock and drop the #23 reference. The module doc comment (`Summary.zig:1-7`) stays. Then grep `core/src` for any other "no synchronization"/"#23" prose (the phase-1 "replacing a mechanism means grepping the prose" rule).
 
 - [ ] **Step 3: Run, verify green, count +2; the existing rmsBins tests still pass**
 
@@ -2664,20 +2789,20 @@ Run: `zig fmt --check core/src`; `zig build --build-file core/build.zig test --s
 
 - [ ] **Step 2: Docs**
 
-`ZIG-101.md` is untracked owner notes — leave it, but comment on `<C>` that its flush/summary sections are now stale and list the two headings. `README.md`: nothing.
+`ZIG-101.md` is untracked owner notes — leave it, but comment on `<C>` that its flush/summary write-ups are now stale in at least three places (§3.1 flush, §3.5, and the §4 "Accepted compromises" entries for #20 and #23) and list the headings you actually find — grep it for `#20` and `#23` rather than trusting this count. `README.md`: nothing.
 
 - [ ] **Step 3: PR**
 
-Push `feat/zig-flush-summary`; PR title `fix(core): flush executes on the writer; Summary seqlock`, body: `Closes #<C>`, `Closes #20`, `Closes #23`, "Zig concepts in this PR" (`defer` for paired atomics; seqlock generations; why the memset can live on the writer thread here and not in a callback), findings statement. CI ×6 green. Hand over. Tick a, b, c on epic #17 as they merge.
+Push `feat/zig-flush-summary`; PR against `dev`, title `fix(core): flush executes on the writer; Summary seqlock`, body: `Closes #<C>`, `Closes #20`, `Closes #23`, "Zig concepts in this PR" (`defer` for paired atomics; seqlock generations; why the memset can live on the writer thread here and not in a callback), findings statement. Local gates green (state counts; no CI fires). Hand over. Tick a, b, c on epic #17 as they merge.
 
 ---
 
 ## Verification (whole part)
 
-- `zig build test` count rose by 24 (PR a) + 3 (PR b) + 5 (PR c) over Task 0's baseline — report the actual numbers in each PR body.
-- Python: 524, minus the sd-monkeypatch and ctypes-layout tests deleted in Tasks 7 and 10, plus 8 (Task 6) + 6 (Task 7) + 4 (Task 10) + 1 (capture_source); report the actual.
+- `zig build test` count rose by 28 (PR a: 7+3+6+5+4+3) + 3 (PR b) + 5 (PR c) over Task 0's baseline (44 → 80) — report the actual numbers in each PR body.
+- Python: 524, minus the 9 deleted in Task 7 and the ctypes-layout tests deleted in Task 10, plus 8 (Task 6) + 6 (Task 7) + 6 (Task 10) + 1 (capture_source); report the actual.
 - Soak: Task 0 "before" and Task 8 "after" tables on epic #17; #26 commented with the comparison.
 - Hardware: `tests/hw` green on the owner's Windows box before each merge (loopback, input, 96k-honesty, process).
-- Cross-compile legs green on every push.
-- `_ToRemove/` contents listed in PR a and PR b bodies for the owner's one-shot deletion approval: `core/capture.py`, `core/loopback_capture.py`, `tests/test_loopback_soundcard.py`, `io/win32_process_loopback.py`.
-- The next plan (PRs d–f: Mixer, Playback + output enumeration, delete Python buffer + deps + FLAC) is written only after PR a is merged and `Backend.zig` is on `main`.
+- Cross-compile builds (`x86_64-linux-gnu`, `aarch64-macos`) green locally before every push — no CI runs until the owner promotes `dev` → `main`.
+- `_ToRemove/` contents listed in PR a and PR b bodies for the owner's one-shot deletion approval: `core/capture.py`, `core/loopback_capture.py`, `tests/test_loopback_soundcard.py`, `io/win32_process_loopback.py`. (`_ToRemove/` is gitignored — the PR diffs show plain deletions; the local copies are the review artifact.)
+- The next plan (PRs d–f: Mixer, Playback + output enumeration, delete Python buffer + deps + FLAC) is written only after PR a is merged and `Backend.zig` is on `dev`.
