@@ -122,3 +122,40 @@ def test_list_devices_maps_kinds_and_strings(lib):
         {"kind": "loopback", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{id-a}", "name": "Speakers"},
         {"kind": "input", "is_default": False, "mix_rate": 44_100, "mix_channels": 1, "id": "{id-b}", "name": "Mic"},
     ]
+
+
+def test_queries_are_inert_after_close(lib):
+    """A closed handle is NULL on the Zig side; fb_capture_* exports take a
+    non-optional *Capture, so passing NULL through is undefined behavior
+    (an access violation), not a Python exception. Every query must go
+    inert instead of reaching the lib once closed."""
+    src = NativeCaptureSource(_FakeBuffer(), kind="loopback")
+    src.close()
+    n_calls_at_close = len(lib.calls)
+
+    assert src.is_running() is False
+    assert src.xrun_count() == 0
+    assert src.frames_written() == 0
+    assert src.mix_rate() == 0
+    assert src.last_error() is None
+    src.stop()  # no-op, must not touch the lib
+
+    assert len(lib.calls) == n_calls_at_close, "a query reached the lib after close()"
+
+
+def test_start_after_close_raises(lib):
+    src = NativeCaptureSource(_FakeBuffer(), kind="loopback")
+    src.close()
+    with pytest.raises(RuntimeError):
+        src.start()
+
+
+def test_start_close_stop_never_calls_fb_capture_stop_with_null_handle(lib):
+    """close() must reset _started too -- otherwise a stale _started=True
+    survives close() and a later stop() reaches fb_capture_stop with the
+    now-NULL handle."""
+    src = NativeCaptureSource(_FakeBuffer(), kind="loopback")
+    src.start()
+    src.close()
+    src.stop()
+    assert sum(1 for c in lib.calls if c[0] == "fb_capture_stop") == 0

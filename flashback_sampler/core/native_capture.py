@@ -40,6 +40,8 @@ class NativeCaptureSource:
 
     # -- CaptureSource protocol ----------------------------------------
     def start(self) -> None:
+        if self._h is None:
+            raise RuntimeError("NativeCaptureSource is closed")
         if self._started:
             return
         status = self._lib.fb_capture_start(self._h)
@@ -48,6 +50,8 @@ class NativeCaptureSource:
         self._started = True
 
     def stop(self) -> None:
+        if self._h is None:
+            return
         if not self._started:
             return
         self._lib.fb_capture_stop(self._h)
@@ -60,6 +64,11 @@ class NativeCaptureSource:
         return int(self._stats().xruns)
 
     def last_error(self) -> str | None:
+        # A closed handle is NULL on the Zig side; fb_capture_last_error
+        # takes a non-optional *Capture, so passing NULL through is
+        # undefined behavior in the DLL, not a Python exception.
+        if self._h is None:
+            return None
         raw = self._lib.fb_capture_last_error(self._h)
         return raw.decode("utf-8", "replace") if raw else None
 
@@ -74,8 +83,14 @@ class NativeCaptureSource:
         if self._h:
             self._lib.fb_capture_destroy(self._h)
             self._h = None
+        self._started = False
 
     def _stats(self) -> native.FbCaptureStats:
+        # Same NULL-handle hazard as last_error(): fb_capture_stats takes
+        # a non-optional *const Capture, so a closed instance must never
+        # reach it -- return the zeroed struct instead.
+        if self._h is None:
+            return native.FbCaptureStats()
         st = native.FbCaptureStats()
         self._lib.fb_capture_stats(self._h, C.byref(st))
         return st
