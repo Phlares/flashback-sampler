@@ -111,8 +111,11 @@ test "fb_wav_write rejects invalid rate/channels/subtype without touching disk" 
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 2, -1)); // subtype negative
 }
 
-// fb_ring_create's guard has FIVE independent clauses; each one gets its
-// own isolated test (three-of-five valid, one under test) so a fully
+// The five-clause guard these tests exercise now lives in `Ring.init`
+// (issue #21) — fb_ring_create is a pass-through, so these tests reach
+// it indirectly: fb_ring_create calls Ring.init, and its `catch` turns
+// any error.InvalidArgument into null. Each clause still gets its own
+// isolated test (three-of-five valid, one under test) so a fully
 // deletable or half-deletable guard shows up immediately as a specific
 // red test, not a green suite that never exercised the boundary at all.
 test "fb_ring_create rejects rate == 0" {
@@ -134,13 +137,15 @@ test "fb_ring_create rejects seconds <= 0" {
 // NaN and +Infinity both fail `seconds <= 0` (IEEE 754: any comparison
 // against NaN is false; +Infinity compares greater than 0), so neither
 // is caught by that clause alone — they need their own, separate
-// isFinite check. Without it they reach Ring.init's
-// `@intFromFloat(config.seconds * sample_rate)`, and @intFromFloat on a
-// non-finite float is documented illegal behavior: a ReleaseSafe
-// process abort, not a catchable error. fb_ring_create is a C boundary
-// fed straight from ctypes' c_double — Python-side float() conversions
-// can hand across NaN with no complaint, so this is directly reachable,
-// not a theoretical input.
+// isFinite check. That check lives in Ring.init's guard now (issue
+// #21), ahead of `@intFromFloat(config.seconds * sample_rate)`, and
+// intercepts both values before @intFromFloat ever runs — so the
+// documented-illegal-behavior process abort that a non-finite float
+// would otherwise cause there can no longer happen via fb_ring_create.
+// fb_ring_create is a C boundary fed straight from ctypes' c_double —
+// Python-side float() conversions can hand across NaN with no
+// complaint, so this is directly reachable, not a theoretical input;
+// these two tests are what pin the guard against it.
 test "fb_ring_create rejects NaN seconds (does not satisfy seconds <= 0)" {
     try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.nan(f64)));
 }
