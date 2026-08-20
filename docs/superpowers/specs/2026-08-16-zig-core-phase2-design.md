@@ -243,3 +243,26 @@ overruled.
   `EVENTCALLBACK`): one loop for every kind, and it sidesteps the known
   event-driven-loopback quirk.
 - The plan covers PRs a–c. PRs d–f get a second plan after PR a merges.
+
+## Deviations recorded during PR a (2026-08-20)
+
+- `RoInitialize` is resolved at runtime via `LoadLibraryW`/
+  `GetProcAddress` against `combase.dll`, not `extern "combase"`: Zig
+  0.16 bundles no `combase` import lib, so linking against it fails
+  the build. Same approach `win32_process_loopback.py` already used
+  with `ctypes.WinDLL("combase.dll")`.
+- `guid()`'s inner `comptime { }` block is removed: Zig 0.16 rejects a
+  function returning a comptime-only value from a runtime call site
+  (the tests call `guid()` at runtime). The `comptime s` parameter
+  already forces compile-time evaluation everywhere the brief needs
+  it; dropping the inner block does not change output for any input,
+  and the byte-exact GUID tests pin that.
+- `NativeCaptureSource` is inert after `close()`: a closed handle is
+  `None` on the Python side, so `start()` raises, and `last_error()` /
+  `xrun_count()` / `mix_rate()` return `None` / zero instead of
+  reaching the freed Zig handle. Beyond the plan's text; added because
+  `fb_capture_last_error` and `fb_capture_stats` take a non-optional
+  pointer, so passing a freed handle through is undefined behavior in
+  the DLL, not a catchable Python exception.
+- Capture (loopback, mic/line-in, per-process) is Windows-only as of
+  this PR; the README and module docstrings say so.
