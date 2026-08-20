@@ -58,6 +58,11 @@ pub const ReadError = error{ Overwritten, OutOfRange };
 pub const max_write_frames: u64 = 4096;
 
 pub fn init(allocator: std.mem.Allocator, config: Config) !Ring {
+    // The ABI used to be the only guard (issue #21). Hosts that construct
+    // a Ring directly (Capture, a future CLAP host) now get the same
+    // protection, and fb_ring_create's guard becomes a pass-through.
+    if (config.sample_rate == 0 or config.channels == 0 or config.channels > 2 or
+        !std.math.isFinite(config.seconds) or config.seconds <= 0) return error.InvalidArgument;
     // The allocator is a PARAMETER, not a global: the caller decides the
     // allocation strategy (testing allocator in tests, one shared
     // allocator in the ABI shim). This is the core Zig memory idiom.
@@ -289,6 +294,21 @@ pub fn read(self: *Ring, abs_start: u64, out: []f32) ReadError!void {
         if (t2 >= abs_start + n and t2 - abs_start <= self.capacity) return;
     }
     return error.Overwritten;
+}
+
+test "init rejects sample_rate == 0" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 0, .channels = 2, .seconds = 1.0 }));
+}
+test "init rejects channels == 0" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 0, .seconds = 1.0 }));
+}
+test "init rejects channels == 3" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 3, .seconds = 1.0 }));
+}
+test "init rejects seconds <= 0, NaN, and +inf" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 0.0 }));
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = std.math.nan(f64) }));
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = std.math.inf(f64) }));
 }
 
 test "init: capacity is the readable window, storage_frames is capacity + max_write_frames" {

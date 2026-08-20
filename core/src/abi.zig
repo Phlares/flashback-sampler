@@ -163,13 +163,11 @@ test "fb_wav_write round-trips a real file" {
 }
 
 export fn fb_ring_create(rate: u32, channels: u16, seconds: f64) ?*Ring {
-    // Five independent clauses, each pinned by its own test above.
-    // !std.math.isFinite(seconds) is deliberately its own clause, not
-    // folded into `seconds <= 0`: NaN and +Infinity both evaluate that
-    // comparison as false (IEEE 754), so without a separate finite
-    // check they'd reach Ring.init's @intFromFloat on a non-finite
-    // float — documented illegal behavior, a ReleaseSafe process abort.
-    if (rate == 0 or channels == 0 or channels > 2 or !std.math.isFinite(seconds) or seconds <= 0) return null;
+    // The five-clause guard that used to live here now lives in
+    // Ring.init itself (issue #21) — every host gets it, not just this
+    // ABI. This is a pass-through: the `catch` below already turns
+    // Ring.init's error.InvalidArgument into null, so the tests above
+    // (each pinning one clause) still pass, now through the inner guard.
     const ring = allocator.create(Ring) catch return null;
     ring.* = Ring.init(allocator, .{
         .sample_rate = rate,
@@ -264,6 +262,9 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
     // this file; Ring.write and the rest of the ring path stay lock-free.
     wav_write_mutex.lockUncancelable(wav_write_io);
     defer wav_write_mutex.unlock(wav_write_io);
-    wav.writeFile(std.mem.span(path), frames[0 .. n_frames * channels], rate, channels, st) catch return .io_error;
+    wav.writeFile(std.mem.span(path), frames[0 .. n_frames * channels], rate, channels, st) catch |e| return switch (e) {
+        error.TooLong => .invalid_arg,
+        else => .io_error,
+    };
     return .ok;
 }
