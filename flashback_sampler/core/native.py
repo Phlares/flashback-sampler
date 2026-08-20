@@ -79,6 +79,25 @@ def load() -> C.CDLL | None:
     return _lib
 
 
+KIND_INTS = {"loopback": 0, "input": 1, "process": 2}
+_KIND_NAMES = {v: k for k, v in KIND_INTS.items()}
+
+
+class FbDevice(C.Structure):
+    _fields_ = [("kind", C.c_uint8), ("is_default", C.c_uint8), ("mix_rate", C.c_uint32),
+                ("mix_channels", C.c_uint16), ("id", C.c_char * 128), ("name", C.c_char * 128)]
+
+
+class FbCaptureSpec(C.Structure):
+    _fields_ = [("kind", C.c_uint8), ("pid", C.c_uint32), ("rate", C.c_uint32),
+                ("channels", C.c_uint16), ("device_id", C.c_char_p)]
+
+
+class FbCaptureStats(C.Structure):
+    _fields_ = [("running", C.c_uint8), ("frames_written", C.c_uint64),
+                ("xruns", C.c_uint32), ("mix_rate", C.c_uint32)]
+
+
 def _declare(lib: C.CDLL) -> None:
     """Argument/return types mirroring core/include/flashback_core.h,
     export by export. A mismatch here is silent memory corruption, not
@@ -127,6 +146,38 @@ def _declare(lib: C.CDLL) -> None:
 
     lib.fb_wav_write.argtypes = [C.c_char_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16, C.c_int]
     lib.fb_wav_write.restype = C.c_int
+
+    lib.fb_devices_list.argtypes = [C.POINTER(FbDevice), C.c_size_t]
+    lib.fb_devices_list.restype = C.c_size_t
+    lib.fb_capture_create.argtypes = [C.c_void_p, C.POINTER(FbCaptureSpec)]
+    lib.fb_capture_create.restype = C.c_void_p
+    lib.fb_capture_start.argtypes = [C.c_void_p]
+    lib.fb_capture_start.restype = C.c_int
+    lib.fb_capture_stop.argtypes = [C.c_void_p]
+    lib.fb_capture_stop.restype = None
+    lib.fb_capture_destroy.argtypes = [C.c_void_p]
+    lib.fb_capture_destroy.restype = None
+    lib.fb_capture_stats.argtypes = [C.c_void_p, C.POINTER(FbCaptureStats)]
+    lib.fb_capture_stats.restype = None
+    lib.fb_capture_last_error.argtypes = [C.c_void_p]
+    lib.fb_capture_last_error.restype = C.c_char_p
+
+
+def list_devices(max_devices: int = 64) -> list[dict]:
+    """Every active WASAPI endpoint: render endpoints as kind="loopback",
+    capture endpoints as kind="input". Empty when the library is missing
+    or the OS has no backend."""
+    lib = load()
+    if lib is None:
+        return []
+    arr = (FbDevice * max_devices)()
+    n = int(lib.fb_devices_list(arr, max_devices))
+    return [
+        {"kind": _KIND_NAMES.get(d.kind, "input"), "is_default": bool(d.is_default),
+         "mix_rate": int(d.mix_rate), "mix_channels": int(d.mix_channels),
+         "id": d.id.decode("utf-8", "replace"), "name": d.name.decode("utf-8", "replace")}
+        for d in arr[:n]
+    ]
 
 
 def _as_f32p(a: np.ndarray):

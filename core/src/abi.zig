@@ -7,6 +7,9 @@ const std = @import("std");
 const Ring = @import("Ring.zig");
 const Summary = @import("Summary.zig");
 const wav = @import("wav.zig");
+const Capture = @import("Capture.zig");
+const Backend = @import("Backend.zig");
+const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
 // std's thread-safe general-purpose choice, confirmed present in the
@@ -111,8 +114,11 @@ test "fb_wav_write rejects invalid rate/channels/subtype without touching disk" 
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 2, -1)); // subtype negative
 }
 
-// fb_ring_create's guard has FIVE independent clauses; each one gets its
-// own isolated test (three-of-five valid, one under test) so a fully
+// The five-clause guard these tests exercise now lives in `Ring.init`
+// (issue #21) — fb_ring_create is a pass-through, so these tests reach
+// it indirectly: fb_ring_create calls Ring.init, and its `catch` turns
+// any error.InvalidArgument into null. Each clause still gets its own
+// isolated test (three-of-five valid, one under test) so a fully
 // deletable or half-deletable guard shows up immediately as a specific
 // red test, not a green suite that never exercised the boundary at all.
 test "fb_ring_create rejects rate == 0" {
@@ -134,13 +140,15 @@ test "fb_ring_create rejects seconds <= 0" {
 // NaN and +Infinity both fail `seconds <= 0` (IEEE 754: any comparison
 // against NaN is false; +Infinity compares greater than 0), so neither
 // is caught by that clause alone — they need their own, separate
-// isFinite check. Without it they reach Ring.init's
-// `@intFromFloat(config.seconds * sample_rate)`, and @intFromFloat on a
-// non-finite float is documented illegal behavior: a ReleaseSafe
-// process abort, not a catchable error. fb_ring_create is a C boundary
-// fed straight from ctypes' c_double — Python-side float() conversions
-// can hand across NaN with no complaint, so this is directly reachable,
-// not a theoretical input.
+// isFinite check. That check lives in Ring.init's guard now (issue
+// #21), ahead of `@intFromFloat(config.seconds * sample_rate)`, and
+// intercepts both values before @intFromFloat ever runs — so the
+// documented-illegal-behavior process abort that a non-finite float
+// would otherwise cause there can no longer happen via fb_ring_create.
+// fb_ring_create is a C boundary fed straight from ctypes' c_double —
+// Python-side float() conversions can hand across NaN with no
+// complaint, so this is directly reachable, not a theoretical input;
+// these two tests are what pin the guard against it.
 test "fb_ring_create rejects NaN seconds (does not satisfy seconds <= 0)" {
     try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.nan(f64)));
 }
@@ -163,13 +171,11 @@ test "fb_wav_write round-trips a real file" {
 }
 
 export fn fb_ring_create(rate: u32, channels: u16, seconds: f64) ?*Ring {
-    // Five independent clauses, each pinned by its own test above.
-    // !std.math.isFinite(seconds) is deliberately its own clause, not
-    // folded into `seconds <= 0`: NaN and +Infinity both evaluate that
-    // comparison as false (IEEE 754), so without a separate finite
-    // check they'd reach Ring.init's @intFromFloat on a non-finite
-    // float — documented illegal behavior, a ReleaseSafe process abort.
-    if (rate == 0 or channels == 0 or channels > 2 or !std.math.isFinite(seconds) or seconds <= 0) return null;
+    // The five-clause guard that used to live here now lives in
+    // Ring.init itself (issue #21) — every host gets it, not just this
+    // ABI. This is a pass-through: the `catch` below already turns
+    // Ring.init's error.InvalidArgument into null, so the tests above
+    // (each pinning one clause) still pass, now through the inner guard.
     const ring = allocator.create(Ring) catch return null;
     ring.* = Ring.init(allocator, .{
         .sample_rate = rate,
@@ -264,6 +270,88 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
     // this file; Ring.write and the rest of the ring path stay lock-free.
     wav_write_mutex.lockUncancelable(wav_write_io);
     defer wav_write_mutex.unlock(wav_write_io);
-    wav.writeFile(std.mem.span(path), frames[0 .. n_frames * channels], rate, channels, st) catch return .io_error;
+    wav.writeFile(std.mem.span(path), frames[0 .. n_frames * channels], rate, channels, st) catch |e| return switch (e) {
+        error.TooLong => .invalid_arg,
+        else => .io_error,
+    };
     return .ok;
+}
+
+pub const FbCaptureSpec = extern struct { kind: u8, pid: u32, rate: u32, channels: u16, device_id: [*:0]const u8 };
+
+test "fb_capture_create rejects an unknown kind and a bad channel count" {
+    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 9, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }));
+    try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 3, .device_id = "" }));
+}
+
+test "fb_capture stats/last_error on a never-started capture are zero/empty (Windows only)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    const cap = fb_capture_create(ring, &.{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }) orelse return error.CreateFailed;
+    defer fb_capture_destroy(cap);
+    var st: Capture.Stats = undefined;
+    fb_capture_stats(cap, &st);
+    try std.testing.expectEqual(@as(u8, 0), st.running);
+    try std.testing.expectEqual(@as(u64, 0), st.frames_written);
+    try std.testing.expectEqualStrings("", std.mem.span(fb_capture_last_error(cap)));
+}
+
+test "fb_devices_list with max 0 writes nothing and returns 0" {
+    try std.testing.expectEqual(@as(usize, 0), fb_devices_list(undefined, 0));
+}
+
+// The one backend this build ships. On non-Windows there is none yet:
+// capture creation returns null and enumeration returns 0, and the
+// Python side reports "capture unavailable on this OS".
+fn nativeBackend() ?Backend.Backend {
+    if (builtin.os.tag == .windows) return @import("WasapiBackend.zig").backend();
+    return null;
+}
+
+export fn fb_devices_list(out: [*]Backend.Device, max: usize) usize {
+    if (max == 0) return 0;
+    const be = nativeBackend() orelse return 0;
+    return be.enumerate(out[0..max]);
+}
+
+export fn fb_capture_create(ring: *Ring, spec: *const FbCaptureSpec) ?*Capture {
+    if (spec.kind > 2 or spec.channels == 0 or spec.channels > 2 or spec.rate == 0) return null;
+    const be = nativeBackend() orelse return null;
+    const cap = allocator.create(Capture) catch return null;
+    cap.* = Capture.init(ring, be, .{
+        .kind = @enumFromInt(spec.kind),
+        .device_id = std.mem.span(spec.device_id),
+        .pid = spec.pid,
+        .rate = spec.rate,
+        .channels = spec.channels,
+    });
+    return cap;
+}
+
+export fn fb_capture_start(cap: *Capture) FbStatus {
+    cap.start() catch |e| return switch (e) {
+        error.AlreadyRunning => .invalid_arg,
+        else => .io_error,
+    };
+    return .ok;
+}
+
+export fn fb_capture_stop(cap: *Capture) void {
+    cap.stop();
+}
+
+export fn fb_capture_destroy(cap: *Capture) void {
+    cap.stop();
+    allocator.destroy(cap);
+}
+
+export fn fb_capture_stats(cap: *const Capture, out: *Capture.Stats) void {
+    out.* = cap.stats();
+}
+
+export fn fb_capture_last_error(cap: *const Capture) [*:0]const u8 {
+    return cap.lastError().ptr;
 }

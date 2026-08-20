@@ -8,9 +8,9 @@ touching the audio core or the UI. This is the porting checklist.
 
 | Capability | Windows | macOS | Linux |
 |---|:---:|:---:|:---:|
-| System-audio **loopback** capture | ✅ WASAPI (`soundcard`) | ⬜ not yet | ⬜ not yet |
+| System-audio **loopback** capture | ✅ WASAPI (Zig core) | ⬜ not yet | ⬜ not yet |
 | Per-process loopback | ✅ WASAPI (ctypes) | ⬜ | ⬜ |
-| Mic / line-in capture | ✅ `sounddevice` | ✅ | ✅ |
+| Mic / line-in capture | ✅ WASAPI (Zig core) | ⬜ not yet | ⬜ not yet |
 | System **tray** | ✅ | ✅¹ | ✅¹ |
 | Config / data paths | ✅ `%APPDATA%` | ✅ `~/Library` | ✅ `~/.config` |
 | Audio ring buffer + WAV encode | ✅ Zig core | ✅ Zig core | ✅ Zig core |
@@ -39,7 +39,7 @@ Everything OS-dependent is reachable from these files — see
 | Seam | File(s) | What a new platform must add |
 |---|---|---|
 | **Source listening** | `app/audio_devices.py` (`list_capture_devices`, `build_capture_source`) | enumerate the platform's loopback devices; map a new `CaptureDevice.kind` to a backend |
-| **Loopback backends** | `core/loopback_capture.py`, `io/win32_process_loopback.py` | a `CaptureSource` impl (macOS: CoreAudio aggregate / ScreenCaptureKit; Linux: PulseAudio/PipeWire monitor) |
+| **Loopback backends** | `core/native_capture.py` + `core/WasapiBackend.zig`, `io/win32_process_loopback.py` | a `CaptureSource` impl (macOS: CoreAudio aggregate / ScreenCaptureKit; Linux: PulseAudio/PipeWire monitor) |
 | **System tray** | `platform/tray.py` | usually none — `QSystemTrayIcon` is cross-platform; tune behaviour only if needed |
 | **Global hotkeys** | `input/sources/global_hotkey.py` (`_win_register`), gated by `capabilities.global_hotkeys_supported()` | a register/unregister backend (macOS Carbon `RegisterEventHotKey`; Linux/X11 `XGrabKey` — Wayland needs a portal) |
 | **Config / data paths** | `app/config.py` (`config_dir`) | already `%APPDATA%` / `XDG` aware |

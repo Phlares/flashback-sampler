@@ -168,6 +168,8 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
 /// A caller that may issue concurrent writes (Task 6's C ABI is a
 /// plausible one) must serialize them itself.
 pub fn writeFile(path: []const u8, samples: []const f32, rate: u32, channels: u16, st: Subtype) !void {
+    const data_len_wide: u64 = @as(u64, samples.len) * st.bytesPerSample();
+    if (data_len_wide > std.math.maxInt(u32) - header_len) return error.TooLong;
     const io = std.Io.Threaded.global_single_threaded.io();
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -290,6 +292,17 @@ test "writeFile spans more than one chunk-buffer iteration" {
     const got = try tmp.dir.readFile(std.testing.io, "chunked.wav", &buf);
     try std.testing.expectEqual(@as(usize, header_len + n * 4), got.len);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&samples), got[header_len..]);
+}
+
+test "writeFile rejects a data chunk that would overflow the u32 RIFF sizes without touching disk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/never.wav", .{tmp.sub_path}) catch unreachable;
+    // A slice header with an impossible length: we never read it — the
+    // guard must fire on the arithmetic alone.
+    const huge: []const f32 = @as([*]const f32, @ptrFromInt(0x1000))[0 .. (std.math.maxInt(u32) / 4) + 1];
+    try std.testing.expectError(error.TooLong, writeFile(path, huge, 48_000, 1, .float32));
 }
 
 test "pcm16/pcm24 negative extreme inputs share -1.0's quantized floor" {
