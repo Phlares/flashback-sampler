@@ -10,7 +10,7 @@ touching the audio core or the UI. This is the porting checklist.
 |---|:---:|:---:|:---:|
 | System-audio **loopback** capture | ✅ WASAPI (Zig core) | ⬜ not yet | ⬜ not yet |
 | Per-process loopback | ✅ WASAPI (ctypes) | ⬜ | ⬜ |
-| Mic / line-in capture | ✅ `sounddevice` | ✅ | ✅ |
+| Mic / line-in capture | ✅ WASAPI (Zig core) | ⬜ not yet | ⬜ not yet |
 | System **tray** | ✅ | ✅¹ | ✅¹ |
 | Config / data paths | ✅ `%APPDATA%` | ✅ `~/Library` | ✅ `~/.config` |
 | Audio ring buffer + WAV encode | ✅ Zig core | ✅ Zig core | ✅ Zig core |
