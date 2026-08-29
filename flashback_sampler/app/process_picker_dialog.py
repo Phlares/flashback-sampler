@@ -2,12 +2,12 @@
 ProcessPickerDialog — pick a running Windows process to capture from
 via WASAPI per-process loopback.
 
-Enumerates every process with a readable executable name via the
-psapi.dll helpers in flashback_sampler.io.win32_process_loopback.
-The user sees a filterable list of `PID  EXE_NAME` rows; clicking
-OK returns a CaptureDevice with kind="process_loopback", id=str(pid),
-name=exe_name. On non-Windows platforms, the dialog shows a single
-row explaining that the feature is Windows-only.
+Enumerates every process with a readable executable name via the Zig
+core (flashback_sampler.core.native.list_processes). The user sees a
+filterable list of `PID  EXE_NAME` rows; clicking OK returns a
+CaptureDevice with kind="process_loopback", id=str(pid), name=exe_name.
+On non-Windows platforms, the dialog shows a single row explaining that
+the feature is Windows-only.
 """
 
 from __future__ import annotations
@@ -27,10 +27,8 @@ from PySide6.QtWidgets import (
 
 from flashback_sampler.app.audio_devices import CaptureDevice
 from flashback_sampler.app.theme import EREBUS
-from flashback_sampler.io.win32_process_loopback import (
-    enumerate_audio_processes,
-    is_supported,
-)
+from flashback_sampler.core import native
+from flashback_sampler.core.native_capture import is_process_loopback_supported
 
 
 class ProcessPickerDialog(QDialog):
@@ -59,7 +57,7 @@ class ProcessPickerDialog(QDialog):
         title.setProperty("role", "label")
         root.addWidget(title)
 
-        if not is_supported():
+        if not is_process_loopback_supported():
             hint = QLabel(
                 "Per-process capture requires Windows 10 build 19041 "
                 "(May 2020) or newer. On this platform, Add Source → "
@@ -108,7 +106,7 @@ class ProcessPickerDialog(QDialog):
     def _populate(self) -> None:
         if not hasattr(self, "_list"):
             return
-        self._all_rows = enumerate_audio_processes()
+        self._all_rows = native.list_processes()
         self._apply_filter(self._filter_edit.text() if hasattr(self, "_filter_edit") else "")
 
     def _on_filter_changed(self, text: str) -> None:
