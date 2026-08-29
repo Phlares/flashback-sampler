@@ -98,6 +98,10 @@ class FbCaptureStats(C.Structure):
                 ("xruns", C.c_uint32), ("mix_rate", C.c_uint32)]
 
 
+class FbProcess(C.Structure):
+    _fields_ = [("pid", C.c_uint32), ("ppid", C.c_uint32), ("name", C.c_char * 128)]
+
+
 def _declare(lib: C.CDLL) -> None:
     """Argument/return types mirroring core/include/flashback_core.h,
     export by export. A mismatch here is silent memory corruption, not
@@ -161,6 +165,9 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_capture_stats.restype = None
     lib.fb_capture_last_error.argtypes = [C.c_void_p]
     lib.fb_capture_last_error.restype = C.c_char_p
+
+    lib.fb_processes_list.argtypes = [C.POINTER(FbProcess), C.c_size_t]
+    lib.fb_processes_list.restype = C.c_size_t
 
 
 def list_devices(max_devices: int = 64) -> list[dict]:
@@ -415,3 +422,40 @@ class NativeAudioCircularBuffer(RingDerivedOps):
             self.close()
         except Exception:
             pass
+
+
+def _process_entries(max_processes: int = 4096) -> list[tuple[int, int, str]]:
+    """One Toolhelp32 snapshot via the core: (pid, ppid, exe_name) rows.
+    Both public views below derive from this."""
+    lib = load()
+    if lib is None:
+        return []
+    arr = (FbProcess * max_processes)()
+    n = int(lib.fb_processes_list(arr, max_processes))
+    return [(int(p.pid), int(p.ppid), p.name.decode("utf-8", "replace"))
+            for p in arr[:n] if p.pid > 0 and p.name]
+
+
+def list_processes(max_processes: int = 4096) -> list[tuple[int, str]]:
+    rows = [(pid, name) for pid, _ppid, name in _process_entries(max_processes)]
+    rows.sort(key=lambda t: (t[1].lower(), t[0]))
+    return rows
+
+
+def resolve_root_pid(pid: int) -> int:
+    """Walk up from `pid` to the highest ancestor sharing the same exe
+    name (port of win32_process_loopback.resolve_audio_root_pid — apps
+    like Spotify/Chrome play audio from the ROOT of a same-exe tree).
+    Returns `pid` unchanged if it is absent or the chain breaks."""
+    procs = {p: (pp, name) for p, pp, name in _process_entries()}
+    if pid not in procs:
+        return pid
+    name_lc = procs[pid][1].lower()
+    current, visited = pid, set()
+    while current not in visited:
+        visited.add(current)
+        parent, _ = procs.get(current, (0, ""))
+        if parent <= 0 or parent not in procs or procs[parent][1].lower() != name_lc:
+            break
+        current = parent
+    return current

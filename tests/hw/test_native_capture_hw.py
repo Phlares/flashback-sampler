@@ -58,3 +58,16 @@ def test_loopback_at_96k_when_mix_is_48k_reports_mix_rate(lib):
     src.stop(); src.close(); buf.close()
     assert ok
     assert mix > 0
+
+
+def test_process_loopback_of_this_python_process_opens(lib):
+    """Opens the process-loopback client for our own PID. It has no render
+    stream so frames stay 0 — the assertion is that activation SUCCEEDS."""
+    import os
+    buf = make_ring_buffer(duration_seconds=5, sample_rate=48_000, channels=2)
+    src = NativeCaptureSource(buf, kind="process", pid=os.getpid())
+    src.start()
+    time.sleep(1.5)
+    running, err = src.is_running(), src.last_error()
+    src.stop(); src.close(); buf.close()
+    assert running and err is None, err

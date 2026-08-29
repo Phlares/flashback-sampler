@@ -202,6 +202,7 @@ fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
 /// Task 5: default or named endpoint via IMMDeviceEnumerator. Task 9 adds
 /// the `.process` arm (ActivateAudioInterfaceAsync).
 fn activate(spec: Backend.Spec) Backend.Error!*w.IAudioClient {
+    if (spec.kind == .process) return activateProcess(spec.pid);
     var enumr: ?*anyopaque = null;
     if (w.failed(w.CoCreateInstance(&w.CLSID_MMDeviceEnumerator, null, w.CLSCTX_ALL, &w.IID_IMMDeviceEnumerator, &enumr))) return error.ActivationFailed;
     const en: *w.IMMDeviceEnumerator = @ptrCast(@alignCast(enumr.?));
@@ -221,6 +222,62 @@ fn activate(spec: Backend.Spec) Backend.Error!*w.IAudioClient {
     var raw: ?*anyopaque = null;
     if (w.failed(dev.?.vtbl.Activate(dev.?, &w.IID_IAudioClient, w.CLSCTX_ALL, null, &raw))) return error.ActivationFailed;
     return @ptrCast(@alignCast(raw.?));
+}
+
+/// Mirrors win32_process_loopback.py:855-935: activation params in a
+/// VT_BLOB PROPVARIANT, our CompletionHandler, then spin (bounded) until
+/// ActivateCompleted fires, then GetActivateResult → IAudioClient.
+/// Apartment: this call HARD-REQUIRES a WinRT apartment — the port
+/// measured E_ILLEGAL_METHOD_CALL under plain CoInitializeEx
+/// (win32_process_loopback.py:816-819). open() already ran
+/// RoInitialize(RO_INIT_MULTITHREADED) on this thread (Task 5), so no
+/// per-kind branch is needed here.
+fn activateProcess(pid: u32) Backend.Error!*w.IAudioClient {
+    const activate_fn = w.activateAudioInterfaceAsync() orelse return error.Unsupported;
+    var params = w.AUDIOCLIENT_ACTIVATION_PARAMS{
+        .ActivationType = w.AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        .params = .{ .ProcessLoopbackParams = .{ .TargetProcessId = pid, .ProcessLoopbackMode = w.PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE } },
+    };
+    var pv = w.PROPVARIANT{ .vt = w.VT_BLOB, .data = .{ .blob = .{ .cbSize = @sizeOf(w.AUDIOCLIENT_ACTIVATION_PARAMS), .pBlobData = &params } } };
+    var handler = w.CompletionHandler{};
+    var op: ?*w.IActivateAudioInterfaceAsyncOperation = null;
+    if (w.failed(activate_fn(w.VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &w.IID_IAudioClient, &pv, &handler, &op))) return error.ActivationFailed;
+    defer if (op) |o| o.release();
+    var waited: u32 = 0;
+    while (@atomicLoad(u32, &handler.done, .acquire) == 0) : (waited += 10) {
+        if (waited >= 5_000) return error.ActivationFailed;
+        w.Sleep(10);
+    }
+    const done_op = handler.op orelse return error.ActivationFailed;
+    defer done_op.release();
+    var hr_act: w.HRESULT = 0;
+    var raw: ?*anyopaque = null;
+    if (w.failed(done_op.vtbl.GetActivateResult(done_op, &hr_act, &raw))) return error.ActivationFailed;
+    if (w.failed(hr_act) or raw == null) return error.ActivationFailed;
+    return @ptrCast(@alignCast(raw.?));
+}
+
+pub const Process = extern struct { pid: u32, ppid: u32, name: [128]u8 };
+
+pub fn enumerateProcesses(out: []Process) usize {
+    const snap = w.CreateToolhelp32Snapshot(w.TH32CS_SNAPPROCESS, 0) orelse return 0;
+    if (@intFromPtr(snap) == w.INVALID_HANDLE_VALUE) return 0;
+    defer _ = w.CloseHandle(snap);
+    var entry: w.PROCESSENTRY32W = undefined;
+    entry.dwSize = @sizeOf(w.PROCESSENTRY32W);
+    if (w.Process32FirstW(snap, &entry) == 0) return 0;
+    var n: usize = 0;
+    while (n < out.len) {
+        if (entry.th32ProcessID != 0) {
+            out[n].pid = entry.th32ProcessID;
+            out[n].ppid = entry.th32ParentProcessID;
+            const z: [*:0]const u16 = @ptrCast(&entry.szExeFile);
+            _ = w.wtf16ToUtf8Z(&out[n].name, z);
+            n += 1;
+        }
+        if (w.Process32NextW(snap, &entry) == 0) break;
+    }
+    return n;
 }
 
 fn acquireSlot(self: *WasapiBackend) ?*Stream {
