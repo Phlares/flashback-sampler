@@ -195,10 +195,6 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
         )
 
     if device.kind == "process_loopback":
-        from flashback_sampler.io.win32_process_loopback import (
-            ProcessLoopbackCapture,
-        )
-
         try:
             pid = int(device.id)
         except ValueError as e:
@@ -206,9 +202,10 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
                 f"process_loopback device id must be an integer PID; "
                 f"got {device.id!r}"
             ) from e
-        return ProcessLoopbackCapture(
+        return NativeCaptureSource(
             buffer=buffer,
-            pid=pid,
+            kind="process",
+            pid=native.resolve_root_pid(pid),
             sample_rate=sample_rate,
             channels=channels,
         )

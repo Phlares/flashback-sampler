@@ -5,6 +5,8 @@ dependencies. Anything that touches Windows-specific APIs, macOS
 AudioTap, Linux PipeWire, etc. lives here so core tests can run
 headless on any OS.
 
-M12 adds `win32_process_loopback` — native per-process WASAPI
-loopback via ActivateAudioInterfaceAsync + ctypes COM vtable glue.
+Per-process WASAPI loopback runs on the Zig core (`core/native.py`,
+`core/native_capture.py`) — see `core/WasapiBackend.zig`. This package
+is currently empty; it stays as the seam for future platform-specific
+I/O that isn't a Zig-core concern.
 """
