@@ -303,6 +303,23 @@ test "fb_devices_list with max 0 writes nothing and returns 0" {
     try std.testing.expectEqual(@as(usize, 0), fb_devices_list(undefined, 0));
 }
 
+test "fb_processes_list with max 0 returns 0; on Windows a real list contains this process" {
+    try std.testing.expectEqual(@as(usize, 0), fb_processes_list(undefined, 0));
+    // Comptime-known branch: the Windows arm is not analyzed on other
+    // targets, so the wasapi import inside it never reaches the Linux leg.
+    if (builtin.os.tag == .windows) {
+        var out: [1024]FbProcess = undefined;
+        const n = fb_processes_list(&out, out.len);
+        try std.testing.expect(n > 0);
+        const me = @import("wasapi.zig").GetCurrentProcessId();
+        var found = false;
+        for (out[0..n]) |p| {
+            if (p.pid == me) found = true;
+        }
+        try std.testing.expect(found);
+    } else return error.SkipZigTest;
+}
+
 // The one backend this build ships. On non-Windows there is none yet:
 // capture creation returns null and enumeration returns 0, and the
 // Python side reports "capture unavailable on this OS".
@@ -315,6 +332,14 @@ export fn fb_devices_list(out: [*]Backend.Device, max: usize) usize {
     if (max == 0) return 0;
     const be = nativeBackend() orelse return 0;
     return be.enumerate(out[0..max]);
+}
+
+pub const FbProcess = if (builtin.os.tag == .windows) @import("WasapiBackend.zig").Process else extern struct { pid: u32, ppid: u32, name: [128]u8 };
+
+export fn fb_processes_list(out: [*]FbProcess, max: usize) usize {
+    if (max == 0) return 0;
+    if (builtin.os.tag == .windows) return @import("WasapiBackend.zig").enumerateProcesses(out[0..max]);
+    return 0;
 }
 
 export fn fb_capture_create(ring: *Ring, spec: *const FbCaptureSpec) ?*Capture {

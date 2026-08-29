@@ -8,8 +8,20 @@ spec the Zig side receives, not a Python class.
 from __future__ import annotations
 
 import ctypes as C
+import sys
 
 from flashback_sampler.core import native
+
+
+def is_process_loopback_supported() -> bool:
+    """Per-process WASAPI loopback needs Windows 10 build 19041 (20H1,
+    May 2020) or newer — the same floor the ctypes port enforced."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return sys.getwindowsversion().build >= 19041
+    except Exception:
+        return False
 
 
 class NativeCaptureSource:

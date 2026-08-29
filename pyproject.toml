@@ -49,8 +49,6 @@ branch = true
 source = ["flashback_sampler"]
 omit = [
     "flashback_sampler/app/main.py",
-    "flashback_sampler/io/win32_process_loopback.py",
-    "flashback_sampler/core/loopback_capture.py",
 ]
 
 [tool.coverage.report]

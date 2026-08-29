@@ -56,8 +56,6 @@ flashback_sampler/
     mixed_capture.py     # sum multiple inputs into one slot
     capture_slot.py      # one buffer + its source(s) + checkout manager
     quality_presets.py   # sample-rate / channel presets
-  io/
-    win32_process_loopback.py  # ctypes WASAPI per-process loopback (Windows)
   app/                   # PySide6 only — isolated from core
     main.py              # QApplication bootstrap + CLI
     state.py             # AppState — owns slots / buffers / checkouts
