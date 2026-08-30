@@ -101,9 +101,19 @@ pub fn stats(self: *const Capture) Stats {
     };
 }
 
-pub fn lastError(self: *const Capture) [:0]const u8 {
+pub fn lastError(self: *const Capture) []const u8 {
     const n = self.err_len.load(.acquire);
-    return self.err_buf[0..n :0];
+    // NOT a sentinel slice (`buf[0..n :0]`): that syntax's runtime bounds
+    // check reads `err_buf[n]` unconditionally, even when the slice is
+    // logically empty (n == 0) -- and n == 0 is exactly the stale value a
+    // concurrent reader sees while `setError` (another thread) is mid-way
+    // through writing a FIRST error message starting at byte 0. The
+    // sentinel byte IS always there once a write completes (bufPrintZ
+    // guarantees it), so a caller that wants a null-terminated view
+    // still gets one from `err_buf` directly (see fb_capture_last_error);
+    // this function just stops asserting it on a byte a writer thread may
+    // be touching right now.
+    return self.err_buf[0..n];
 }
 
 fn setError(self: *Capture, comptime fmt: []const u8, args: anytype) void {

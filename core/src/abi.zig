@@ -378,5 +378,10 @@ export fn fb_capture_stats(cap: *const Capture, out: *Capture.Stats) void {
 }
 
 export fn fb_capture_last_error(cap: *const Capture) [*:0]const u8 {
-    return cap.lastError().ptr;
+    // @ptrCast, not a sentinel-slice conversion: the latter's runtime
+    // check is what Capture.lastError()'s own doc comment avoids for the
+    // same reason. bufPrintZ still writes a real 0 byte at err_buf[n] by
+    // construction, so this pointer is a valid C string once the write
+    // that produced it has completed.
+    return @ptrCast(cap.lastError().ptr);
 }
