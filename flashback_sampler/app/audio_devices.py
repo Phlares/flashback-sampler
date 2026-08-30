@@ -1,11 +1,9 @@
 """
 Enumerate capture and preview-output audio devices.
 
-Loopback and input devices are enumerated and opened through the Zig
-core (`flashback_sampler/core/native.py`, `native_capture.py`) via
-`native.list_devices()` / `NativeCaptureSource`. Preview output still
-goes through `sounddevice` (playback moves to the native backend in a
-later PR).
+Loopback, input, and render (output) devices are all enumerated
+through the Zig core (`flashback_sampler/core/native.py`,
+`native_capture.py`) via `native.list_devices()` / `NativeCaptureSource`.
 
 The UI reads these lists into menu/dropdown widgets and passes the
 chosen dataclass back through the AppState so controllers can build
@@ -73,8 +71,9 @@ DEFAULT_LOOPBACK = CaptureDevice(
 
 @dataclass(frozen=True)
 class OutputDevice:
-    """A sounddevice output device used for preview playback."""
-    id: int
+    """A WASAPI render endpoint used for preview playback. `id` is the
+    endpoint id string; `""` means the live OS default output."""
+    id: str
     name: str
     max_output_channels: int
     is_default: bool = False
@@ -115,42 +114,19 @@ def _list_native_devices() -> list[CaptureDevice]:
 
 
 def list_output_devices() -> list[OutputDevice]:
-    """Return every available sounddevice output device."""
-    try:
-        import sounddevice as sd
-    except Exception:  # pragma: no cover
-        return []
-
-    out: list[OutputDevice] = []
-    try:
-        all_devs = sd.query_devices()
-    except Exception:  # pragma: no cover
-        return []
-
-    default_out_name: str | None = None
-    try:
-        default_out = sd.query_devices(kind="output")
-        if isinstance(default_out, dict):
-            default_out_name = default_out.get("name")
-    except Exception:  # pragma: no cover
-        pass
-
-    for i, dev in enumerate(all_devs):
-        if not isinstance(dev, dict):
-            continue
-        ch = int(dev.get("max_output_channels", 0))
-        if ch <= 0:
-            continue
-        name = dev.get("name", f"Output {i}")
-        out.append(
-            OutputDevice(
-                id=i,
-                name=name,
-                max_output_channels=ch,
-                is_default=(name == default_out_name),
-            )
+    """Every active render endpoint, from the same native list the
+    capture side reads (render endpoints appear there twice: once as a
+    loopback candidate, once as an output)."""
+    return [
+        OutputDevice(
+            id=d["id"],
+            name=d["name"],
+            max_output_channels=d["mix_channels"] or 2,
+            is_default=d["is_default"],
         )
-    return out
+        for d in native.list_devices()
+        if d["kind"] == "render"
+    ]
 
 
 def default_capture_device() -> CaptureDevice | None:
@@ -166,10 +142,10 @@ def default_capture_device() -> CaptureDevice | None:
 
 
 def default_output_device() -> OutputDevice | None:
-    for d in list_output_devices():
+    devices = list_output_devices()
+    for d in devices:
         if d.is_default:
             return d
-    devices = list_output_devices()
     return devices[0] if devices else None
 
 

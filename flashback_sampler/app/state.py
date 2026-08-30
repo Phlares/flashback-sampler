@@ -26,7 +26,7 @@ from flashback_sampler.core.buffer import RingDerivedOps, make_ring_buffer
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.quality_presets import QualityPreset
-from flashback_sampler.core.scrub_player import ScrubPlayer
+from flashback_sampler.core.scrub_player import NativeScrubPlayer
 
 
 # Default capture target: 5-minute rolling buffer at 48 kHz stereo.
@@ -83,7 +83,7 @@ class AppState:
         self.rolling: bool = False
 
         # ── Shared, non-per-slot state ───────────────────────────────
-        self.scrub_player = ScrubPlayer(
+        self.scrub_player = NativeScrubPlayer(
             sample_rate=int(sample_rate),
             channels=int(channels),
         )
