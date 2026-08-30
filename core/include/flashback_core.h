@@ -26,6 +26,9 @@ typedef struct FbCaptureSpec { uint8_t kind; uint32_t pid; uint32_t rate; uint16
 typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; } FbCaptureStats;
 typedef struct FbProcess { uint32_t pid; uint32_t ppid; char name[128]; } FbProcess;
 
+typedef struct FbPlayback FbPlayback; /* opaque */
+typedef struct FbPlaybackState { uint8_t running; uint8_t playing; uint64_t cursor; uint64_t clip_frames; uint32_t mix_rate; } FbPlaybackState;
+
 /* status is nullable. FB_INVALID_ARG: rejected config. FB_OUT_OF_MEMORY:
  * the reservation could not be made (issue #41). */
 FbRing *fb_ring_create(uint32_t rate, uint16_t channels, double seconds, FbStatus *status);
@@ -81,4 +84,18 @@ void       fb_mixer_stats(const FbMixer *, FbCaptureStats *out);
 const char*fb_mixer_last_error(const FbMixer *);               /* own message, else the first source's; "" when none */
 
 size_t     fb_processes_list(FbProcess *out, size_t max);      /* every running process, Toolhelp32; 0 on non-Windows */
+
+/* One clip player: a Zig-owned render thread over a device stream. NULL:
+ * non-Windows, or rate == 0, or channels outside 1..2. */
+FbPlayback *fb_playback_create(const char *device_id, uint32_t rate, uint16_t channels);
+/* Copies `frames` (n_frames * channels floats). FB_INVALID_ARG: channels
+ * == 0. FB_OUT_OF_MEMORY: the copy could not be allocated. */
+FbStatus    fb_playback_bind(FbPlayback *, const float *frames, size_t n_frames, uint32_t rate, uint16_t channels);
+FbStatus    fb_playback_play(FbPlayback *);           /* FB_IO_ERROR if the render thread could not spawn */
+void        fb_playback_pause(FbPlayback *);
+void        fb_playback_seek(FbPlayback *, uint64_t frames);
+void        fb_playback_set_device(FbPlayback *, const char *device_id);
+void        fb_playback_state(const FbPlayback *, FbPlaybackState *out);
+const char *fb_playback_last_error(const FbPlayback *);  /* "" when none; valid until destroy */
+void        fb_playback_destroy(FbPlayback *);            /* stops first, frees the clip */
 #endif

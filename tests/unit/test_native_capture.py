@@ -131,6 +131,12 @@ def test_list_devices_maps_kinds_and_strings(lib):
     ]
 
 
+def test_list_devices_maps_render_kind(lib):
+    lib.devices = [(3, 1, 48_000, 2, "{spk}", "Speakers")]
+    got = native.list_devices()
+    assert got == [{"kind": "render", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"}]
+
+
 def test_queries_are_inert_after_close(lib):
     """A closed handle is NULL on the Zig side; fb_capture_* exports take a
     non-optional *Capture, so passing NULL through is undefined behavior

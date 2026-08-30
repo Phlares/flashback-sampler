@@ -10,6 +10,7 @@ const wav = @import("wav.zig");
 const Capture = @import("Capture.zig");
 const Backend = @import("Backend.zig");
 const Mixer = @import("Mixer.zig");
+const Playback = @import("Playback.zig");
 const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
@@ -450,6 +451,57 @@ export fn fb_mixer_last_error(m: *const Mixer) [*:0]const u8 {
     return m.lastError().ptr;
 }
 
+// The ABI edge is the belt, matching fb_capture_create's specFromAbi
+// guard: Playback.init itself does not validate rate/channels, so a bad
+// pair reaching it directly would build a broken player rather than fail
+// to create one.
+export fn fb_playback_create(device_id: [*:0]const u8, rate: u32, channels: u16) ?*Playback {
+    if (rate == 0 or channels == 0 or channels > 2) return null;
+    const be = nativeBackend() orelse return null;
+    const pb = allocator.create(Playback) catch return null;
+    pb.* = Playback.init(allocator, be, .{ .kind = .render, .device_id = std.mem.span(device_id), .rate = rate, .channels = channels });
+    return pb;
+}
+
+export fn fb_playback_bind(pb: *Playback, frames: [*]const f32, n_frames: usize, rate: u32, channels: u16) FbStatus {
+    if (channels == 0) return .invalid_arg;
+    pb.bind(frames[0 .. n_frames * channels], rate, channels) catch |e| return switch (e) {
+        error.InvalidArgument => .invalid_arg,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
+
+export fn fb_playback_play(pb: *Playback) FbStatus {
+    pb.play() catch return .io_error;
+    return .ok;
+}
+
+export fn fb_playback_pause(pb: *Playback) void {
+    pb.pause();
+}
+
+export fn fb_playback_seek(pb: *Playback, frames: u64) void {
+    pb.seek(frames);
+}
+
+export fn fb_playback_set_device(pb: *Playback, device_id: [*:0]const u8) void {
+    pb.setDevice(std.mem.span(device_id));
+}
+
+export fn fb_playback_state(pb: *const Playback, out: *Playback.State) void {
+    out.* = pb.state();
+}
+
+export fn fb_playback_last_error(pb: *const Playback) [*:0]const u8 {
+    return pb.lastError().ptr;
+}
+
+export fn fb_playback_destroy(pb: *Playback) void {
+    pb.deinit();
+    allocator.destroy(pb);
+}
+
 test "fb_ring_create: status is ok on success and invalid_arg on a rejected config" {
     var st: FbStatus = .io_error; // any value the call must overwrite
     const ring = fb_ring_create(8, 1, 1.0, &st) orelse return error.CreateFailed;
@@ -507,4 +559,37 @@ test "fb_mixer stats/last_error on a never-started mixer are zero/empty (Windows
     try std.testing.expectEqual(@as(u64, 0), st.frames_written);
     try std.testing.expectEqual(@as(u32, 0), st.xruns);
     try std.testing.expectEqualStrings("", std.mem.span(fb_mixer_last_error(m)));
+}
+
+test "fb_playback_create rejects rate 0 and channels 3" {
+    try std.testing.expectEqual(@as(?*Playback, null), fb_playback_create("", 0, 2));
+    try std.testing.expectEqual(@as(?*Playback, null), fb_playback_create("", 48_000, 3));
+}
+
+test "fb_playback bind/state/last_error on a never-played handle (Windows only)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const pb = fb_playback_create("", 48_000, 2) orelse return error.CreateFailed;
+    defer fb_playback_destroy(pb);
+    var st: Playback.State = undefined;
+    fb_playback_state(pb, &st);
+    try std.testing.expectEqual(@as(u8, 0), st.running);
+    try std.testing.expectEqual(@as(u64, 0), st.clip_frames);
+    const frames = [_]f32{ 0.1, -0.1, 0.2, -0.2, 0.3, -0.3 };
+    // 2 frames * 3 channels == 6, exactly the array's length: in range, so
+    // this trips the channels guard and nothing else (a 3-frame slice over
+    // 6 elements at channels=3 would run out of range and prove nothing
+    // about the guard itself).
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_playback_bind(pb, &frames, 2, 48_000, 3));
+    try std.testing.expectEqual(FbStatus.ok, fb_playback_bind(pb, &frames, 3, 44_100, 2));
+    fb_playback_seek(pb, 99);
+    fb_playback_state(pb, &st);
+    try std.testing.expectEqual(@as(u64, 3), st.clip_frames);
+    try std.testing.expectEqual(@as(u64, 3), st.cursor);
+    try std.testing.expectEqualStrings("", std.mem.span(fb_playback_last_error(pb)));
+}
+
+test "fb_capture_create rejects kind 3: render is not a capture kind" {
+    const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 3, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }));
 }
