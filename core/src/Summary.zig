@@ -179,15 +179,10 @@ fn seqRead(gen: *const std.atomic.Value(u64), ctx: anytype) void {
 /// `out` anyway, possibly torn — `seqRead` never blocks waiting for a
 /// clean one, the same way the writer never waits on a reader. The
 /// parity scheme assumes a single writer; `Ring.writer_active` is what
-/// enforces that between `update` and `flushNow`'s `poison` — but ONLY
-/// for a `Capture` writer. A host that writes through `fb_ring_write`
-/// directly (today, the Python mixer thread in
-/// `flashback_sampler/core/mixed_capture.py`) never sets
-/// `writer_active`, so on a mixed slot a control-thread flush races
-/// this `gen` seqlock the same way it races `Ring.total_written` (see
-/// `Ring.flush`'s doc comment, issue #20) — issue #23 is not closed on
-/// that path. PR d closes it by moving the mixer into Zig and having it
-/// set `writer_active` the way `Capture` does.
+/// enforces that between `update` and `flushNow`'s `poison`: every
+/// writer thread's owner registers it (`Capture`, `Mixer` — see
+/// `Ring.flush`'s OWNERSHIP note), so no unregistered writer of a ring
+/// remains.
 ///
 /// Residual gap: the second acquire load in `seqRead` does not force
 /// the payload read above it to complete first — the same gap

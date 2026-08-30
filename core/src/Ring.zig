@@ -841,9 +841,10 @@ test "guard band: reader targets the lap boundary" {
 }
 
 test "flush racing a concurrent writer and reader never panics" {
-    // `writer_active` (see flush()'s doc comment, issue #20) is opt-in:
-    // only Capture sets it, for the life of its own loop. The raw
-    // writer thread below is NOT a Capture and never sets it, so
+    // `writer_active` (see flush()'s doc comment, issue #20) is
+    // registered by a writer thread's OWNER — the control thread that
+    // spawns and joins it (`Capture.start`/`stop`, `Mixer.start`/`stop`).
+    // The raw writer thread below has no such owner and never sets it, so
     // `ring.flush()` here always takes the immediate branch, same as
     // before #20's fix — a writer that already loaded `tw` before the
     // flush still publishes `tw + n` afterward, so total_written and
