@@ -38,10 +38,17 @@ mix_rate: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 scratch: [max_fill_frames * 2]f32 = undefined,
 err: ErrorSlot = .{},
 
-fn waitUntil(pb: *Playback, comptime pred: fn (*Playback) bool) !void {
+/// The one wait in this file's tests: spin on a POSITIVE predicate until
+/// it holds, then stop. `ctx` is whatever the predicate needs (the
+/// player, the fake backend, or a small struct holding both), so
+/// `@TypeOf(ctx)` types the predicate. A stuck thread fails as
+/// error.Timeout instead of hanging the suite, and a wait that ends the
+/// moment its condition holds keeps the fake from recording megabytes of
+/// writes that slow every test after it.
+fn waitFor(ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) !void {
     var spins: u32 = 0;
-    while (!pred(pb) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
-    if (!pred(pb)) return error.Timeout;
+    while (!pred(ctx) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    if (!pred(ctx)) return error.Timeout;
 }
 
 pub fn init(allocator: std.mem.Allocator, backend: Backend.Backend, spec: Backend.Spec) Playback {
@@ -79,6 +86,8 @@ fn currentSpec(self: *const Playback) Backend.Spec {
 /// `frames` may die the moment bind returns. The previous slice is handed
 /// back to the same allocator, never to a different one.
 pub fn bind(self: *Playback, frames: []const f32, rate: u32, channels: u16) !void {
+    // Clause order is load-bearing: `channels == 0` must come first, or
+    // the modulo below divides by zero.
     if (channels == 0 or channels > 2 or rate == 0 or frames.len % channels != 0) return error.InvalidArgument;
     // Handshake with fill(): clear `playing`, then wait for any copy in
     // flight. fill() raises in_copy BEFORE it reads `playing`, so once we
@@ -117,6 +126,10 @@ pub fn play(self: *Playback) !void {
         self.stop_flag.store(false, .monotonic);
         self.done.store(false, .monotonic);
         self.err.reset();
+        // A spawn that fails leaves no thread to clear `playing`, and
+        // run()'s deferred store never happens. Clear it here or the
+        // state stays "playing" for the life of the player.
+        errdefer self.playing.store(false, .seq_cst);
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 }
@@ -273,6 +286,20 @@ fn ramp(comptime n: usize) [n * 2]f32 {
 
 const test_spec = Backend.Spec{ .kind = .render, .device_id = "", .rate = 48_000, .channels = 2 };
 
+/// Reopen waits key on the fake's open COUNT, never on `running`:
+/// `running` is true from the first open and goes false only inside the
+/// reopen block, so a wait on it can pass before the reopen and pin
+/// nothing. The count only moves forward.
+fn secondOpen(f: *FakeBackend) bool {
+    return f.render_opens.load(.acquire) == 2;
+}
+
+/// The render thread has reached its first wait(), so `render_hold` now
+/// parks it inside that wait.
+fn firstWait(f: *FakeBackend) bool {
+    return f.render_waits.load(.acquire) >= 1;
+}
+
 test "partial tail zero-pads the last write and auto-stops with the cursor at clip end" {
     var fake = FakeBackend.init(&.{});
     fake.render_allocator = std.testing.allocator;
@@ -283,7 +310,7 @@ test "partial tail zero-pads the last write and auto-stops with the cursor at cl
     const clip = ramp(6);
     try pb.bind(&clip, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return !p.playing.load(.acquire) and p.cursor.load(.acquire) == 6;
         }
@@ -308,7 +335,7 @@ test "paused: writes are zeros and the cursor does not move" {
     const clip = ramp(100);
     try pb.bind(&clip, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return p.cursor.load(.acquire) >= 2;
         }
@@ -318,12 +345,14 @@ test "paused: writes are zeros and the cursor does not move" {
     while (pb.in_copy.load(.seq_cst)) std.Thread.yield() catch {};
     const at = pb.cursor.load(.acquire);
     const writes = fake.render_writes.load(.acquire);
-    // Wait for 50 more writes: a positive predicate, so the wait costs
-    // what it needs and no more. Burning a fixed 5M yields here instead
-    // lets the render thread append ~100 MB to the fake's `written` list,
-    // which slows every test that runs after this one.
-    var spins: u32 = 0;
-    while (spins < 5_000_000 and fake.render_writes.load(.acquire) < writes + 50) : (spins += 1) std.Thread.yield() catch {};
+    // Wait for 50 more writes. The target rides in the context: the
+    // predicate is a plain function, not a closure over locals.
+    const Writes = struct { fake: *FakeBackend, target: usize };
+    try waitFor(Writes{ .fake = &fake, .target = writes + 50 }, struct {
+        fn f(c: Writes) bool {
+            return c.fake.render_writes.load(.acquire) >= c.target;
+        }
+    }.f);
     try std.testing.expect(fake.render_writes.load(.acquire) > writes);
     try std.testing.expectEqual(at, pb.cursor.load(.acquire));
     pb.stop();
@@ -359,7 +388,7 @@ test "bind while playing pauses, resets the cursor, and replaces the clip" {
     const a = ramp(1000);
     try pb.bind(&a, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return p.cursor.load(.acquire) >= 5;
         }
@@ -384,7 +413,7 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     const a = ramp(4);
     try pb.bind(&a, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return p.running.load(.acquire);
         }
@@ -396,16 +425,15 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     // reads it only inside openRender, and `reopen` orders the two.
     fake.mix_rate = 96_000;
     try pb.bind(&a, 96_000, 2);
-    // Wait on the fake's open COUNT, not on `running`: `running` is still
-    // true from the first open, so a wait on it would pass before the
-    // reopen and pin nothing.
-    var spins: u32 = 0;
-    while (fake.render_opens.load(.acquire) != 2 and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try waitFor(&fake, secondOpen);
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
     // The counter moves INSIDE openRender, so the publish that follows it
     // needs its own wait.
-    var published: u32 = 0;
-    while (pb.state().mix_rate != 96_000 and published < 5_000_000) : (published += 1) std.Thread.yield() catch {};
+    try waitFor(&pb, struct {
+        fn f(p: *Playback) bool {
+            return p.state().mix_rate == 96_000;
+        }
+    }.f);
     pb.stop();
     try std.testing.expectEqual(@as(u32, 96_000), pb.state().mix_rate);
     try std.testing.expectEqual(@as(u32, 96_000), fake.last_render_spec.?.rate);
@@ -428,8 +456,7 @@ test "bind mono at the same rate under a stereo stream reopens and never resizes
     const stereo = ramp(1000);
     try pb.bind(&stereo, 48_000, 2);
     try pb.play();
-    var spins: u32 = 0;
-    while (fake.render_waits.load(.acquire) == 0 and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try waitFor(&fake, firstWait);
     try std.testing.expect(fake.render_waits.load(.acquire) == 1);
     // Mono clip, same rate: self.channels flips to 1 while the stereo
     // stream is still open. The next fill must still write 4 * 2 samples
@@ -438,12 +465,7 @@ test "bind mono at the same rate under a stereo stream reopens and never resizes
     const mono = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     try pb.bind(&mono, 48_000, 1);
     fake.release.store(true, .release);
-    // Wait on the fake's open COUNT. `!reopen and running` is transiently
-    // true inside the reopen block, between reopen.swap(false) and
-    // running.store(false), so a wait on it can pass and then re-read a
-    // false predicate. The count only moves forward.
-    var opened: u32 = 0;
-    while (opened < 5_000_000 and fake.render_opens.load(.acquire) != 2) : (opened += 1) std.Thread.yield() catch {};
+    try waitFor(&fake, secondOpen);
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
     // The reopen block runs mid-iteration, so exactly one wait/write at
     // the new count happens before the loop top re-reads stop_flag.
@@ -464,8 +486,7 @@ test "a seek past the stream's channel bound outputs silence and keeps the seek 
     const stereo = ramp(1000);
     try pb.bind(&stereo, 48_000, 2);
     try pb.play();
-    var spins: u32 = 0;
-    while (fake.render_waits.load(.acquire) == 0 and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try waitFor(&fake, firstWait);
     // 8 mono frames = 4 stereo frames. seek(8) is legal against
     // clip_frames, but the parked fill still runs at the stereo stream's
     // ch = 2, where the clip holds only 4 frames. Two failures are
@@ -479,8 +500,7 @@ test "a seek past the stream's channel bound outputs silence and keeps the seek 
     try pb.play();
     pb.seek(8);
     fake.release.store(true, .release);
-    var opened: u32 = 0;
-    while (opened < 5_000_000 and fake.render_opens.load(.acquire) != 2) : (opened += 1) std.Thread.yield() catch {};
+    try waitFor(&fake, secondOpen);
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
     pb.stop();
     try std.testing.expect(std.mem.indexOf(u8, pb.lastError(), "stream failed") == null);
@@ -504,7 +524,7 @@ test "setDevice copies the id, sets reopen, and the new id reaches the backend" 
     const a = ramp(4);
     try pb.bind(&a, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return p.running.load(.acquire) and !p.reopen.load(.acquire);
         }
@@ -521,8 +541,11 @@ test "available() == 0 does not spin into zero-length writes" {
     const a = ramp(4);
     try pb.bind(&a, 48_000, 2);
     try pb.play();
-    var spins: u32 = 0;
-    while (spins < 5_000_000 and fake.render_waits.load(.acquire) <= 100) : (spins += 1) std.Thread.yield() catch {};
+    try waitFor(&fake, struct {
+        fn f(k: *FakeBackend) bool {
+            return k.render_waits.load(.acquire) > 100;
+        }
+    }.f);
     try std.testing.expect(fake.render_waits.load(.acquire) > 100);
     try std.testing.expectEqual(@as(usize, 0), fake.render_writes.load(.acquire));
     try std.testing.expect(pb.running.load(.acquire));
@@ -537,7 +560,7 @@ test "openRender failure lands in lastError, running stays false, and the next p
     const a = ramp(4);
     try pb.bind(&a, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return p.done.load(.acquire);
         }
@@ -546,7 +569,7 @@ test "openRender failure lands in lastError, running stays false, and the next p
     try std.testing.expectEqual(@as(u8, 0), pb.state().running);
     fake.render_open_error = null;
     try pb.play();
-    try waitUntil(&pb, struct {
+    try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
             return p.running.load(.acquire);
         }

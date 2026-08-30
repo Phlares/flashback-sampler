@@ -46,7 +46,7 @@ pub fn candidates(rate: u32, channels: u16) [5]w.WAVEFORMATEX {
 /// backend too. `scratch` holds one converted packet — sized from
 /// GetBufferSize (the largest packet WASAPI can hand us) × dst channels.
 const Stream = struct {
-    in_use: bool = false,
+    in_use: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     client: ?*w.IAudioClient = null,
     capture: ?*w.IAudioCaptureClient = null,
     src_fmt: convert.SourceFormat = .{ .tag = .f32, .channels = 2 },
@@ -64,10 +64,10 @@ const Stream = struct {
 /// on the audio path. The engine owns the sample buffer (GetBuffer hands
 /// us a pointer into it), so no scratch is needed here.
 const Render = struct {
-    // Render is the first pool with concurrent openers: each Playback's
-    // render thread calls openRender independently, so two decks starting
-    // together can race to claim the same slot. in_use must be atomic and
-    // claimed with a compare-and-swap, not a plain read-then-write.
+    // Both pools have concurrent openers: Mixer.start spawns one capture
+    // thread per source and every Playback has its own render thread, so
+    // two openers can race to claim the same slot. `acquire` below is the
+    // mechanism — a compare-and-swap, never a read-then-write.
     in_use: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     client: ?*w.IAudioClient = null,
     render: ?*w.IAudioRenderClient = null,
@@ -93,15 +93,26 @@ pub fn renderFormat(rate: u32, channels: u16) w.WAVEFORMATEX {
     return w.waveFormat(w.WAVE_FORMAT_IEEE_FLOAT, 32, rate, channels);
 }
 
-fn acquireRender(self: *WasapiBackend) ?*Render {
-    for (&self.renders) |*r| {
-        // cmpxchgStrong returns null on success (the old value it swapped
-        // out matched `false`) — that is the "I won the claim" case.
-        if (r.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-            return r;
+/// Claims the first free slot of a fixed pool. One helper for both pools:
+/// every pool item carries an atomic `in_use`, and the claim is the same
+/// question either way. cmpxchgStrong returns null on success (the value
+/// it swapped out matched `false`) — that is the "I won the claim" case.
+/// `release` is the other half.
+fn acquire(comptime T: type, pool: []T) ?*T {
+    for (pool) |*item| {
+        if (item.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            return item;
         }
     }
     return null;
+}
+
+/// Hands a claimed slot back. Clears the fields FIRST, then drops the
+/// claim with release ordering: the thread that wins this slot next must
+/// see the cleared fields, never the old client pointers.
+fn release(item: anytype) void {
+    item.* = .{};
+    item.in_use.store(false, .release);
 }
 
 fn enumerate(ptr: *anyopaque, out: []Backend.Device) usize {
@@ -121,6 +132,9 @@ fn enumerate(ptr: *anyopaque, out: []Backend.Device) usize {
     n += listFlow(en, w.eCapture, .input, out[n..]);
     // The same render endpoints again, as playback outputs. One endpoint,
     // two roles; two rows keeps the Python filters one-liners.
+    // Appended LAST, so a full out-buffer truncates the render rows
+    // first: the list is 2R + C rows against the Python side's cap of
+    // 128, and losing an output row costs less than losing a source.
     n += listFlow(en, w.eRender, .render, out[n..]);
     return n;
 }
@@ -205,8 +219,8 @@ fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
     // and it is a superset of COM MTA for the other kinds.
     _ = w.RoInitialize(w.RO_INIT_MULTITHREADED);
     errdefer w.CoUninitialize();
-    const slot = self.acquireSlot() orelse return error.OutOfMemory;
-    errdefer slot.in_use = false;
+    const slot = acquire(Stream, &self.streams) orelse return error.OutOfMemory;
+    errdefer release(slot);
     const client = try activate(spec);
     errdefer client.release();
     // Mix rate first: on a real endpoint this works; on the process
@@ -235,8 +249,11 @@ fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
     const cap: *w.IAudioCaptureClient = @ptrCast(@alignCast(raw.?));
     errdefer cap.release();
     if (w.failed(client.vtbl.Start(client))) return error.ActivationFailed;
+    // Order is load-bearing: `.mix_rate = slot.mix_rate` READS the
+    // destination inside its own initializer, so the mix rate published
+    // above survives this whole-struct store.
     slot.* = .{
-        .in_use = true,
+        .in_use = std.atomic.Value(bool).init(true),
         .client = client,
         .capture = cap,
         .src_fmt = .{ .tag = if (fmt.wFormatTag == w.WAVE_FORMAT_PCM) .i16 else .f32, .channels = fmt.nChannels },
@@ -256,8 +273,8 @@ fn openRender(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.RenderS
     if (spec.channels == 0 or spec.channels > 2 or spec.rate == 0) return error.Unsupported;
     _ = w.RoInitialize(w.RO_INIT_MULTITHREADED);
     errdefer w.CoUninitialize();
-    const slot = self.acquireRender() orelse return error.OutOfMemory;
-    errdefer slot.* = .{};
+    const slot = acquire(Render, &self.renders) orelse return error.OutOfMemory;
+    errdefer release(slot);
     // activate() picks eRender for every kind but .input and resolves
     // "" to the default endpoint — nothing render-specific to add.
     const client = try activate(spec);
@@ -283,6 +300,8 @@ fn openRender(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.RenderS
     const rc: *w.IAudioRenderClient = @ptrCast(@alignCast(raw.?));
     errdefer rc.release();
     if (w.failed(client.vtbl.Start(client))) return error.ActivationFailed;
+    // Same load-bearing order as open(): `.mix_rate = slot.mix_rate`
+    // reads the destination inside its own initializer.
     slot.* = .{
         .in_use = std.atomic.Value(bool).init(true),
         .client = client,
@@ -376,16 +395,6 @@ pub fn enumerateProcesses(out: []Process) usize {
     return n;
 }
 
-fn acquireSlot(self: *WasapiBackend) ?*Stream {
-    for (&self.streams) |*s| {
-        if (!s.in_use) {
-            s.in_use = true;
-            return s;
-        }
-    }
-    return null;
-}
-
 fn next(ptr: *anyopaque, timeout_ms: u32) Backend.Error!?Backend.Packet {
     const s: *Stream = @ptrCast(@alignCast(ptr));
     var waited: u32 = 0;
@@ -418,7 +427,7 @@ fn deinit(ptr: *anyopaque) void {
     if (s.client) |c| _ = c.vtbl.Stop(c);
     if (s.capture) |c| c.release();
     if (s.client) |c| c.release();
-    s.* = .{};
+    release(s);
     w.CoUninitialize();
 }
 
@@ -429,7 +438,11 @@ fn mixRate(ptr: *anyopaque) u32 {
 
 fn renderWait(ptr: *anyopaque, timeout_ms: u32) bool {
     const r: *Render = @ptrCast(@alignCast(ptr));
-    return w.WaitForSingleObject(r.event.?, timeout_ms) == w.WAIT_OBJECT_0;
+    // Only WAIT_TIMEOUT means "nothing to do, keep waiting". Every other
+    // non-signalled result (WAIT_FAILED, WAIT_ABANDONED) is a broken
+    // stream: wake the loop so the next available() records the error,
+    // instead of hiding the failure as an endless timeout.
+    return w.WaitForSingleObject(r.event.?, timeout_ms) != w.WAIT_TIMEOUT;
 }
 
 fn renderAvailable(ptr: *anyopaque) Backend.Error!u32 {
@@ -469,7 +482,7 @@ fn renderDeinit(ptr: *anyopaque) void {
     if (r.render) |rc| rc.release();
     if (r.client) |c| c.release();
     if (r.event) |e| _ = w.CloseHandle(e);
-    r.* = .{};
+    release(r);
     w.CoUninitialize();
 }
 
@@ -495,6 +508,24 @@ test "renderFormat is float32 at the clip's rate and channels; AUTOCONVERTPCM do
     try std.testing.expectEqual(@as(u32, 96_000), f.nSamplesPerSec);
     try std.testing.expectEqual(@as(u16, 8), f.nBlockAlign);
     try std.testing.expectEqual(@as(u32, 96_000 * 8), f.nAvgBytesPerSec);
+}
+
+test "renderWait: only a real timeout is false; a failed wait wakes the loop" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r = Render{};
+    const unsignaled = w.CreateEventW(null, 1, 0, null).?;
+    defer _ = w.CloseHandle(unsignaled);
+    r.event = unsignaled;
+    try std.testing.expect(!renderWait(&r, 0));
+    const signaled = w.CreateEventW(null, 1, 1, null).?;
+    defer _ = w.CloseHandle(signaled);
+    r.event = signaled;
+    try std.testing.expect(renderWait(&r, 0));
+    // A handle the OS rejects returns WAIT_FAILED, not WAIT_TIMEOUT. The
+    // loop must wake: the next available() turns the broken stream into
+    // a recorded error instead of a silent stall.
+    r.event = @ptrFromInt(0xdead_beef);
+    try std.testing.expect(renderWait(&r, 0));
 }
 
 test "openRender guard clause rejects bad kind/channels/rate before any COM call" {

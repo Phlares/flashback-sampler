@@ -9,7 +9,9 @@ pub const max_len = 256;
 buf: [max_len]u8 = [_]u8{0} ** max_len,
 len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
-/// Control thread, before a (re)start: clears the text AND the length.
+/// Control thread, before a (re)start: zeroes the length and terminates
+/// the text at byte 0. The rest of `buf` keeps its old bytes; nothing
+/// reads past `len`.
 pub fn reset(self: *ErrorSlot) void {
     self.buf[0] = 0;
     self.len.store(0, .monotonic);
