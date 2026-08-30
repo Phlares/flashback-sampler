@@ -7,6 +7,13 @@ const std = @import("std");
 const Backend = @import("Backend.zig");
 const FakeBackend = @This();
 
+/// Where the worker parks until `release` is stored true. Lets a test
+/// hold the capture thread at a known point — before its stream exists
+/// (`.open`) or before a given packet (`.packet = k`) — and probe the
+/// control-thread state from outside. Set before start(); the spawn
+/// publishes it to the worker.
+pub const Hold = union(enum) { none, open, packet: usize };
+
 packets: []const []const f32,
 discontinuity_at: ?usize = null,
 open_error: ?Backend.Error = null,
@@ -16,9 +23,19 @@ opened: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 delivered: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 last_spec: ?Backend.Spec = null,
+hold: Hold = .none,
+release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
 pub fn init(packets: []const []const f32) FakeBackend {
     return .{ .packets = packets };
+}
+
+fn waitRelease(self: *FakeBackend) void {
+    // Bounded, like the exhausted-wait in next(): a test that forgets
+    // `release` fails instead of hanging. Same bound as waitUntil: on a
+    // loaded box 1M yields is not enough for the test thread to get there.
+    var spins: u32 = 0;
+    while (!self.release.load(.acquire) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
 }
 
 pub fn backend(self: *FakeBackend) Backend.Backend {
@@ -38,6 +55,7 @@ fn enumerate(ptr: *anyopaque, out: []Backend.Device) usize {
 fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
     const self: *FakeBackend = @ptrCast(@alignCast(ptr));
     if (self.open_error) |e| return e;
+    if (self.hold == .open) self.waitRelease();
     self.last_spec = spec;
     self.opened.store(true, .release);
     return .{ .ptr = self, .vtable = &stream_vtable };
@@ -47,6 +65,10 @@ fn next(ptr: *anyopaque, timeout_ms: u32) Backend.Error!?Backend.Packet {
     _ = timeout_ms;
     const self: *FakeBackend = @ptrCast(@alignCast(ptr));
     const i = self.delivered.load(.acquire);
+    switch (self.hold) {
+        .packet => |k| if (k == i) self.waitRelease(),
+        else => {},
+    }
     if (i < self.packets.len) {
         self.delivered.store(i + 1, .release);
         return .{ .frames = self.packets[i], .discontinuity = (self.discontinuity_at orelse std.math.maxInt(usize)) == i };
@@ -102,4 +124,21 @@ test "fake backend enumerate copies its device list" {
     var out: [4]Backend.Device = undefined;
     try std.testing.expectEqual(@as(usize, 1), fake.backend().enumerate(&out));
     try std.testing.expectEqual(@as(u32, 44_100), out[0].mix_rate);
+}
+
+test "hold = .open parks open() until release" {
+    var fake = FakeBackend.init(&.{});
+    fake.hold = .open;
+    const t = try std.Thread.spawn(.{}, struct {
+        fn f(fb: *FakeBackend) void {
+            _ = fb.backend().open(.{ .kind = .loopback, .device_id = "", .rate = 48_000, .channels = 2 }) catch {};
+        }
+    }.f, .{&fake});
+    // A wide window: the spawned thread has had every chance to open.
+    var spins: u32 = 0;
+    while (spins < 1000) : (spins += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!fake.opened.load(.acquire));
+    fake.release.store(true, .release);
+    t.join();
+    try std.testing.expect(fake.opened.load(.acquire));
 }

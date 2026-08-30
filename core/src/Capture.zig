@@ -64,7 +64,17 @@ fn currentSpec(self: *const Capture) Backend.Spec {
 pub fn start(self: *Capture) !void {
     if (self.thread != null) return error.AlreadyRunning;
     self.stop_flag.store(false, .monotonic);
+    // Clear the TEXT too, not only the length: lastError() slices
+    // err_buf[0..len :0], and the sentinel check needs err_buf[len] == 0.
+    self.err_buf[0] = 0;
     self.err_len.store(0, .monotonic);
+    // `writer_active` is owned by THIS thread, not the worker: the scope
+    // that spawns is the scope that joins, so it holds the flag across
+    // both. Stored BEFORE the spawn so a flush that lands while the
+    // worker is still opening its stream is deferred to the loop top
+    // (Ring.flush), never executed under a writer about to appear.
+    self.ring.writer_active.store(true, .release);
+    errdefer self.ring.writer_active.store(false, .release);
     // std.Thread.spawn takes the function and a tuple of its arguments.
     self.thread = try std.Thread.spawn(.{}, run, .{self});
 }
@@ -74,14 +84,12 @@ pub fn stop(self: *Capture) void {
     self.stop_flag.store(true, .release);
     t.join();
     self.thread = null;
-    // The join guarantees `run`'s defers (writer_active -> false) have
-    // already executed, so a flush that arrived while the loop was
-    // winding down and got deferred (issue #20) is drained HERE,
-    // immediately, rather than lost until some future writer.
-    if (self.ring.flush_pending.load(.acquire)) {
-        self.ring.flush_pending.store(false, .release);
-        self.ring.flush();
-    }
+    // Joined: no writer exists. Clear the flag FIRST so a flush landing
+    // from here on takes Ring.flush's immediate path, then drain the
+    // one that may have been deferred while the loop wound down — on
+    // this thread, now the only one touching the ring (issue #20).
+    self.ring.writer_active.store(false, .release);
+    self.ring.drainPendingFlush();
 }
 
 pub fn stats(self: *const Capture) Stats {
@@ -112,20 +120,6 @@ fn run(self: *Capture) void {
     self.mix_rate.store(stream.mixRate(), .release);
     self.running.store(true, .release);
     defer self.running.store(false, .release);
-    // Tells Ring.flush() to defer to us instead of resetting directly
-    // (issue #20) — declared AFTER the `running` defer so it runs FIRST
-    // (defers are LIFO). This is NOT about a write still being in
-    // flight when this defer runs — the loop has already exited by
-    // then, so there is none. It is about `writer_active` never
-    // outliving `running`: if `running` flipped false FIRST, a control
-    // thread could see `running == 0` in `stats()`, conclude no writer
-    // is active, and call `flush()` — yet still land on the DEFERRED
-    // branch because `writer_active` was still true, with no writer
-    // left to ever drain it (stuck until the next `start()`). Clearing
-    // `writer_active` before `running` closes that window: once
-    // `running` reads false, `flush()` always takes the immediate path.
-    self.ring.writer_active.store(true, .release);
-    defer self.ring.writer_active.store(false, .release);
     defer stream.deinit();
     defer stream.stop();
     while (!self.stop_flag.load(.acquire)) {
@@ -297,4 +291,53 @@ test "start twice is AlreadyRunning" {
     try cap.start();
     defer cap.stop();
     try std.testing.expectError(error.AlreadyRunning, cap.start());
+}
+
+test "a flush between start() and the worker's first stream call is deferred, not executed" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 9, 9 }); // audio the flush must not drop while the worker is still parked
+    var fake = FakeBackend.init(&.{&[_]f32{ 1, 1 }});
+    fake.hold = .open; // the worker parks inside backend.open until released
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .loopback, .device_id = "", .rate = 48_000, .channels = 2 });
+    try cap.start();
+    // Probe from the control thread while the worker has no stream yet.
+    try std.testing.expect(ring.writer_active.load(.acquire));
+    ring.flush();
+    try std.testing.expect(ring.flush_pending.load(.acquire)); // deferred to the writer...
+    try std.testing.expectEqual(@as(u64, 1), ring.total_written.load(.acquire)); // ...so nothing was reset yet
+    fake.release.store(true, .release);
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.frames_written.load(.acquire) == 1;
+        }
+    }.f);
+    cap.stop();
+    // The worker drained the flush at its loop top, then wrote its packet.
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), ring.total_written.load(.acquire));
+    var out: [2]f32 = undefined;
+    try ring.read(0, &out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 1, 1 }, &out);
+    try std.testing.expect(!ring.writer_active.load(.acquire));
+}
+
+test "restart after a recorded error: lastError is empty and does not trap on the sentinel" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var fake = FakeBackend.init(&.{});
+    fake.open_error = error.DeviceNotFound;
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "", .rate = 48_000, .channels = 2 });
+    try cap.start();
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.err_len.load(.acquire) > 0;
+        }
+    }.f);
+    cap.stop();
+    fake.open_error = null;
+    try cap.start();
+    defer cap.stop();
+    // Before the fix this line panics: err_len is 0 but err_buf[0] is 'o'.
+    try std.testing.expectEqualStrings("", cap.lastError());
 }
