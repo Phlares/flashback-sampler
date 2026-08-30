@@ -957,3 +957,29 @@ def test_loop_restarts_play_after_native_auto_stop(qapp, state, monkeypatch):
     fake.state = (1, 0, 4800, 4800, 48_000)
     win._update_clip_playback_state()
     assert [n for n, _ in fake.calls if n == "fb_playback_play"] == ["fb_playback_play"]
+
+
+def test_async_open_failure_surfaces_once_via_last_error(qapp, state, monkeypatch):
+    """The native player opens its device lazily on the Zig render
+    thread: a failure there reports through last_error() + playing
+    dropping to 0, not through an exception at play(). Two ticks that
+    both land on a "just stopped" edge with the SAME last_error must
+    only pop the warning once."""
+    import flashback_sampler.app.turntable_window as tw
+
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    _checkout(state)
+    win._tick()
+    win._intending_playback = True
+    fake.state = (1, 0, 0, 4800, 48_000)
+    fake.err = b"device open failed"
+    warnings = []
+    monkeypatch.setattr(tw.QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+
+    win._was_playing_last_tick = True
+    win._update_clip_playback_state()
+    win._was_playing_last_tick = True  # force a second "just stopped" edge
+    win._update_clip_playback_state()
+
+    assert len(warnings) == 1
