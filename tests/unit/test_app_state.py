@@ -13,7 +13,7 @@ import pytest
 from flashback_sampler.app.state import AppState
 from flashback_sampler.core.buffer import RingDerivedOps
 from flashback_sampler.core.checkout import CheckoutManager
-from flashback_sampler.core.scrub_player import ScrubPlayer
+from flashback_sampler.core.scrub_player import NativeScrubPlayer
 
 
 def test_appstate_wires_core_objects_with_matching_sample_rate_and_channels():
@@ -23,7 +23,7 @@ def test_appstate_wires_core_objects_with_matching_sample_rate_and_channels():
     # implementation (Python or native) the machine has available.
     assert isinstance(st.buffer, RingDerivedOps)
     assert isinstance(st.checkout_manager, CheckoutManager)
-    assert isinstance(st.scrub_player, ScrubPlayer)
+    assert isinstance(st.scrub_player, NativeScrubPlayer)
     assert st.sample_rate == 16_000
     assert st.channels == 2
     assert st.buffer.sample_rate == 16_000
@@ -392,7 +392,7 @@ def test_shutdown_is_idempotent_without_capture_or_stream():
     st.shutdown()  # must not raise
 
 
-def test_checkout_from_live_buffer_then_bind_to_scrub_player():
+def test_checkout_from_live_buffer_then_bind_to_scrub_player(monkeypatch):
     """
     End-to-end headless: push audio into the buffer, create a checkout,
     bind it to the scrub player, and verify the callback plays it back.
@@ -405,11 +405,21 @@ def test_checkout_from_live_buffer_then_bind_to_scrub_player():
     co = st.checkout_manager.create(duration_s=0.5)
     assert co.audio.shape == (500, 1)
 
-    st.scrub_player.bind(co.audio)
+    seen = {}
+    # The player's handle is lazy, so a fake library serves the whole
+    # native side: no DLL, no device, and no real handle to free.
+    from flashback_sampler.core import native
+
+    fake_lib = type("L", (), {
+        "fb_playback_create": staticmethod(lambda d, r, c: 0xF00D),
+        "fb_playback_bind": staticmethod(lambda h, p, n, r, c: seen.update(n=n, rate=r, ch=c) or 0),
+        "fb_playback_play": staticmethod(lambda h: seen.update(played=True) or 0),
+        "fb_playback_destroy": staticmethod(lambda h: None),
+    })()
+    monkeypatch.setattr(native, "load", lambda: fake_lib)
+    st.scrub_player.bind(co.audio, co.sample_rate)
     st.scrub_player.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    st.scrub_player._audio_callback(out, 100, None, None)
-    assert np.allclose(out[:, 0], ramp[:100, 0])
+    assert seen == dict(n=500, rate=1000, ch=1, played=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────
