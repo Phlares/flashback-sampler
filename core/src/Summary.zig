@@ -70,7 +70,13 @@ pub fn poison(self: *Summary) void {
     // Seqlock: bump to odd before mutating, back to even after. A reader
     // (rmsBins) that samples gen while it's odd knows a write is in
     // flight and retries — the writer itself never waits on anyone.
-    _ = self.gen.fetchAdd(1, .release);
+    //
+    // The pre-bump is acq_rel, not release: release only orders writes
+    // that precede it in program order. The slot writes below come
+    // AFTER it, so release alone would let them hoist above the odd
+    // bump on a weakly-ordered target (aarch64) — acq_rel's acquire
+    // side blocks that.
+    _ = self.gen.fetchAdd(1, .acq_rel);
     defer _ = self.gen.fetchAdd(1, .release);
     @memset(self.slot_abs, -1);
 }
@@ -91,7 +97,13 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
     // Seqlock: odd gen = "being written". Readers (rmsBins, on the UI
     // thread) snapshot gen before and after; a mismatch or an odd value
     // means retry. The writer never waits — same discipline as Ring.
-    _ = self.gen.fetchAdd(1, .release);
+    //
+    // The pre-bump is acq_rel, not release: release only orders writes
+    // that precede it in program order. The slot writes below come
+    // AFTER it, so release alone would let them hoist above the odd
+    // bump on a weakly-ordered target (aarch64) — acq_rel's acquire
+    // side blocks that.
+    _ = self.gen.fetchAdd(1, .acq_rel);
     defer _ = self.gen.fetchAdd(1, .release);
     const chans: u64 = self.channels;
     const n: u64 = interleaved.len / chans;
@@ -129,6 +141,19 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
     }
 }
 
+/// Seqlock read: run `ctx.run()` until `gen` is stable and even, at most
+/// 4 attempts, then hand back the last result. Never blocks the writer.
+fn seqRead(gen: *const std.atomic.Value(u64), ctx: anytype) void {
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        const g0 = gen.load(.acquire);
+        ctx.run();
+        const g1 = gen.load(.acquire);
+        if ((g0 & 1) == 0 and g0 == g1) return;
+        if (attempt >= 3) return;
+    }
+}
+
 /// out.len = n_bins * channels. n_samples_req = 0 → all available.
 /// bin_span_frames = 0 → derived from window (n_samples / n_bins).
 /// Slots whose generation tag falls inside [abs_start, abs_start+n)
@@ -143,9 +168,18 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
 /// `Summary` is a seqlock, the same discipline as `Ring.read`/`write`:
 /// `update` and `poison` bump `gen` to odd before mutating and back to
 /// even after; this function snapshots `gen` before and after computing
-/// into its scratch, and retries (bounded to 3 attempts) if `gen` was
-/// odd or changed in between — a torn read is detected and discarded,
-/// never published. The writer never waits: it just bumps an atomic.
+/// into its scratch (via `seqRead`), and retries — 4 attempts total (1
+/// plus up to 3 retries) — if `gen` was odd or changed in between; a
+/// torn read is detected and discarded, never published. The writer
+/// never waits: it just bumps an atomic. The parity scheme assumes a
+/// single writer; `Ring.writer_active` is what enforces that between
+/// `update` and `flushNow`'s `poison`.
+///
+/// Residual gap: the second acquire load in `seqRead` does not force
+/// the payload read above it to complete first — the same gap
+/// `Ring.read`'s footnote documents in full. x86-64 TSO closes it in
+/// practice; a weakly-ordered target relies on the bounded retry, not
+/// a proven fence, for the same reason Ring's stress test exists.
 ///
 /// STACK: allocates ~96 KiB of scratch on the caller's stack (`bin_ss`:
 /// max_bins * 2 channels * 8 bytes = 64 KiB, plus `bin_cnt`: max_bins * 8
@@ -155,17 +189,23 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
 /// C ABI precisely so other hosts can link it) with a constrained-stack
 /// thread must account for this before calling in.
 pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
-    // Bounded retry: never spin forever, never block the writer. If gen
-    // is still unstable after 3 attempts, hand back the last computation
-    // — a stale or briefly-torn bin beats a UI thread that never returns.
-    var attempt: u8 = 0;
-    while (true) : (attempt += 1) {
-        const g0 = self.gen.load(.acquire);
-        self.rmsBinsOnce(total_written, n_samples_req, bin_span_frames, out);
-        const g1 = self.gen.load(.acquire);
-        if ((g0 & 1) == 0 and g0 == g1) return;
-        if (attempt >= 3) return;
-    }
+    const Ctx = struct {
+        summary: *const Summary,
+        total_written: u64,
+        n_samples_req: u64,
+        bin_span_frames: u64,
+        out: []f32,
+        fn run(c: @This()) void {
+            c.summary.rmsBinsOnce(c.total_written, c.n_samples_req, c.bin_span_frames, c.out);
+        }
+    };
+    seqRead(&self.gen, Ctx{
+        .summary = self,
+        .total_written = total_written,
+        .n_samples_req = n_samples_req,
+        .bin_span_frames = bin_span_frames,
+        .out = out,
+    });
 }
 
 fn rmsBinsOnce(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
@@ -311,7 +351,7 @@ test "update and poison bump the generation twice; rmsBins re-reads until it see
     s.gen.store(8, .release);
 }
 
-test "rmsBins result equals the value read after the writer finished (no torn read across a full slot rewrite)" {
+test "rmsBins after one update returns that update's value (rmsBinsOnce regression guard)" {
     var s = try Summary.init(std.testing.allocator, 4096 * 2, 4096, 1);
     defer s.deinit();
     const a = [_]f32{0.5} ** 4096;
@@ -319,4 +359,32 @@ test "rmsBins result equals the value read after the writer finished (no torn re
     var out: [1]f32 = undefined;
     s.rmsBins(4096, 4096, 4096, &out);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-4);
+}
+
+test "seqRead retries when the generation moves during the read" {
+    var g = std.atomic.Value(u64).init(2);
+    const Probe = struct {
+        gen: *std.atomic.Value(u64),
+        calls: *u32,
+        fn run(p: @This()) void {
+            p.calls.* += 1;
+            if (p.calls.* == 1) _ = p.gen.fetchAdd(2, .release); // writer lands mid-read
+        }
+    };
+    var calls: u32 = 0;
+    seqRead(&g, Probe{ .gen = &g, .calls = &calls });
+    try std.testing.expectEqual(@as(u32, 2), calls); // pins g0 == g1
+}
+
+test "seqRead treats an odd generation as mid-write and exhausts its bounded attempts" {
+    var g = std.atomic.Value(u64).init(7); // stuck odd, never changes
+    const Probe = struct {
+        calls: *u32,
+        fn run(p: @This()) void {
+            p.calls.* += 1;
+        }
+    };
+    var calls: u32 = 0;
+    seqRead(&g, Probe{ .calls = &calls });
+    try std.testing.expectEqual(@as(u32, 4), calls); // pins parity AND the bound
 }
