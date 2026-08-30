@@ -13,18 +13,22 @@ typedef enum FbStatus {
   FB_OVERWRITTEN = 1,
   FB_OUT_OF_RANGE = 2,
   FB_IO_ERROR = 3,
-  FB_INVALID_ARG = 4
+  FB_INVALID_ARG = 4,
+  FB_OUT_OF_MEMORY = 5
 } FbStatus;
 
 typedef enum FbSubtype { FB_FLOAT32 = 0, FB_PCM_24 = 1, FB_PCM_16 = 2 } FbSubtype;
 
 typedef struct FbCapture FbCapture; /* opaque */
+typedef struct FbMixer FbMixer; /* opaque */
 typedef struct FbDevice { uint8_t kind; uint8_t is_default; uint32_t mix_rate; uint16_t mix_channels; char id[128]; char name[128]; } FbDevice;
 typedef struct FbCaptureSpec { uint8_t kind; uint32_t pid; uint32_t rate; uint16_t channels; const char *device_id; } FbCaptureSpec;
 typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; } FbCaptureStats;
 typedef struct FbProcess { uint32_t pid; uint32_t ppid; char name[128]; } FbProcess;
 
-FbRing *fb_ring_create(uint32_t rate, uint16_t channels, double seconds);
+/* status is nullable. FB_INVALID_ARG: rejected config. FB_OUT_OF_MEMORY:
+ * the reservation could not be made (issue #41). */
+FbRing *fb_ring_create(uint32_t rate, uint16_t channels, double seconds, FbStatus *status);
 void fb_ring_destroy(FbRing *);
 void fb_ring_write(FbRing *, const float *frames, size_t n_frames);
 uint64_t fb_ring_total_written(const FbRing *);
@@ -65,6 +69,16 @@ void       fb_capture_stop(FbCapture *);
 void       fb_capture_destroy(FbCapture *);                    /* stops first */
 void       fb_capture_stats(const FbCapture *, FbCaptureStats *out);
 const char*fb_capture_last_error(const FbCapture *);           /* "" when none; valid until destroy */
+
+/* N sources (1..8) summed into `target` by a Zig mixer thread. Staging
+ * rings live inside the mixer. NULL: n outside 1..8, a bad spec, no
+ * backend on this OS, or out of memory. */
+FbMixer   *fb_mixer_create(FbRing *target, const FbCaptureSpec *specs, size_t n);
+FbStatus   fb_mixer_start(FbMixer *);                          /* FB_INVALID_ARG if already running, FB_IO_ERROR otherwise */
+void       fb_mixer_stop(FbMixer *);
+void       fb_mixer_destroy(FbMixer *);                        /* stops first */
+void       fb_mixer_stats(const FbMixer *, FbCaptureStats *out);
+const char*fb_mixer_last_error(const FbMixer *);               /* own message, else the first source's; "" when none */
 
 size_t     fb_processes_list(FbProcess *out, size_t max);      /* every running process, Toolhelp32; 0 on non-Windows */
 #endif
