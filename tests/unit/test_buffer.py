@@ -224,10 +224,10 @@ def test_get_segment_clamped_to_available(buffer_cls):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# copy_abs_range — the shared-surface entry point checkout.py and
-# mixed_capture.py use to read an absolute [abs_start, abs_end) span
-# without reaching into implementation-private internals (a Python lock
-# for AudioCircularBuffer; a raw ctypes read for NativeAudioCircularBuffer).
+# copy_abs_range — the shared-surface entry point checkout.py uses to
+# read an absolute [abs_start, abs_end) span without reaching into
+# implementation-private internals (a Python lock for AudioCircularBuffer;
+# a raw ctypes read for NativeAudioCircularBuffer).
 # ─────────────────────────────────────────────────────────────────────────
 
 

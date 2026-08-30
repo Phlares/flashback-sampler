@@ -12,6 +12,7 @@ pub const abi = @import("abi.zig");
 pub const Backend = @import("Backend.zig");
 pub const FakeBackend = @import("FakeBackend.zig");
 pub const Capture = @import("Capture.zig");
+pub const Mixer = @import("Mixer.zig");
 
 // OS-gated: these two files only compile for Windows targets. On other
 // targets `wasapi`/`WasapiBackend` are empty structs and abi.zig's
