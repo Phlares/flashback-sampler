@@ -120,6 +120,17 @@ pub fn deinit(self: *Ring) void {
 /// `total_written` can never republish over the reset (issue #20). With
 /// no writer, it happens here, immediately. Called from a control
 /// thread, never the audio thread.
+///
+/// `writer_active` is set ONLY by `Capture`, for the life of its own
+/// loop. A host that writes through `fb_ring_write` directly — today,
+/// the Python mixer thread in `flashback_sampler/core/mixed_capture.py`
+/// — never sets it, because it is not a `Capture`. On a mixed slot, a
+/// control-thread `flush()` there always takes the IMMEDIATE branch
+/// below and can race that writer on both `total_written` (issue #20)
+/// and `Summary.gen` (issue #23, see `Summary.zig`'s own THREADING
+/// note) — the single-writer assumption both of those rely on is not
+/// enforced on that path. PR d closes this by moving the mixer into
+/// Zig and having it set `writer_active` the same way `Capture` does.
 pub fn flush(self: *Ring) void {
     if (self.writer_active.load(.acquire)) {
         self.flush_pending.store(true, .release);
@@ -150,6 +161,28 @@ fn flushNow(self: *Ring) void {
     @memset(self.frames, 0);
 }
 
+/// Drains a flush deferred by an active writer (see `flush`'s doc
+/// comment) — the memset is a bounded, allocation-free, lock-free
+/// operation (~50 ms for a 345 MB ring; WASAPI's buffer is 200 ms, so a
+/// flush mid-capture costs no frames). This is the only way a flush can
+/// never be undone by the writer that raced it (issue #20).
+///
+/// Two call sites, not one: `write()` below drains it before publishing
+/// its own data — covers a writer that is actively producing frames.
+/// `Capture.run`'s loop drains it once per iteration BEFORE calling
+/// `stream.next`, INCLUDING the no-packet path (`stream.next` returning
+/// null) — `write()` alone is not enough, because a silent
+/// loopback/process source can go arbitrarily long between packets
+/// (or forever), and a flush must not wait on the audio source to be
+/// busy. Still on the writer thread; still no lock, no allocation, no
+/// error path.
+pub fn drainPendingFlush(self: *Ring) void {
+    if (self.flush_pending.load(.acquire)) {
+        self.flushNow();
+        self.flush_pending.store(false, .release);
+    }
+}
+
 /// RT-SAFE: no locks, no allocation, no failure path. Called from the
 /// audio callback thread. `interleaved.len` must be a multiple of
 /// channels. Callers may pass ANY size — no assert, no error path — the
@@ -160,16 +193,11 @@ fn flushNow(self: *Ring) void {
 /// `max_write_frames`.
 pub fn write(self: *Ring, interleaved: []const f32) void {
     std.debug.assert(interleaved.len % self.channels == 0);
-    // A flush deferred by an active writer (see `flush`'s doc comment)
-    // is drained HERE, on the writer thread, before this call's own data
-    // goes in — the memset is a bounded, allocation-free, lock-free
-    // operation (~50 ms for a 345 MB ring; WASAPI's buffer is 200 ms, so
-    // a flush mid-capture costs no frames) and is the only way a flush
-    // can never be undone by the writer that raced it (issue #20).
-    if (self.flush_pending.load(.acquire)) {
-        self.flushNow();
-        self.flush_pending.store(false, .release);
-    }
+    // See `drainPendingFlush`'s doc comment: this call site covers a
+    // writer that IS producing frames. A `Capture` writer also drains
+    // from its own loop top, so an idle source still gets flushed
+    // (`write` here never runs while the source is silent).
+    self.drainPendingFlush();
     const g = self.gain.load(.monotonic);
     // Physical wrap is keyed off storage_frames (capacity + the guard
     // band), not capacity — see the struct-level comment and the note
@@ -822,7 +850,14 @@ test "flush racing a concurrent writer and reader never panics" {
     // the physical buffer contents can end up in ANY relative state
     // once a flush races an in-flight write. That is expected in THIS
     // configuration (no active writer registered) and is not what #20
-    // closes. Content correctness is therefore not meaningfully
+    // closes. This is also, precisely, the "mixed slot" configuration
+    // `flush()`'s doc comment (issue #23) describes for `Summary`: a
+    // raw writer that never sets `writer_active` plus a concurrent
+    // control-thread flusher races BOTH `total_written` here and
+    // `Summary.gen` the same way — this test only pins the `Ring` half
+    // (no panic, no trap), not the `Summary` half.
+    //
+    // Content correctness is therefore not meaningfully
     // verifiable while this race is live; this test instead verifies
     // the property that DOES matter:
     // read() never traps (Critical 1: an unsigned underflow when a

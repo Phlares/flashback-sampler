@@ -94,6 +94,13 @@ pub const max_bins: usize = 4096;
 /// extra multiply is nothing, and it keeps write()'s fast path free of
 /// a second pass). Runs on the audio thread: no locks, no allocation.
 pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u64) void {
+    const chans: u64 = self.channels;
+    const n: u64 = interleaved.len / chans;
+    // Checked BEFORE the seqlock bump below: a no-op write must not
+    // force a reader into a retry it gains nothing from — nothing is
+    // mutated on this path, so there is no torn state to protect a
+    // reader against.
+    if (n == 0) return;
     // Seqlock: odd gen = "being written". Readers (rmsBins, on the UI
     // thread) snapshot gen before and after; a mismatch or an odd value
     // means retry. The writer never waits — same discipline as Ring.
@@ -105,9 +112,6 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
     // side blocks that.
     _ = self.gen.fetchAdd(1, .acq_rel);
     defer _ = self.gen.fetchAdd(1, .release);
-    const chans: u64 = self.channels;
-    const n: u64 = interleaved.len / chans;
-    if (n == 0) return;
     const slot_first = start_abs / self.slot_frames;
     const slot_last = (start_abs + n - 1) / self.slot_frames;
     var s_global = slot_first;
@@ -169,11 +173,21 @@ fn seqRead(gen: *const std.atomic.Value(u64), ctx: anytype) void {
 /// `update` and `poison` bump `gen` to odd before mutating and back to
 /// even after; this function snapshots `gen` before and after computing
 /// into its scratch (via `seqRead`), and retries — 4 attempts total (1
-/// plus up to 3 retries) — if `gen` was odd or changed in between; a
-/// torn read is detected and discarded, never published. The writer
-/// never waits: it just bumps an atomic. The parity scheme assumes a
-/// single writer; `Ring.writer_active` is what enforces that between
-/// `update` and `flushNow`'s `poison`.
+/// plus up to 3 retries) — if `gen` was odd or changed in between. This
+/// is BEST EFFORT, not a guarantee: if every attempt still lands on a
+/// moving or odd generation, the last computation is returned into
+/// `out` anyway, possibly torn — `seqRead` never blocks waiting for a
+/// clean one, the same way the writer never waits on a reader. The
+/// parity scheme assumes a single writer; `Ring.writer_active` is what
+/// enforces that between `update` and `flushNow`'s `poison` — but ONLY
+/// for a `Capture` writer. A host that writes through `fb_ring_write`
+/// directly (today, the Python mixer thread in
+/// `flashback_sampler/core/mixed_capture.py`) never sets
+/// `writer_active`, so on a mixed slot a control-thread flush races
+/// this `gen` seqlock the same way it races `Ring.total_written` (see
+/// `Ring.flush`'s doc comment, issue #20) — issue #23 is not closed on
+/// that path. PR d closes it by moving the mixer into Zig and having it
+/// set `writer_active` the way `Capture` does.
 ///
 /// Residual gap: the second acquire load in `seqRead` does not force
 /// the payload read above it to complete first — the same gap
@@ -344,11 +358,9 @@ test "update and poison bump the generation twice; rmsBins re-reads until it see
     try std.testing.expectEqual(@as(u64, 4), s.gen.load(.acquire));
     s.poison();
     try std.testing.expectEqual(@as(u64, 6), s.gen.load(.acquire));
-    // A torn snapshot: force gen odd, rmsBins must not spin forever and must return.
-    s.gen.store(7, .release);
-    var out: [1]f32 = undefined;
-    s.rmsBins(4096, 0, 0, &out);
-    s.gen.store(8, .release);
+    // The bounded-retry, never-spins-forever property for a stuck-odd
+    // generation is pinned separately, by the two seqRead tests below —
+    // this test's own job is only the gen-bumping arithmetic above.
 }
 
 test "rmsBins after one update returns that update's value (rmsBinsOnce regression guard)" {
