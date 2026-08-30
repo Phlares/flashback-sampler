@@ -89,7 +89,9 @@ size_t     fb_processes_list(FbProcess *out, size_t max);      /* every running 
  * non-Windows, or rate == 0, or channels outside 1..2. */
 FbPlayback *fb_playback_create(const char *device_id, uint32_t rate, uint16_t channels);
 /* Copies `frames` (n_frames * channels floats). FB_INVALID_ARG: channels
- * == 0. FB_OUT_OF_MEMORY: the copy could not be allocated. */
+ * == 0, channels > 2, or rate == 0. (The core also rejects a sample count
+ * not divisible by channels; this entry point always passes a multiple.)
+ * FB_OUT_OF_MEMORY: the copy could not be allocated. */
 FbStatus    fb_playback_bind(FbPlayback *, const float *frames, size_t n_frames, uint32_t rate, uint16_t channels);
 FbStatus    fb_playback_play(FbPlayback *);           /* FB_IO_ERROR if the render thread could not spawn */
 void        fb_playback_pause(FbPlayback *);
