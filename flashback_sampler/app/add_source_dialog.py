@@ -188,8 +188,11 @@ class AddSourceDialog(QDialog):
         sr, ch, secs = self._current_inputs()
         mb = compute_ram_mb(sr, ch, float(secs))
         ch_label = "STEREO" if ch == 2 else "MONO"
+        # The whole ring is committed at creation, not filled over time --
+        # "Reserves" so this reads as an up-front commitment, not a
+        # live/current usage figure.
         self._ram_label.setText(
-            f"≈ {mb:6.1f} MB    ({sr // 1000}k {ch_label}, "
+            f"Reserves ≈ {mb:6.1f} MB RAM    ({sr // 1000}k {ch_label}, "
             f"{format_time_cs(secs)})"
         )
 

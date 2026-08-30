@@ -202,6 +202,13 @@ class AppState:
             slot.stop_capture()
         except Exception:  # pragma: no cover
             pass
+        # Checkouts hold copies of ring audio (get_latest/get_segment/
+        # copy_abs_range all memcpy out), not views -- closing the ring
+        # here does not invalidate them, so no checkout release is needed.
+        try:
+            slot.buffer.close()
+        except Exception:  # pragma: no cover
+            pass
         if self.active_slot_index >= len(self.slots):
             self.active_slot_index = len(self.slots) - 1
         elif self.active_slot_index > index:

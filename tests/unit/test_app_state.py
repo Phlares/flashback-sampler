@@ -140,6 +140,61 @@ def test_remove_slot_stops_capture():
     assert len(st.slots) == 1
 
 
+def test_remove_slot_closes_buffer():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    class _RecordingBuffer:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.add_slot(preset_by_name("SCRATCH"))
+    survivor_buffer = _RecordingBuffer()
+    removed_buffer = _RecordingBuffer()
+    st.slots[0].buffer = survivor_buffer
+    st.slots[1].buffer = removed_buffer
+
+    st.remove_slot(1)
+
+    assert removed_buffer.close_calls == 1
+    assert survivor_buffer.close_calls == 0
+
+
+def test_remove_slot_stop_precedes_close():
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    call_order: list[str] = []
+
+    class _RecordingSource:
+        def stop(self) -> None:
+            call_order.append("stop")
+
+        def is_running(self) -> bool:
+            return False
+
+        def xrun_count(self) -> int:
+            return 0
+
+        def last_error(self):
+            return None
+
+    class _RecordingBuffer:
+        def close(self) -> None:
+            call_order.append("close")
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    new_slot = st.add_slot(preset_by_name("SCRATCH"))
+    new_slot.bind_capture(_RecordingSource())
+    new_slot.buffer = _RecordingBuffer()
+
+    st.remove_slot(1)
+
+    assert call_order == ["stop", "close"]
+
+
 def test_rebuild_buffer_scoped_to_active_slot():
     from flashback_sampler.core.quality_presets import preset_by_name
 
@@ -358,7 +413,7 @@ def test_cli_defaults():
     from flashback_sampler.app.main import _parse_args
 
     args = _parse_args([])
-    assert args.buffer_minutes == 15.0
+    assert args.buffer_minutes == 5.0
     assert args.sample_rate == 48_000
     assert args.channels == 2
 

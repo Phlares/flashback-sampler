@@ -5,7 +5,7 @@ Boots the QApplication, applies the Erebus base stylesheet, builds the
 AppState object graph, shows the main window, and runs the event loop.
 
 CLI:
-    --buffer-minutes N    ring buffer length in minutes (default 15)
+    --buffer-minutes N    ring buffer length in minutes (default 5)
     --sample-rate N       override the capture sample rate (default 48000)
     --channels N          1 = mono, 2 = stereo (default)
 """
@@ -28,8 +28,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--buffer-minutes",
         type=float,
-        default=15.0,
-        help="ring buffer length in minutes (default: 15). "
+        default=5.0,
+        help="ring buffer length in minutes (default: 5). "
         "Use a small value like 0.5 to test rollover quickly.",
     )
     p.add_argument("--sample-rate", type=int, default=48_000)
