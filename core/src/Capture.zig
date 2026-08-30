@@ -74,6 +74,14 @@ pub fn stop(self: *Capture) void {
     self.stop_flag.store(true, .release);
     t.join();
     self.thread = null;
+    // The join guarantees `run`'s defers (writer_active -> false) have
+    // already executed, so a flush that arrived while the loop was
+    // winding down and got deferred (issue #20) is drained HERE,
+    // immediately, rather than lost until some future writer.
+    if (self.ring.flush_pending.load(.acquire)) {
+        self.ring.flush_pending.store(false, .release);
+        self.ring.flush();
+    }
 }
 
 pub fn stats(self: *const Capture) Stats {
@@ -104,6 +112,13 @@ fn run(self: *Capture) void {
     self.mix_rate.store(stream.mixRate(), .release);
     self.running.store(true, .release);
     defer self.running.store(false, .release);
+    // Tells Ring.flush() to defer to us instead of resetting directly
+    // (issue #20) — declared AFTER the `running` defer so it runs FIRST
+    // (defers are LIFO): writer_active must go false before running
+    // does, so a flush arriving right at shutdown is never accepted as
+    // "no writer" while a write from this loop could still be in flight.
+    self.ring.writer_active.store(true, .release);
+    defer self.ring.writer_active.store(false, .release);
     defer stream.deinit();
     defer stream.stop();
     while (!self.stop_flag.load(.acquire)) {
@@ -206,6 +221,29 @@ test "spec's device_id and pid reach the backend" {
     try std.testing.expectEqualStrings("{abc}", spec.device_id);
     try std.testing.expectEqual(@as(u32, 4242), spec.pid);
     try std.testing.expectEqual(Backend.Kind.process, spec.kind);
+}
+
+test "capture marks the ring's writer active for the life of the loop, and stop drains a pending flush" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var fake = FakeBackend.init(&.{&[_]f32{ 1, 1 }});
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "", .rate = 48_000, .channels = 2 });
+    try std.testing.expect(!ring.writer_active.load(.acquire));
+    try cap.start();
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.frames_written.load(.acquire) == 1;
+        }
+    }.f);
+    try std.testing.expect(ring.writer_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), ring.total_written.load(.acquire));
+    // A flush that arrives while the loop is winding down must not be lost:
+    // stop() drains it after the join, when the writer is inactive.
+    ring.flush_pending.store(true, .release);
+    cap.stop();
+    try std.testing.expect(!ring.writer_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
 }
 
 test "start twice is AlreadyRunning" {
