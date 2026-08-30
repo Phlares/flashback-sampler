@@ -32,6 +32,8 @@ class NativeScrubPlayer:
 
     # -- transport ------------------------------------------------------
     def bind(self, audio: np.ndarray, sample_rate: int) -> None:
+        if not self._h:
+            return
         if audio.ndim == 1:
             audio = audio[:, np.newaxis]
         audio = np.ascontiguousarray(audio, dtype=np.float32)

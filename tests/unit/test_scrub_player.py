@@ -27,6 +27,7 @@ class _FakePlaybackLib:
                 return 0xF00D
             if name == "fb_playback_bind":
                 _h, ptr, n, rate, ch = a
+                assert _h is not None, "fb_playback_bind called with a closed/None handle"
                 arr = np.ctypeslib.as_array(ptr, shape=(n * ch,)).copy() if n else np.zeros(0, np.float32)
                 self.bound = (arr, n, rate, ch)
                 if self.bind_status == 0:
@@ -164,3 +165,10 @@ def test_close_destroys_once_and_is_inert_after(lib):
     p.pause()  # inert, no call
     assert not _calls(lib, "fb_playback_pause")
     assert p.is_playing is False and p.cursor_samples == 0
+
+
+def test_bind_after_close_is_inert(lib):
+    p = NativeScrubPlayer()
+    p.close()
+    p.bind(np.zeros((4, 1), dtype=np.float32), 48_000)  # neither crashes nor reaches the fake
+    assert not _calls(lib, "fb_playback_bind")
