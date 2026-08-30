@@ -28,7 +28,7 @@ import numpy as np
 
 from flashback_sampler.core.buffer import RingDerivedOps, _peak_bins_impl
 
-_OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG = range(5)
+_OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG, _OUT_OF_MEMORY = range(6)
 # Public: mirrors flashback_core.h's FbSubtype and checkout.py's
 # CheckoutSubtype strings. checkout.py's save() routes a WAV write here
 # only when the requested subtype is a key of this dict AND the native
@@ -82,6 +82,8 @@ def load() -> C.CDLL | None:
 KIND_INTS = {"loopback": 0, "input": 1, "process": 2}
 _KIND_NAMES = {v: k for k, v in KIND_INTS.items()}
 
+MAX_MIXER_SOURCES = 8  # Mixer.max_sources
+
 
 class FbDevice(C.Structure):
     _fields_ = [("kind", C.c_uint8), ("is_default", C.c_uint8), ("mix_rate", C.c_uint32),
@@ -108,7 +110,7 @@ def _declare(lib: C.CDLL) -> None:
     an error -- ctypes trusts these declarations completely."""
     f32p = C.POINTER(C.c_float)
 
-    lib.fb_ring_create.argtypes = [C.c_uint32, C.c_uint16, C.c_double]
+    lib.fb_ring_create.argtypes = [C.c_uint32, C.c_uint16, C.c_double, C.POINTER(C.c_int)]
     lib.fb_ring_create.restype = C.c_void_p
 
     lib.fb_ring_destroy.argtypes = [C.c_void_p]
@@ -166,6 +168,19 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_capture_last_error.argtypes = [C.c_void_p]
     lib.fb_capture_last_error.restype = C.c_char_p
 
+    lib.fb_mixer_create.argtypes = [C.c_void_p, C.POINTER(FbCaptureSpec), C.c_size_t]
+    lib.fb_mixer_create.restype = C.c_void_p
+    lib.fb_mixer_start.argtypes = [C.c_void_p]
+    lib.fb_mixer_start.restype = C.c_int
+    lib.fb_mixer_stop.argtypes = [C.c_void_p]
+    lib.fb_mixer_stop.restype = None
+    lib.fb_mixer_destroy.argtypes = [C.c_void_p]
+    lib.fb_mixer_destroy.restype = None
+    lib.fb_mixer_stats.argtypes = [C.c_void_p, C.POINTER(FbCaptureStats)]
+    lib.fb_mixer_stats.restype = None
+    lib.fb_mixer_last_error.argtypes = [C.c_void_p]
+    lib.fb_mixer_last_error.restype = C.c_char_p
+
     lib.fb_processes_list.argtypes = [C.POINTER(FbProcess), C.c_size_t]
     lib.fb_processes_list.restype = C.c_size_t
 
@@ -221,9 +236,20 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         self.sample_rate = sample_rate
         self.channels = channels
         self.duration = duration_seconds
-        self._h = lib.fb_ring_create(sample_rate, channels, duration_seconds)
+        status = C.c_int(_OK)
+        self._h = lib.fb_ring_create(sample_rate, channels, duration_seconds, C.byref(status))
         if not self._h:
-            raise MemoryError("fb_ring_create failed")
+            if status.value == _OUT_OF_MEMORY:
+                # The readable window's payload; the guard band and the
+                # summary ring add a little on top (see Ring.init).
+                requested = int(duration_seconds * sample_rate) * channels * 4
+                raise MemoryError(
+                    f"fb_ring_create: could not reserve {requested:,} bytes "
+                    f"for a {duration_seconds:g} s ring at {sample_rate} Hz x {channels} ch"
+                )
+            raise ValueError(
+                f"fb_ring_create rejected rate={sample_rate} channels={channels} seconds={duration_seconds}"
+            )
         # capacity == the READABLE window -- every clamp of "how much audio
         # can I get back" (buffered_seconds, is_full, status, get_latest /
         # get_segment availability) uses THIS.
@@ -341,9 +367,8 @@ class NativeAudioCircularBuffer(RingDerivedOps):
     def copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
         """Public counterpart to AudioCircularBuffer.copy_abs_range — the
         shared surface checkout.py (create_from_abs_range, the drag-select
-        checkout path) and mixed_capture.py (the mixer thread, polling a
-        live sub-source ring every 10ms) read an absolute span through
-        instead of implementation-private internals.
+        checkout path) reads an absolute span through instead of
+        implementation-private internals.
 
         Retries up to 3 times on the SAME fixed (abs_start, abs_end) --
         unlike get_latest/get_segment, which re-resolve abs_start from a

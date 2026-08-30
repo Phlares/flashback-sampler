@@ -429,11 +429,10 @@ class AudioCircularBuffer(RingDerivedOps):
         Copy samples from the ring by absolute sample index (total_written
         space), WITHOUT holding the writer lock during the memcpy.
 
-        Also the shared surface checkout.py (create_from_abs_range) and
-        mixed_capture.py (the mixer thread) read an absolute span through,
-        instead of reaching into self._lock — which NativeAudioCircularBuffer
-        (native.py) does not have; that class provides its own
-        copy_abs_range with the same signature.
+        Also the shared surface checkout.py (create_from_abs_range) reads
+        an absolute span through, instead of reaching into self._lock —
+        which NativeAudioCircularBuffer (native.py) does not have; that
+        class provides its own copy_abs_range with the same signature.
 
         Algorithm:
           1. Under lock, snapshot total_written, compute ring indices,

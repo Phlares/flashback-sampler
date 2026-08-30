@@ -67,9 +67,9 @@ class CaptureSlot:
     capture_source: Optional[CaptureSource] = None
     # Per-slot capture routing. `capture_specs` is the canonical list:
     # empty means follow AppState's global spec; one entry means a
-    # standard single-source route; two-or-more entries means the slot
-    # should be built as a MixedCaptureSource so all listed inputs mix
-    # into the same buffer (RAM-efficient multi-source capture).
+    # standard single-source route; two-or-more entries are passed to
+    # one Zig mixer (`NativeMixedSource`) that sums them into the same
+    # buffer (RAM-efficient multi-source capture).
     capture_specs: list = field(default_factory=list)
     anchor_offset_s: float = 0.0
     duration_preset_idx: int = 4  # default 3:00 on the 8-preset cluster

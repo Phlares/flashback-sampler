@@ -9,6 +9,7 @@ const Summary = @import("Summary.zig");
 const wav = @import("wav.zig");
 const Capture = @import("Capture.zig");
 const Backend = @import("Backend.zig");
+const Mixer = @import("Mixer.zig");
 const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
@@ -25,6 +26,7 @@ pub const FbStatus = enum(c_int) {
     out_of_range = 2,
     io_error = 3,
     invalid_arg = 4,
+    out_of_memory = 5,
 };
 
 // Serializes fb_wav_write. writeFile uses
@@ -58,7 +60,7 @@ const wav_write_io = std.Io.Threaded.global_single_threaded.io();
 var wav_write_mutex: std.Io.Mutex = .init;
 
 test "abi round-trip: create, write, read, destroy" {
-    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     const in = [_]f32{ 0.1, -0.1, 0.2, -0.2 };
     fb_ring_write(ring, &in, 2);
@@ -73,21 +75,21 @@ test "abi round-trip: create, write, read, destroy" {
 }
 
 test "fb_ring_storage_frames is capacity plus the guard band, distinct from fb_ring_capacity" {
-    const ring = fb_ring_create(8, 1, 1.0) orelse return error.CreateFailed; // capacity == 8
+    const ring = fb_ring_create(8, 1, 1.0, null) orelse return error.CreateFailed; // capacity == 8
     defer fb_ring_destroy(ring);
     try std.testing.expectEqual(@as(u64, 8), fb_ring_capacity(ring));
     try std.testing.expectEqual(@as(u64, 8) + Ring.max_write_frames, fb_ring_storage_frames(ring));
 }
 
 test "fb_ring_summary_bins rejects n_bins == 0" {
-    const ring = fb_ring_create(48_000, 1, 1.0) orelse return error.CreateFailed;
+    const ring = fb_ring_create(48_000, 1, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     var out: [1]f32 = undefined;
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_ring_summary_bins(ring, 0, 0, 0, &out));
 }
 
 test "fb_ring_summary_bins rejects n_bins > Summary.max_bins" {
-    const ring = fb_ring_create(48_000, 1, 1.0) orelse return error.CreateFailed;
+    const ring = fb_ring_create(48_000, 1, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     var out: [Summary.max_bins + 1]f32 = undefined;
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_ring_summary_bins(ring, Summary.max_bins + 1, 0, 0, &out));
@@ -96,7 +98,7 @@ test "fb_ring_summary_bins rejects n_bins > Summary.max_bins" {
 test "fb_ring_summary_bins accepts n_bins == Summary.max_bins, the inclusive boundary" {
     // Pins the guard's `>` (not `>=`) — a mutation to `>=` would reject
     // this exact value and this test would catch it going red.
-    const ring = fb_ring_create(48_000, 1, 1.0) orelse return error.CreateFailed;
+    const ring = fb_ring_create(48_000, 1, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     var out: [Summary.max_bins]f32 = undefined;
     try std.testing.expectEqual(FbStatus.ok, fb_ring_summary_bins(ring, Summary.max_bins, 0, 0, &out));
@@ -122,19 +124,19 @@ test "fb_wav_write rejects invalid rate/channels/subtype without touching disk" 
 // deletable or half-deletable guard shows up immediately as a specific
 // red test, not a green suite that never exercised the boundary at all.
 test "fb_ring_create rejects rate == 0" {
-    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(0, 2, 1.0));
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(0, 2, 1.0, null));
 }
 
 test "fb_ring_create rejects channels == 0" {
-    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 0, 1.0));
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 0, 1.0, null));
 }
 
 test "fb_ring_create rejects channels == 3" {
-    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 3, 1.0));
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 3, 1.0, null));
 }
 
 test "fb_ring_create rejects seconds <= 0" {
-    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, 0.0));
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, 0.0, null));
 }
 
 // NaN and +Infinity both fail `seconds <= 0` (IEEE 754: any comparison
@@ -150,11 +152,11 @@ test "fb_ring_create rejects seconds <= 0" {
 // complaint, so this is directly reachable, not a theoretical input;
 // these two tests are what pin the guard against it.
 test "fb_ring_create rejects NaN seconds (does not satisfy seconds <= 0)" {
-    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.nan(f64)));
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.nan(f64), null));
 }
 
 test "fb_ring_create rejects +Infinity seconds (does not satisfy seconds <= 0)" {
-    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.inf(f64)));
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.inf(f64), null));
 }
 
 test "fb_wav_write round-trips a real file" {
@@ -170,22 +172,41 @@ test "fb_wav_write round-trips a real file" {
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&in), got[wav.header_len..]);
 }
 
-export fn fb_ring_create(rate: u32, channels: u16, seconds: f64) ?*Ring {
-    // The five-clause guard that used to live here now lives in
-    // Ring.init itself (issue #21) — every host gets it, not just this
-    // ABI. This is a pass-through: the `catch` below already turns
-    // Ring.init's error.InvalidArgument into null, so the tests above
-    // (each pinning one clause) still pass, now through the inner guard.
-    const ring = allocator.create(Ring) catch return null;
-    ring.* = Ring.init(allocator, .{
+/// The export's body, with the allocator as a parameter so a test can
+/// hand in std.testing.failing_allocator. `status` is nullable: hosts
+/// that only need the pointer pass NULL.
+fn ringCreate(alloc: std.mem.Allocator, rate: u32, channels: u16, seconds: f64, status: ?*FbStatus) ?*Ring {
+    const ring = alloc.create(Ring) catch {
+        if (status) |s| s.* = .out_of_memory;
+        return null;
+    };
+    ring.* = Ring.init(alloc, .{
         .sample_rate = rate,
         .channels = channels,
         .seconds = seconds,
-    }) catch {
-        allocator.destroy(ring);
+    }) catch |e| {
+        alloc.destroy(ring);
+        // Ring.init's inferred error set is exactly these two: its own
+        // InvalidArgument guard, and OutOfMemory from its allocations and
+        // Summary.init's. A third member is a compile error here — on
+        // purpose, so a new failure mode gets a status, not a guess.
+        if (status) |s| s.* = switch (e) {
+            error.InvalidArgument => .invalid_arg,
+            error.OutOfMemory => .out_of_memory,
+        };
         return null;
     };
+    if (status) |s| s.* = .ok;
     return ring;
+}
+
+// The five-clause config guard lives in Ring.init (issue #21); this is
+// a pass-through that also reports WHY a create failed (issue #41):
+// invalid_arg for a rejected config, out_of_memory when the reservation
+// cannot be made. A 345 MB ring that fails to allocate used to look
+// exactly like channels == 3.
+export fn fb_ring_create(rate: u32, channels: u16, seconds: f64, status: ?*FbStatus) ?*Ring {
+    return ringCreate(allocator, rate, channels, seconds, status);
 }
 
 export fn fb_ring_destroy(ring: *Ring) void {
@@ -280,7 +301,7 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
 pub const FbCaptureSpec = extern struct { kind: u8, pid: u32, rate: u32, channels: u16, device_id: [*:0]const u8 };
 
 test "fb_capture_create rejects an unknown kind and a bad channel count" {
-    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 9, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }));
     try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 3, .device_id = "" }));
@@ -288,7 +309,7 @@ test "fb_capture_create rejects an unknown kind and a bad channel count" {
 
 test "fb_capture stats/last_error on a never-started capture are zero/empty (Windows only)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const ring = fb_ring_create(48_000, 2, 1.0) orelse return error.CreateFailed;
+    const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     const cap = fb_capture_create(ring, &.{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }) orelse return error.CreateFailed;
     defer fb_capture_destroy(cap);
@@ -342,17 +363,23 @@ export fn fb_processes_list(out: [*]FbProcess, max: usize) usize {
     return 0;
 }
 
+/// One validation for both create paths. null = rejected spec.
+fn specFromAbi(s: FbCaptureSpec) ?Backend.Spec {
+    if (s.kind > 2 or s.channels == 0 or s.channels > 2 or s.rate == 0) return null;
+    return .{
+        .kind = @enumFromInt(s.kind),
+        .device_id = std.mem.span(s.device_id),
+        .pid = s.pid,
+        .rate = s.rate,
+        .channels = s.channels,
+    };
+}
+
 export fn fb_capture_create(ring: *Ring, spec: *const FbCaptureSpec) ?*Capture {
-    if (spec.kind > 2 or spec.channels == 0 or spec.channels > 2 or spec.rate == 0) return null;
+    const zspec = specFromAbi(spec.*) orelse return null;
     const be = nativeBackend() orelse return null;
     const cap = allocator.create(Capture) catch return null;
-    cap.* = Capture.init(ring, be, .{
-        .kind = @enumFromInt(spec.kind),
-        .device_id = std.mem.span(spec.device_id),
-        .pid = spec.pid,
-        .rate = spec.rate,
-        .channels = spec.channels,
-    });
+    cap.* = Capture.init(ring, be, zspec);
     return cap;
 }
 
@@ -379,4 +406,105 @@ export fn fb_capture_stats(cap: *const Capture, out: *Capture.Stats) void {
 
 export fn fb_capture_last_error(cap: *const Capture) [*:0]const u8 {
     return cap.lastError().ptr;
+}
+
+export fn fb_mixer_create(target: *Ring, specs: [*]const FbCaptureSpec, n: usize) ?*Mixer {
+    if (n == 0 or n > Mixer.max_sources) return null;
+    // Converted on the stack: Mixer.init copies what it keeps (Capture
+    // owns its device_id bytes), so these slices need not outlive the call.
+    var zspecs: [Mixer.max_sources]Backend.Spec = undefined;
+    for (specs[0..n], 0..) |s, i| zspecs[i] = specFromAbi(s) orelse return null;
+    const be = nativeBackend() orelse return null;
+    // Allocated BEFORE init and never moved: Mixer is self-referential
+    // (see Mixer.zig's header).
+    const m = allocator.create(Mixer) catch return null;
+    m.init(allocator, be, target, zspecs[0..n]) catch {
+        allocator.destroy(m);
+        return null;
+    };
+    return m;
+}
+
+export fn fb_mixer_start(m: *Mixer) FbStatus {
+    m.start() catch |e| return switch (e) {
+        error.AlreadyRunning => .invalid_arg,
+        else => .io_error,
+    };
+    return .ok;
+}
+
+export fn fb_mixer_stop(m: *Mixer) void {
+    m.stop();
+}
+
+export fn fb_mixer_destroy(m: *Mixer) void {
+    m.deinit(); // stops first
+    allocator.destroy(m);
+}
+
+export fn fb_mixer_stats(m: *const Mixer, out: *Capture.Stats) void {
+    out.* = m.stats();
+}
+
+export fn fb_mixer_last_error(m: *const Mixer) [*:0]const u8 {
+    return m.lastError().ptr;
+}
+
+test "fb_ring_create: status is ok on success and invalid_arg on a rejected config" {
+    var st: FbStatus = .io_error; // any value the call must overwrite
+    const ring = fb_ring_create(8, 1, 1.0, &st) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    try std.testing.expectEqual(FbStatus.ok, st);
+    st = .io_error;
+    try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(8, 3, 1.0, &st));
+    try std.testing.expectEqual(FbStatus.invalid_arg, st);
+}
+
+test "fb_ring_create: status is out_of_memory when the allocator fails (issue #41)" {
+    // std.testing.failing_allocator fails its FIRST allocation (fail_index = 0).
+    var st: FbStatus = .ok;
+    try std.testing.expectEqual(@as(?*Ring, null), ringCreate(std.testing.failing_allocator, 48_000, 2, 1.0, &st));
+    try std.testing.expectEqual(FbStatus.out_of_memory, st);
+}
+
+test "fb_ring_create: out_of_memory when Ring.init's own allocation fails (the #41 path)" {
+    // fail_index = 1: the first allocation (alloc.create(Ring)) succeeds, the
+    // second — Ring.init's storage — fails, so this pins the INNER switch arm.
+    // Backed by std.testing.allocator, so a leak on the unwind path fails too.
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var st: FbStatus = .ok;
+    try std.testing.expectEqual(@as(?*Ring, null), ringCreate(fa.allocator(), 48_000, 2, 1.0, &st));
+    try std.testing.expectEqual(FbStatus.out_of_memory, st);
+}
+
+test "fb_ring_create: a null status pointer is accepted" {
+    const ring = fb_ring_create(8, 1, 1.0, null) orelse return error.CreateFailed;
+    fb_ring_destroy(ring);
+}
+
+test "fb_mixer_create rejects n == 0, n > max_sources, and a bad spec" {
+    const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    const good = FbCaptureSpec{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" };
+    const bad = FbCaptureSpec{ .kind = 9, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" };
+    const nine = [_]FbCaptureSpec{good} ** (Mixer.max_sources + 1);
+    try std.testing.expectEqual(@as(?*Mixer, null), fb_mixer_create(ring, &nine, 0));
+    try std.testing.expectEqual(@as(?*Mixer, null), fb_mixer_create(ring, &nine, nine.len));
+    const one_bad = [_]FbCaptureSpec{ good, bad };
+    try std.testing.expectEqual(@as(?*Mixer, null), fb_mixer_create(ring, &one_bad, one_bad.len));
+}
+
+test "fb_mixer stats/last_error on a never-started mixer are zero/empty (Windows only)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    const specs = [_]FbCaptureSpec{ .{ .kind = 0, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }, .{ .kind = 1, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" } };
+    const m = fb_mixer_create(ring, &specs, specs.len) orelse return error.CreateFailed;
+    defer fb_mixer_destroy(m);
+    var st: Capture.Stats = undefined;
+    fb_mixer_stats(m, &st);
+    try std.testing.expectEqual(@as(u8, 0), st.running);
+    try std.testing.expectEqual(@as(u64, 0), st.frames_written);
+    try std.testing.expectEqual(@as(u32, 0), st.xruns);
+    try std.testing.expectEqualStrings("", std.mem.span(fb_mixer_last_error(m)));
 }

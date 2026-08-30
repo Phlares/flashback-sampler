@@ -18,6 +18,7 @@ from flashback_sampler.app.audio_devices import (
     CaptureDevice,
     OutputDevice,
     build_capture_source,
+    build_mixed_capture_source,
     default_capture_device,
     default_output_device,
 )
@@ -317,7 +318,7 @@ class AppState:
         Per-slot device routing: if `slot.capture_specs` has any
         entries they take precedence — exactly one entry becomes a
         standard single-source route, two or more become a muxed
-        MixedCaptureSource that sums all inputs into the same buffer.
+        NativeMixedSource that sums all inputs into the same buffer.
         An empty list falls back to AppState's global capture_spec.
         """
         specs = list(slot.capture_specs) if slot.capture_specs else []
@@ -337,24 +338,11 @@ class AppState:
                 sample_rate=slot.sample_rate,
                 channels=slot.channels,
             )
-
-        # Multi-input mux: every spec gets its own staging ring + sub-
-        # source; MixedCaptureSource mixes them into slot.buffer.
-        from flashback_sampler.core.mixed_capture import MixedCaptureSource
-
-        def make_factory(device):
-            def _factory(stage_buf):
-                return build_capture_source(
-                    device=device,
-                    buffer=stage_buf,
-                    sample_rate=slot.sample_rate,
-                    channels=slot.channels,
-                )
-            return _factory
-
-        return MixedCaptureSource(
-            target_buffer=slot.buffer,
-            sub_factories=[make_factory(d) for d in specs],
+        # Two or more: one Zig mixer owns a capture and a staging ring per
+        # device and sums them into slot.buffer. Python passes the devices.
+        return build_mixed_capture_source(
+            devices=specs,
+            buffer=slot.buffer,
             sample_rate=slot.sample_rate,
             channels=slot.channels,
         )

@@ -52,8 +52,7 @@ flashback_sampler/
     checkout.py          # Checkout + CheckoutManager (+ WAV/FLAC save)
     scrub_player.py      # ScrubPlayer — callback-driven preview engine
     native.py            # ctypes bindings for the Zig core
-    native_capture.py    # NativeCaptureSource (Zig/WASAPI — loopback + mic / line-in)
-    mixed_capture.py     # sum multiple inputs into one slot
+    native_capture.py    # NativeCaptureSource (Zig/WASAPI — loopback + mic / line-in) + NativeMixedSource (Zig mixer handle)
     capture_slot.py      # one buffer + its source(s) + checkout manager
     quality_presets.py   # sample-rate / channel presets
   app/                   # PySide6 only — isolated from core
