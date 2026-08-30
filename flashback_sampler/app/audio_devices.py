@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from flashback_sampler.core import native
-from flashback_sampler.core.native_capture import NativeCaptureSource
+from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.platform.capabilities import loopback_supported
 
@@ -178,22 +178,16 @@ def default_output_device() -> OutputDevice | None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channels: int):
-    """
-    Instantiate the right capture-source class for a CaptureDevice.
-    `buffer` is an AudioCircularBuffer that the source will write into.
-    """
+def _spec_kwargs(device: CaptureDevice) -> dict:
+    """CaptureDevice -> the keyword fields a native spec carries. Shared
+    by the single and the mixed builder so a kind is mapped in one place."""
     if device.kind in ("loopback", "input"):
-        return NativeCaptureSource(
-            buffer=buffer,
-            kind=device.kind,
+        return {
+            "kind": device.kind,
             # follow_default → "" → the Zig side follows the live OS
             # default endpoint at start; otherwise pin to device.id.
-            device_id="" if device.follow_default else device.id,
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-
+            "device_id": "" if device.follow_default else device.id,
+        }
     if device.kind == "process_loopback":
         try:
             pid = int(device.id)
@@ -202,15 +196,26 @@ def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channe
                 f"process_loopback device id must be an integer PID; "
                 f"got {device.id!r}"
             ) from e
-        return NativeCaptureSource(
-            buffer=buffer,
-            kind="process",
-            pid=native.resolve_root_pid(pid),
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-
+        return {"kind": "process", "pid": native.resolve_root_pid(pid)}
     raise ValueError(f"unknown CaptureDevice.kind: {device.kind!r}")
+
+
+def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channels: int):
+    """Instantiate the capture source for ONE CaptureDevice.
+    `buffer` is the NativeAudioCircularBuffer the source writes into."""
+    return NativeCaptureSource(buffer=buffer, sample_rate=sample_rate, channels=channels, **_spec_kwargs(device))
+
+
+def build_mixed_capture_source(devices, buffer, sample_rate: int, channels: int):
+    """Instantiate the mixed source for two or more CaptureDevices: every
+    device becomes a spec of the same Zig mixer, which sums them into
+    `buffer`. Nothing per-source is created on the Python side."""
+    return NativeMixedSource(
+        buffer=buffer,
+        specs=[_spec_kwargs(d) for d in devices],
+        sample_rate=sample_rate,
+        channels=channels,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────

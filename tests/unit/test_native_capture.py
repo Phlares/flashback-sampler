@@ -5,7 +5,7 @@ import ctypes as C
 import pytest
 
 from flashback_sampler.core import native
-from flashback_sampler.core.native_capture import NativeCaptureSource
+from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource
 
 
 class _FakeLib:
@@ -18,23 +18,26 @@ class _FakeLib:
         self.err = b""
         self.devices = []
         self.ring_status = 0
+        self.mixer_create_fails = False
 
     def __getattr__(self, name):  # argtypes/restype assignment is a no-op
         def _fn(*a):
             self.calls.append((name, a))
             if name == "fb_capture_create":
                 return 0xC0FFEE
-            if name == "fb_capture_start":
+            if name == "fb_mixer_create":
+                return 0 if self.mixer_create_fails else 0xA1CE
+            if name in ("fb_capture_start", "fb_mixer_start"):
                 self.started = True
                 self.stats = (1,) + self.stats[1:]
                 return 0
-            if name == "fb_capture_stop":
+            if name in ("fb_capture_stop", "fb_mixer_stop"):
                 self.started = False
                 self.stats = (0,) + self.stats[1:]
-            if name == "fb_capture_stats":
+            if name in ("fb_capture_stats", "fb_mixer_stats"):
                 st = a[1]._obj if hasattr(a[1], "_obj") else a[1]
                 st.running, st.frames_written, st.xruns, st.mix_rate = self.stats
-            if name == "fb_capture_last_error":
+            if name in ("fb_capture_last_error", "fb_mixer_last_error"):
                 return self.err
             if name == "fb_devices_list":
                 arr, mx = a
@@ -184,3 +187,62 @@ def test_ring_create_passes_a_status_out_param(lib):
         native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     name, args = next(c for c in lib.calls if c[0] == "fb_ring_create")
     assert len(args) == 4 and hasattr(args[3], "_obj")
+
+
+def test_mixed_conforms_to_capture_source(lib):
+    from flashback_sampler.core.capture_source import CaptureSource
+    src = NativeMixedSource(_FakeBuffer(), specs=[{"kind": "loopback"}, {"kind": "input", "device_id": "{mic}"}])
+    assert isinstance(src, CaptureSource)
+    assert src.sample_rate == 48_000 and src.channels == 2
+
+
+def test_mixed_rejects_non_native_buffer(lib):
+    with pytest.raises(TypeError):
+        NativeMixedSource(object(), specs=[{"kind": "loopback"}])
+
+
+def test_mixed_rejects_unknown_kind(lib):
+    with pytest.raises(ValueError):
+        NativeMixedSource(_FakeBuffer(), specs=[{"kind": "telepathy"}])
+
+
+def test_mixed_create_passes_every_spec(lib):
+    NativeMixedSource(
+        _FakeBuffer(),
+        specs=[{"kind": "loopback", "device_id": "{spk}"}, {"kind": "process", "pid": 77}],
+        sample_rate=44_100, channels=1,
+    )
+    name, args = next(c for c in lib.calls if c[0] == "fb_mixer_create")
+    ring, arr, n = args
+    assert ring == _FakeBuffer._h and n == 2
+    assert (arr[0].kind, arr[0].pid, arr[0].rate, arr[0].channels, arr[0].device_id) == (0, 0, 44_100, 1, b"{spk}")
+    assert (arr[1].kind, arr[1].pid, arr[1].rate, arr[1].channels, arr[1].device_id) == (2, 77, 44_100, 1, b"")
+
+
+def test_mixed_create_failure_raises(lib):
+    lib.mixer_create_fails = True
+    with pytest.raises(RuntimeError):
+        NativeMixedSource(_FakeBuffer(), specs=[{"kind": "loopback"}])
+
+
+def test_mixed_start_stop_stats_and_close_are_inert_after_close(lib):
+    src = NativeMixedSource(_FakeBuffer(), specs=[{"kind": "loopback"}, {"kind": "input"}])
+    assert not src.is_running()
+    src.start(); src.start()
+    assert src.is_running()
+    assert sum(1 for c in lib.calls if c[0] == "fb_mixer_start") == 1
+    lib.stats = (1, 999, 4, 44_100)
+    assert src.frames_written() == 999 and src.xrun_count() == 4 and src.mix_rate() == 44_100
+    lib.err = b"source start failed: AlreadyRunning"
+    assert src.last_error() == "source start failed: AlreadyRunning"
+    src.stop(); src.stop()
+    assert sum(1 for c in lib.calls if c[0] == "fb_mixer_stop") == 1
+    src.close(); src.close()
+    assert sum(1 for c in lib.calls if c[0] == "fb_mixer_destroy") == 1
+    # Inert after close: no ABI call reaches a NULL handle.
+    before = len(lib.calls)
+    assert src.is_running() is False and src.xrun_count() == 0 and src.last_error() is None
+    src.stop()
+    with pytest.raises(RuntimeError):
+        src.start()
+    assert len(lib.calls) == before

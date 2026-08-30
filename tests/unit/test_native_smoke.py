@@ -88,12 +88,11 @@ def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
     tear the same way get_latest/get_segment do (see the retry test above
     for why a live writer/reader race can't deterministically prove this --
     monkeypatching fb_ring_read forces two synthetic failures before
-    success). Without a retry, checkout.py's create_from_abs_range (drag-
-    select) and MixedCaptureSource's mixer thread (mixed_capture.py,
-    polling a live sub-source ring every 10ms) both see a torn read as a
-    hard failure -- an empty array / RuntimeError -- on a request that
-    would have succeeded a moment later, a real behavior gap against
-    AudioCircularBuffer.copy_abs_range's 3-attempt retry."""
+    success). Without a retry, checkout.py's create_from_abs_range
+    (drag-select) sees a torn read as a hard failure -- an empty array /
+    RuntimeError -- on a request that would have succeeded a moment
+    later, a real behavior gap against AudioCircularBuffer.copy_abs_range's
+    3-attempt retry."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(np.arange(500, dtype=np.float32)[:, None])
 

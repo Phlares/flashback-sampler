@@ -367,9 +367,8 @@ class NativeAudioCircularBuffer(RingDerivedOps):
     def copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
         """Public counterpart to AudioCircularBuffer.copy_abs_range — the
         shared surface checkout.py (create_from_abs_range, the drag-select
-        checkout path) and mixed_capture.py (the mixer thread, polling a
-        live sub-source ring every 10ms) read an absolute span through
-        instead of implementation-private internals.
+        checkout path) reads an absolute span through instead of
+        implementation-private internals.
 
         Retries up to 3 times on the SAME fixed (abs_start, abs_end) --
         unlike get_latest/get_segment, which re-resolve abs_start from a
