@@ -12,6 +12,11 @@ pub const Stats = extern struct { running: u8, frames_written: u64, xruns: u32, 
 pub const max_device_id = 256;
 pub const max_error = 256;
 
+// The idle loop's sleep. Zig 0.16 has no std.Thread.sleep; blocking waits
+// live under std.Io. Same single-threaded Io singleton Mixer.zig and
+// abi.zig hold; its `sleep` is a real OS wait, not a spin.
+const io = std.Io.Threaded.global_single_threaded.io();
+
 ring: *Ring,
 backend: Backend.Backend,
 kind: Backend.Kind,
@@ -120,11 +125,34 @@ pub fn lastError(self: *const Capture) [:0]const u8 {
 
 fn setError(self: *Capture, comptime fmt: []const u8, args: anytype) void {
     // bufPrintZ into a fixed buffer: no allocation on the audio thread.
-    const s = std.fmt.bufPrintZ(self.err_buf[0..], fmt, args) catch self.err_buf[0 .. max_error - 1 :0];
+    // On overflow 0.16's bufPrintZ leaves err_buf FULL — no sentinel byte
+    // survives — so the fallback must write the terminator itself before
+    // taking a [:0] slice, or the slice aborts on the sentinel check.
+    const s = std.fmt.bufPrintZ(self.err_buf[0..], fmt, args) catch blk: {
+        self.err_buf[max_error - 1] = 0;
+        break :blk self.err_buf[0 .. max_error - 1 :0];
+    };
     self.err_len.store(s.len, .release);
 }
 
 fn run(self: *Capture) void {
+    self.runStream();
+    self.idleUntilStopped();
+}
+
+/// A worker that lost its stream (or finished) still OWNS the ring's
+/// writer registration until the control thread's stop() clears it, so
+/// it must keep draining deferred flushes — otherwise writer_active
+/// would promise a drainer that no longer exists. A normal stop leaves
+/// this loop at once: stop_flag is already true when we get here.
+fn idleUntilStopped(self: *Capture) void {
+    while (!self.stop_flag.load(.acquire)) {
+        self.ring.drainPendingFlush();
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+}
+
+fn runStream(self: *Capture) void {
     const stream = self.backend.open(self.currentSpec()) catch |e| {
         self.setError("open failed: {s}", .{@errorName(e)});
         return;
@@ -356,4 +384,46 @@ test "restart after a recorded error: lastError is empty and does not trap on th
     // this whole test is about, independent of lastError()'s return shape.
     try std.testing.expectEqualStrings("", cap.lastError());
     try std.testing.expectEqual(@as(u8, 0), cap.err_buf[0]);
+}
+
+test "a worker that lost its stream keeps draining flushes until stop()" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    // Written from the control thread BEFORE start(), while no writer is
+    // registered: the flush below has something to reset, and after the
+    // failed open there is no writer left that could produce a frame.
+    ring.write(&[_]f32{ 9, 9 });
+    var fake = FakeBackend.init(&.{});
+    fake.open_error = error.DeviceNotFound;
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "gone", .rate = 48_000, .channels = 2 });
+    try cap.start();
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.err_len.load(.acquire) > 0;
+        }
+    }.f);
+    // Only stop() clears writer_active, so this flush is DEFERRED to the
+    // worker whose stream never opened. That worker still owns the
+    // registration, so it must still drain — otherwise "Flush buffer" is
+    // a silent no-op for the whole window between the failure and stop().
+    ring.flush();
+    var spins: u32 = 0;
+    while (ring.flush_pending.load(.acquire) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
+    cap.stop();
+}
+
+test "setError truncates a message longer than max_error instead of trapping on the sentinel" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var fake = FakeBackend.init(&.{});
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "", .rate = 48_000, .channels = 2 });
+    // 300 bytes into a 256-byte buffer: bufPrintZ fills err_buf completely
+    // before reporting NoSpaceLeft, so the overflow fallback must restore
+    // the sentinel itself — slicing a full buffer as [:0] aborts.
+    cap.setError("{s}", .{"x" ** 300});
+    const e = cap.lastError();
+    try std.testing.expect(e.len <= max_error - 1);
+    try std.testing.expectEqual(@as(u8, 0), cap.err_buf[max_error - 1]);
 }
