@@ -868,3 +868,92 @@ def test_add_source_applies_rate_probe(qapp, state, monkeypatch):
         assert result.sample_rate == 48000  # notice shown via stubbed QMessageBox
     finally:
         win.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Clip playback through NativeScrubPlayer with the native library mocked
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _fake_player(monkeypatch, state):
+    """Swap state.scrub_player for a NativeScrubPlayer bound to a fake lib.
+    The ring buffers stay on the real library; only the player is faked."""
+    from tests.unit.test_scrub_player import _FakePlaybackLib
+    from flashback_sampler.core import native
+    from flashback_sampler.core.scrub_player import NativeScrubPlayer
+
+    fake = _FakePlaybackLib()
+    with monkeypatch.context() as m:
+        m.setattr(native, "load", lambda: fake)
+        state.scrub_player = NativeScrubPlayer(48_000, 2)
+    return fake
+
+
+def _checkout(state):
+    import numpy as np
+    audio = np.zeros((4800, 2), dtype=np.float32)
+    audio[:, 0] = 0.5
+    state.buffer.write(audio)
+    return state.checkout_manager.create(duration_s=0.1)
+
+
+def test_play_click_with_no_checkout_does_nothing(qapp, state, monkeypatch):
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    win._on_play_clip_clicked()
+    assert not [n for n, _ in fake.calls if n in ("fb_playback_bind", "fb_playback_play")]
+
+
+def test_play_click_binds_the_checkout_at_its_rate_and_plays(qapp, state, monkeypatch):
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    co = _checkout(state)
+    co.sample_rate = 96_000  # pin a non-default rate so the bind-rate assert is real
+    win._tick()
+    fake.state = (0, 0, 0, co.audio.shape[0], 48_000)  # not playing: the click must take the play branch
+    win._on_play_clip_clicked()
+    _arr, n, rate, ch = fake.bound
+    assert (n, rate, ch) == (co.audio.shape[0], co.sample_rate, co.channels)
+    assert [n_ for n_, _ in fake.calls if n_ == "fb_playback_play"] == ["fb_playback_play"]
+    assert win._intending_playback is True
+    assert win.clip_controls[0].text() == "STOP"
+
+
+def test_play_click_while_playing_pauses_and_drops_intent(qapp, state, monkeypatch):
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    _checkout(state)
+    win._intending_playback = True
+    fake.state = (1, 1, 100, 4800, 48_000)
+    win._on_play_clip_clicked()
+    assert [n for n, _ in fake.calls if n == "fb_playback_pause"] == ["fb_playback_pause"]
+    assert win._intending_playback is False
+    assert not [n for n, _ in fake.calls if n == "fb_playback_bind"]
+
+
+def test_update_playback_state_drives_the_playhead_from_the_native_cursor(qapp, state, monkeypatch):
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    co = _checkout(state)
+    win._tick()
+    seen = []
+    monkeypatch.setattr(win.clip_panel.waveform, "set_playhead", seen.append)
+    fake.state = (1, 1, co.audio.shape[0] // 2, co.audio.shape[0], 48_000)
+    win._update_clip_playback_state()
+    assert seen[-1] == pytest.approx(0.5)
+    fake.state = (1, 0, co.audio.shape[0], co.audio.shape[0], 48_000)
+    win._update_clip_playback_state()
+    assert seen[-1] is None
+
+
+def test_loop_restarts_play_after_native_auto_stop(qapp, state, monkeypatch):
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    _checkout(state)
+    win._tick()
+    win.loop_btn.setChecked(True)
+    win._intending_playback = True
+    win._was_playing_last_tick = True
+    fake.state = (1, 0, 4800, 4800, 48_000)
+    win._update_clip_playback_state()
+    assert [n for n, _ in fake.calls if n == "fb_playback_play"] == ["fb_playback_play"]

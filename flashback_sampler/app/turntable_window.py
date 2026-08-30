@@ -916,8 +916,7 @@ class TurntableWindow(QMainWindow):
         has_trim = self._checkout_has_trim(co)
         audio = co.trimmed_audio() if has_trim else co.audio
         try:
-            player.bind(audio)
-            player.open()
+            player.bind(audio, co.sample_rate)
             player.play()
         except Exception as e:
             QMessageBox.warning(
