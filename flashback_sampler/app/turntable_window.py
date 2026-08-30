@@ -931,6 +931,11 @@ class TurntableWindow(QMainWindow):
             )
             return
         self._intending_playback = True
+        # Arm the "was playing" edge here, not on the next tick: the
+        # render thread's open failure lands before the 33 ms tick that
+        # would otherwise set this, and _update_clip_playback_state()
+        # only reads last_error() on that edge.
+        self._was_playing_last_tick = True
         self._last_playback_error_shown = None  # fresh attempt: allow re-showing a repeat error
         self._refresh_play_button()
 
@@ -1744,10 +1749,13 @@ class TurntableWindow(QMainWindow):
             # a clip is bound, and playback just drained, restart.
             # Gating on _intending_playback keeps STOP-while-LOOPing
             # from immediately re-triggering playback.
+            # The once-guard is NOT re-armed here: a LOOP restart against
+            # a failing device drains every tick, and clearing the guard
+            # would pop the same dialog every ~33 ms. Only the explicit
+            # user click above re-arms it.
             if self.loop_btn.isChecked() and self._intending_playback and just_stopped:
                 try:
                     player.play()
-                    self._last_playback_error_shown = None
                 except Exception:
                     pass
         self._was_playing_last_tick = bool(player.is_playing)

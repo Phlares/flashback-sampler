@@ -885,7 +885,11 @@ def _fake_player(monkeypatch, state):
     fake = _FakePlaybackLib()
     with monkeypatch.context() as m:
         m.setattr(native, "load", lambda: fake)
-        state.scrub_player = NativeScrubPlayer(48_000, 2)
+        player = NativeScrubPlayer(48_000, 2)
+        # The handle is lazy, so force it here: outside this context
+        # native.load() is the real library again.
+        player._handle()
+    state.scrub_player = player
     return fake
 
 
@@ -962,24 +966,50 @@ def test_loop_restarts_play_after_native_auto_stop(qapp, state, monkeypatch):
 def test_async_open_failure_surfaces_once_via_last_error(qapp, state, monkeypatch):
     """The native player opens its device lazily on the Zig render
     thread: a failure there reports through last_error() + playing
-    dropping to 0, not through an exception at play(). Two ticks that
-    both land on a "just stopped" edge with the SAME last_error must
-    only pop the warning once."""
+    dropping to 0, not through an exception at play(). The click itself
+    must arm the "was playing" edge, because the failure lands before
+    the next 33 ms tick. Two ticks on that edge with the SAME
+    last_error must only pop the warning once."""
     import flashback_sampler.app.turntable_window as tw
 
     fake = _fake_player(monkeypatch, state)
     win = TurntableWindow(state)
     _checkout(state)
     win._tick()
-    win._intending_playback = True
-    fake.state = (1, 0, 0, 4800, 48_000)
-    fake.err = b"device open failed"
     warnings = []
     monkeypatch.setattr(tw.QMessageBox, "warning", lambda *a, **k: warnings.append(a))
 
-    win._was_playing_last_tick = True
+    win._on_play_clip_clicked()
+    # The render thread failed after play() returned OK.
+    fake.state = (1, 0, 0, 4800, 48_000)
+    fake.err = b"device open failed"
     win._update_clip_playback_state()
+    assert len(warnings) == 1  # the click armed the edge; nothing hand-forced
+
     win._was_playing_last_tick = True  # force a second "just stopped" edge
     win._update_clip_playback_state()
+    assert len(warnings) == 1
+
+
+def test_loop_with_a_failing_device_warns_once_not_every_tick(qapp, state, monkeypatch):
+    """LOOP checked plus a device that keeps failing is the dialog-storm
+    case: the LOOP restart must not re-arm the once-guard. Only an
+    explicit user click may do that."""
+    import flashback_sampler.app.turntable_window as tw
+
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    _checkout(state)
+    win._tick()
+    win.loop_btn.setChecked(True)
+    warnings = []
+    monkeypatch.setattr(tw.QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+
+    fake.err = b"device open failed"
+    win._on_play_clip_clicked()
+    for _ in range(3):
+        # Each LOOP restart dies on the render thread the same way.
+        fake.state = (1, 0, 0, 4800, 48_000)
+        win._update_clip_playback_state()
 
     assert len(warnings) == 1
