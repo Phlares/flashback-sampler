@@ -135,7 +135,7 @@ pub fn stop(self: *Mixer) void {
 
 pub fn stats(self: *const Mixer) Capture.Stats {
     var xruns = self.xruns.load(.acquire);
-    for (self.sources[0..self.n_sources]) |*s| xruns += s.capture.stats().xruns;
+    for (self.sources[0..self.n_sources]) |*s| xruns +|= s.capture.stats().xruns;
     return .{
         .running = @intFromBool(self.running.load(.acquire)),
         .frames_written = self.frames_written.load(.acquire),
@@ -151,11 +151,20 @@ pub fn lastError(self: *const Mixer) [:0]const u8 {
         const e = s.capture.lastError();
         if (e.len > 0) return e;
     }
-    return self.err_buf[0..0 :0];
+    // "" not err_buf[0..0 :0]: the empty sentinel slice still reads
+    // err_buf[0], which a racing setError may be mid-write on (issue #45,
+    // same shape as Capture.lastError).
+    return "";
 }
 
 fn setError(self: *Mixer, comptime fmt: []const u8, args: anytype) void {
-    const s = std.fmt.bufPrintZ(self.err_buf[0..], fmt, args) catch self.err_buf[0 .. max_error - 1 :0];
+    // On overflow 0.16's bufPrintZ leaves err_buf FULL — no sentinel byte
+    // survives — so the fallback writes the terminator before slicing
+    // (same constraint as Capture.setError).
+    const s = std.fmt.bufPrintZ(self.err_buf[0..], fmt, args) catch blk: {
+        self.err_buf[max_error - 1] = 0;
+        break :blk self.err_buf[0 .. max_error - 1 :0];
+    };
     self.err_len.store(s.len, .release);
 }
 
@@ -174,7 +183,9 @@ fn run(self: *Mixer) void {
         var n: u64 = Ring.max_write_frames;
         for (self.sources[0..self.n_sources]) |*s| {
             const tw = s.stage.total_written.load(.acquire);
-            var avail = tw - s.cursor; // stages are never flushed: tw only grows
+            // Stages are never flushed: tw only grows. Saturating anyway —
+            // an abort is worse than a stale tick.
+            var avail = tw -| s.cursor;
             if (avail > s.stage.capacity) {
                 // The stage lapped our cursor: we fell more than stage_seconds
                 // behind. Resume at the oldest frame still readable.

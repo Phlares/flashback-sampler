@@ -1,9 +1,14 @@
-"""NativeCaptureSource — the CaptureSource that runs on the Zig core.
+"""The CaptureSources that run on the Zig core.
 
 Python holds a handle. The Zig thread opens the WASAPI stream and writes
-straight into the ring; nothing here touches audio frames. One class for
-every kind ("loopback", "input", "process") — the kind is a field of the
-spec the Zig side receives, not a Python class.
+straight into the ring; nothing here touches audio frames.
+
+`_NativeSource` is the shared handle lifecycle (start/stop/stats/
+last_error/destroy), which the fb_capture_* and fb_mixer_* ABIs have in
+common. `NativeCaptureSource` is one device: one class for every kind
+("loopback", "input", "process") — the kind is a field of the spec the
+Zig side receives, not a Python class. `NativeMixedSource` is a handle on
+the Zig Mixer: N devices summed onto one ring by a Zig mixer thread.
 """
 from __future__ import annotations
 
@@ -134,8 +139,9 @@ class NativeMixedSource(_NativeSource):
     Python. Zig validates the count (1..native.MAX_MIXER_SOURCES) and each
     spec; a rejection surfaces as fb_mixer_create returning NULL.
 
-    No level compensation: each source ring and the target apply their
-    own Ring.gain, and 1/N pre-mix gain stays the caller's job."""
+    No level compensation: the staging rings are unreachable from Python,
+    so the target applies its `Ring.gain`; 1/N pre-mix gain stays the
+    caller's job."""
 
     _api = "fb_mixer"
 
