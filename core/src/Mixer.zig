@@ -52,6 +52,12 @@ err_len: std.atomic.Value(usize),
 
 pub fn init(self: *Mixer, allocator: std.mem.Allocator, backend: Backend.Backend, target: *Ring, specs: []const Backend.Spec) !void {
     if (specs.len == 0 or specs.len > max_sources) return error.InvalidArgument;
+    // A Capture opens its device at the spec's own rate/channels and
+    // nothing resamples or remaps: a spec that disagrees with the
+    // target's format would mix garbage into it silently.
+    for (specs) |spec| {
+        if (spec.rate != target.sample_rate or spec.channels != target.channels) return error.InvalidArgument;
+    }
     self.* = .{
         .allocator = allocator,
         .target = target,
@@ -138,14 +144,20 @@ pub fn stats(self: *const Mixer) Capture.Stats {
     };
 }
 
-pub fn lastError(self: *const Mixer) [:0]const u8 {
+pub fn lastError(self: *const Mixer) []const u8 {
+    // Not a sentinel slice here either -- see Capture.lastError()'s doc
+    // comment; same race is possible against this struct's own err_buf
+    // if a caller ever polls lastError() from another thread while
+    // setError() runs (currently setError only runs on the control
+    // thread inside start(), but the fix costs nothing and removes the
+    // landmine for good).
     const n = self.err_len.load(.acquire);
-    if (n > 0) return self.err_buf[0..n :0];
+    if (n > 0) return self.err_buf[0..n];
     for (self.sources[0..self.n_sources]) |*s| {
         const e = s.capture.lastError();
         if (e.len > 0) return e;
     }
-    return self.err_buf[0..0 :0];
+    return self.err_buf[0..0];
 }
 
 fn setError(self: *Mixer, comptime fmt: []const u8, args: anytype) void {
@@ -207,6 +219,23 @@ fn waitUntil(m: *Mixer, comptime pred: fn (*Mixer) bool) !void {
 }
 
 const test_spec = Backend.Spec{ .kind = .loopback, .device_id = "", .rate = 100, .channels = 1 };
+
+test "init rejects a spec whose rate or channels does not match the target's format" {
+    // A Capture opens its device at the SPEC's own rate/channels and
+    // nothing resamples or remaps -- a mismatched spec would mix garbage
+    // into the target silently. Each spec below disagrees on exactly one
+    // field so both checks are pinned independently.
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    var fake = FakeBackend.init(&.{});
+    var m: Mixer = undefined;
+    const wrong_channels = Backend.Spec{ .kind = .loopback, .device_id = "", .rate = 100, .channels = 2 };
+    try std.testing.expectError(error.InvalidArgument, m.init(std.testing.allocator, fake.backend(), &target, &.{wrong_channels}));
+    const wrong_rate = Backend.Spec{ .kind = .loopback, .device_id = "", .rate = 48_000, .channels = 1 };
+    try std.testing.expectError(error.InvalidArgument, m.init(std.testing.allocator, fake.backend(), &target, &.{wrong_rate}));
+    try m.init(std.testing.allocator, fake.backend(), &target, &.{test_spec}); // matching spec still inits fine
+    defer m.deinit();
+}
 
 test "init rejects zero sources and more than max_sources; builds a 2 s stage per spec at the target's format" {
     var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
@@ -273,4 +302,193 @@ test "the sum is clipped to [-1, 1]" {
     var out: [2]f32 = undefined;
     try target.read(0, &out);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, -1.0 }, &out);
+}
+
+test "a stage that laps the cursor counts one xrun and resumes at the oldest readable frame" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 10.0 });
+    defer target.deinit();
+    // 300 frames in ONE packet against a 200-frame stage (2 s at 100 Hz):
+    // frames 0..99 are gone before the mixer's first tick can read them.
+    var big: [300]f32 = undefined;
+    for (&big, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i + 1)) / 1000.0;
+    var src = FakeBackend.init(&.{&big});
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, src.backend(), &target, &.{test_spec});
+    defer m.deinit();
+    try m.start();
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == 200;
+        }
+    }.f);
+    m.stop();
+    try std.testing.expectEqual(@as(u32, 1), m.stats().xruns);
+    try std.testing.expectEqual(@as(u64, 300), m.sources[0].cursor); // 100 (oldest valid) + 200 read
+    try std.testing.expectEqual(@as(u64, 200), target.total_written.load(.acquire));
+    var out: [1]f32 = undefined;
+    try target.read(0, &out);
+    try std.testing.expectEqual(big[100], out[0]); // the target starts at stage frame 100, not 0
+}
+
+test "a flush during mixing is drained by the mixer even while the sources are idle; only post-flush frames remain" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    var a = FakeBackend.init(&.{ &[_]f32{ 0.25, 0.25 }, &[_]f32{ 0.5, 0.5 } });
+    var b = FakeBackend.init(&.{ &[_]f32{ 0.25, 0.25 }, &[_]f32{ 0.5, 0.5 } });
+    a.hold = .{ .packet = 1 }; // both sources park before their second packet
+    b.hold = .{ .packet = 1 };
+    var router = FakeBackend.init(&.{});
+    router.children = &.{ &a, &b };
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, router.backend(), &target, &.{ test_spec, test_spec });
+    defer m.deinit();
+    try m.start();
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == 2;
+        }
+    }.f);
+    try std.testing.expectEqual(@as(u64, 2), target.total_written.load(.acquire));
+    target.flush(); // control thread: the mixer is the registered writer, so this is deferred to it
+    // Drained at the loop top while no source delivers: a flush must never wait on audio.
+    var spins: u32 = 0;
+    while (target.flush_pending.load(.acquire) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!target.flush_pending.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), target.total_written.load(.acquire));
+    a.release.store(true, .release);
+    b.release.store(true, .release);
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == 4;
+        }
+    }.f);
+    m.stop();
+    try std.testing.expectEqual(@as(u64, 2), target.total_written.load(.acquire)); // post-flush frames only
+    var out: [2]f32 = undefined;
+    try target.read(0, &out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, 1.0 }, &out); // 0.5 + 0.5, the SECOND packets
+}
+
+test "start failure on source 2 unwinds source 1 and clears writer_active" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    var fake = FakeBackend.init(&.{});
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, fake.backend(), &target, &.{ test_spec, test_spec });
+    defer m.deinit();
+    // Make source 2 already running: the mixer's own start hits AlreadyRunning
+    // on it — a real failure through the real path, no fake needed.
+    try m.sources[1].capture.start();
+    defer m.sources[1].capture.stop(); // runs before m.deinit (defers are LIFO)
+    try std.testing.expectError(error.AlreadyRunning, m.start());
+    try std.testing.expect(m.sources[0].capture.thread == null); // stopped and joined by the unwind
+    try std.testing.expect(m.thread == null);
+    try std.testing.expect(!target.writer_active.load(.acquire));
+    try std.testing.expectEqualStrings("source start failed: AlreadyRunning", m.lastError());
+}
+
+test "writer_active is true from start() through stop(), false after" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    var fake = FakeBackend.init(&.{});
+    fake.hold = .open;
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, fake.backend(), &target, &.{test_spec});
+    defer m.deinit();
+    try std.testing.expect(!target.writer_active.load(.acquire));
+    try m.start();
+    // Probed while the capture is still parked in open(): before any frame can exist.
+    try std.testing.expect(target.writer_active.load(.acquire));
+    fake.release.store(true, .release);
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.running.load(.acquire);
+        }
+    }.f);
+    try std.testing.expect(target.writer_active.load(.acquire));
+    m.stop();
+    try std.testing.expect(!target.writer_active.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 0), m.stats().running);
+    m.stop(); // idempotent
+}
+
+test "stats: xruns sums the captures' discontinuities, mix_rate is the first source's, lastError is the first non-empty" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    var a = FakeBackend.init(&.{ &[_]f32{0}, &[_]f32{0} });
+    a.discontinuity_at = 1;
+    a.mix_rate = 44_100;
+    var b = FakeBackend.init(&.{});
+    b.open_error = error.FormatRejected;
+    var router = FakeBackend.init(&.{});
+    router.children = &.{ &a, &b };
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, router.backend(), &target, &.{ test_spec, test_spec });
+    defer m.deinit();
+    try m.start();
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.sources[0].capture.stats().xruns + x.sources[1].capture.stats().xruns == 1 and
+                (x.sources[0].capture.lastError().len > 0 or x.sources[1].capture.lastError().len > 0);
+        }
+    }.f);
+    m.stop();
+    const st = m.stats();
+    try std.testing.expectEqual(@as(u32, 1), st.xruns);
+    // The router hands a/b out in ARRIVAL order, so which capture got
+    // 44_100 is not fixed. Pin "the first source's" against source 0
+    // itself, and that the value is one of the two scripted rates.
+    try std.testing.expectEqual(m.sources[0].capture.stats().mix_rate, st.mix_rate);
+    try std.testing.expect(st.mix_rate == 44_100 or st.mix_rate == 0); // b's open fails, so its capture never publishes a rate
+    try std.testing.expectEqualStrings("open failed: FormatRejected", m.lastError());
+}
+
+test "one tick's publish is capped at Ring.max_write_frames even when a source has 6_000 frames ready" {
+    // Deviates from the brief's own suggested recipe, which flags itself
+    // as unreliable ("polling can miss values") and invites a cleaner
+    // observable. This one is deterministic, not probabilistic:
+    //
+    // target: 10 kHz mono, 2 s = 20_000 frames -- large enough to hold the
+    // whole packet with headroom. The one source's stage is stage_seconds
+    // (2.0 s, a Mixer constant) at 10 kHz = 20_000 frames too, so nothing
+    // laps. The source's hold parks its ONE 6_000-frame packet until
+    // released -- this, not timing luck, is what makes the pin
+    // deterministic: `release` is stored only after `m.start()` returns,
+    // so the whole packet lands in ONE Capture write (itself internally
+    // chunked into stage publishes of 4096 then 6000 by Ring.write, but
+    // that happens in well under a microsecond) LONG before the mixer's
+    // next ~10 ms tick can observe it -- the mixer's first successful
+    // tick always sees the full 6_000 frames available, never a partial
+    // amount. With the cap in place, `n` for that tick is bounded to
+    // Ring.max_write_frames (4096), so frames_written must pass through
+    // exactly 4096 on its way to 6_000 -- a value it can only ever reach
+    // by TWO ticks summing 4096 + 1904. If the cap were removed, the
+    // first tick would see avail (6_000) < the mutated cap and take all
+    // 6_000 in one shot, and frames_written would jump straight from 0 to
+    // 6_000 -- the first waitUntil below would then time out, since it
+    // never observes the value 4096.
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 10_000, .channels = 1, .seconds = 2.0 });
+    defer target.deinit();
+    var big: [6_000]f32 = undefined;
+    for (&big, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i % 2)); // dyadic; content is never inspected
+    var src = FakeBackend.init(&.{&big});
+    src.hold = .{ .packet = 0 }; // park before the one packet, released only once the mixer is already running
+    const spec = Backend.Spec{ .kind = .loopback, .device_id = "", .rate = 10_000, .channels = 1 };
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, src.backend(), &target, &.{spec});
+    defer m.deinit();
+    try m.start();
+    src.release.store(true, .release);
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == Ring.max_write_frames;
+        }
+    }.f);
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == 6_000;
+        }
+    }.f);
+    m.stop();
+    try std.testing.expectEqual(@as(u64, 6_000), target.total_written.load(.acquire));
 }
