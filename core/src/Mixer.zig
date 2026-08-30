@@ -175,7 +175,8 @@ fn run(self: *Mixer) void {
     while (!self.stop_flag.load(.acquire)) {
         // The mixer is the target's registered writer, so a control-thread
         // flush is deferred to us; drain it before sleeping so a flush
-        // never waits on the sources to produce (same rule as Capture.run).
+        // never waits on the sources to produce (same rule as
+        // Capture.runStream's loop top).
         self.target.drainPendingFlush();
         std.Io.sleep(io, .fromMilliseconds(tick_ms), .awake) catch {};
         // Common span: the frames EVERY stage has that we have not consumed,
@@ -183,8 +184,10 @@ fn run(self: *Mixer) void {
         var n: u64 = Ring.max_write_frames;
         for (self.sources[0..self.n_sources]) |*s| {
             const tw = s.stage.total_written.load(.acquire);
-            // Stages are never flushed: tw only grows. Saturating anyway —
-            // an abort is worse than a stale tick.
+            // Stages are never flushed, so tw only grows and this can never
+            // wrap. Saturating anyway: were a stage ever reset behind us,
+            // `avail` pins to 0 and the mixer stalls until the cursor is
+            // overtaken again — a stall beats an overflow abort.
             var avail = tw -| s.cursor;
             if (avail > s.stage.capacity) {
                 // The stage lapped our cursor: we fell more than stage_seconds

@@ -167,15 +167,20 @@ fn flushNow(self: *Ring) void {
 /// flush mid-capture costs no frames). This is the only way a flush can
 /// never be undone by the writer that raced it (issue #20).
 ///
-/// Two call sites, not one: `write()` below drains it before publishing
-/// its own data — covers a writer that is actively producing frames.
-/// `Capture.run`'s loop drains it once per iteration BEFORE calling
-/// `stream.next`, INCLUDING the no-packet path (`stream.next` returning
-/// null) — `write()` alone is not enough, because a silent
-/// loopback/process source can go arbitrarily long between packets
-/// (or forever), and a flush must not wait on the audio source to be
-/// busy. Still on the writer thread; still no lock, no allocation, no
-/// error path.
+/// Four call sites, because `write()` alone is not enough: a silent
+/// loopback/process source can go arbitrarily long between packets (or
+/// forever), and a flush must never wait on the audio source to be busy.
+///  - `write()` below, before publishing its own data — a writer that IS
+///    producing frames.
+///  - `Capture.runStream`'s loop top, once per iteration BEFORE calling
+///    `stream.next`, INCLUDING the no-packet path (`next` returning null).
+///  - `Capture.idleUntilStopped`, for a worker that lost its stream (or
+///    finished) but still holds the writer registration until stop().
+///  - `Mixer.run`'s loop top, the same rule for the mixed target.
+/// All four run on the writer thread: no lock, no allocation, no error
+/// path. `Capture.stop` and `Mixer.stop` also drain, AFTER the join and
+/// after clearing `writer_active` — those run on the control thread,
+/// which is by then the only thread touching the ring.
 pub fn drainPendingFlush(self: *Ring) void {
     if (self.flush_pending.load(.acquire)) {
         self.flushNow();

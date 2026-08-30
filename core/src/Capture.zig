@@ -397,6 +397,10 @@ test "a worker that lost its stream keeps draining flushes until stop()" {
     fake.open_error = error.DeviceNotFound;
     var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "gone", .rate = 48_000, .channels = 2 });
     try cap.start();
+    // Deferred, not trailing: defers are LIFO, so the worker is joined
+    // before ring.deinit() frees the ring under it — on an assertion
+    // failure too.
+    defer cap.stop();
     try waitUntil(&cap, struct {
         fn f(c: *Capture) bool {
             return c.err_len.load(.acquire) > 0;
@@ -411,7 +415,6 @@ test "a worker that lost its stream keeps draining flushes until stop()" {
     while (ring.flush_pending.load(.acquire) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
     try std.testing.expect(!ring.flush_pending.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
-    cap.stop();
 }
 
 test "setError truncates a message longer than max_error instead of trapping on the sentinel" {
