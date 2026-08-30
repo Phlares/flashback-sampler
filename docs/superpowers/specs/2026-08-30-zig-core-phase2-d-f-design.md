@@ -358,3 +358,29 @@ arc.
   never smaller than one chunk plus headroom).
 - Peak-bin parity: the numpy version has bin-edge rounding that the
   Zig port must match exactly, or every waveform golden shifts.
+
+## Deviations recorded by the plan (2026-08-30)
+
+The plan (`docs/superpowers/plans/2026-08-30-zig-core-phase2-d-f.md`)
+is authoritative where it differs below.
+
+- `stop()` clears `writer_active` BEFORE draining the pending flush.
+  After the join no writer exists; clearing first sends a late flush
+  down `Ring.flush`'s immediate path instead of deferring it to a
+  writer that will never come.
+- `Mixer.init` is in-place (`init(self: *Mixer, ...)`): each `Capture`
+  holds a pointer to its staging ring inside `Mixer.sources`.
+- The mixer tick sleeps through `std.Io.sleep` on the
+  `global_single_threaded` Io (no kernel32 import in `Mixer`).
+- `NativeMixedSource` lives in `core/native_capture.py`, sharing a
+  `_NativeSource` base with `NativeCaptureSource`.
+- `fb_ring_peak_bins(ring, n_frames, n_bins, out)` takes a window
+  length, not absolute bounds: the retry-on-lap loop must live in Zig.
+- `fb_ring_rms` moves the level meter's RMS (`get_rms_levels`) into
+  Zig; the spec's deletion list missed it.
+- `tests/conftest.py` hard-requires the native library; no Python
+  half remains to fall back to.
+- Render endpoints are enumerated twice (`.loopback` and `.render`) so
+  Python stays filter-only.
+- `NativeScrubPlayer` drops `open()`: the stream opens lazily on the
+  first `play()`.
