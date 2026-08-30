@@ -147,9 +147,14 @@ def _fake_devices():
         {"kind": "loopback", "is_default": False, "mix_rate": 96_000, "mix_channels": 2, "id": "{hp}", "name": "Headphones"},
         {"kind": "input", "is_default": True, "mix_rate": 44_100, "mix_channels": 1, "id": "{mic}", "name": "Mic"},
         # Render rows: the same endpoints appear again under "render" for
-        # output enumeration. The render default (spk) is deliberately NOT
-        # the loopback default (hp) above, so a list_output_devices that
-        # accidentally read loopback rows would return the wrong default.
+        # output enumeration. The loopback defaults above are pinned by
+        # test_list_capture_devices_maps_native_list, so here both the
+        # loopback default and the render default land on {spk} — the two
+        # happen to coincide. That means a list_output_devices that reads
+        # loopback rows by mistake is NOT caught by the default-device
+        # assertion; test_list_output_devices_maps_render_rows_only is the
+        # test that catches it, since {hp}'s channel count (6) only matches
+        # its render row, not its loopback row (2).
         {"kind": "render", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
         {"kind": "render", "is_default": False, "mix_rate": 96_000, "mix_channels": 6, "id": "{hp}", "name": "Headphones"},
         # mix_channels 0 (or missing) must fall back to 2, not surface as 0.
