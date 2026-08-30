@@ -4,6 +4,8 @@
 //! event-driven: event-driven loopback has a known WASAPI quirk (events
 //! stop unless a render stream is also active), and a 10 ms poll is
 //! nothing next to a 200 ms WASAPI buffer. One loop for every kind.
+//! Render (PR e) is event-driven: the loopback quirk does not apply to a
+//! real output stream.
 const std = @import("std");
 const w = @import("wasapi.zig");
 const Backend = @import("Backend.zig");
@@ -57,7 +59,44 @@ const Stream = struct {
     const scratch_len = 96 * 1024;
 };
 
+/// One open render stream. Same fixed-pool rule as `Stream`: no allocator
+/// on the audio path. The engine owns the sample buffer (GetBuffer hands
+/// us a pointer into it), so no scratch is needed here.
+const Render = struct {
+    in_use: bool = false,
+    client: ?*w.IAudioClient = null,
+    render: ?*w.IAudioRenderClient = null,
+    event: ?w.HANDLE = null,
+    buffer_frames: u32 = 0,
+    channels: u16 = 2,
+    mix_rate: u32 = 0,
+};
+
+const max_renders = 4;
+
+// Both stream pools live here, side by side: 0.16 disallows a declaration
+// between struct fields, so every const/fn above stays before this line.
 streams: [max_streams]Stream = [_]Stream{.{}} ** max_streams,
+renders: [max_renders]Render = [_]Render{.{}} ** max_renders,
+
+const render_vtable = Backend.RenderStream.VTable{ .wait = renderWait, .available = renderAvailable, .write = renderWrite, .stop = renderStop, .deinit = renderDeinit, .mixRate = renderMixRate };
+
+/// The clip's own format. The engine resamples to its mix rate under
+/// AUTOCONVERTPCM | SRC_DEFAULT_QUALITY — the same borrowed resampler
+/// capture uses in the other direction (open(), above).
+pub fn renderFormat(rate: u32, channels: u16) w.WAVEFORMATEX {
+    return w.waveFormat(w.WAVE_FORMAT_IEEE_FLOAT, 32, rate, channels);
+}
+
+fn acquireRender(self: *WasapiBackend) ?*Render {
+    for (&self.renders) |*r| {
+        if (!r.in_use) {
+            r.in_use = true;
+            return r;
+        }
+    }
+    return null;
+}
 
 fn enumerate(ptr: *anyopaque, out: []Backend.Device) usize {
     _ = ptr;
@@ -74,6 +113,9 @@ fn enumerate(ptr: *anyopaque, out: []Backend.Device) usize {
     // Loopback devices are the RENDER endpoints; inputs are the CAPTURE endpoints.
     n += listFlow(en, w.eRender, .loopback, out[n..]);
     n += listFlow(en, w.eCapture, .input, out[n..]);
+    // The same render endpoints again, as playback outputs. One endpoint,
+    // two roles; two rows keeps the Python filters one-liners.
+    n += listFlow(en, w.eRender, .render, out[n..]);
     return n;
 }
 
@@ -199,11 +241,52 @@ fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
     return .{ .ptr = slot, .vtable = &stream_vtable };
 }
 
-/// Stub. Task 3 replaces this with a real render-stream open.
+/// Called on the render thread, which lives for the stream's life: the
+/// RoInitialize here pairs with CoUninitialize in renderDeinit, exactly
+/// as open()/deinit() do for capture (same apartment rule, one mechanism).
 fn openRender(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.RenderStream {
-    _ = ptr;
-    _ = spec;
-    return error.Unsupported;
+    const self: *WasapiBackend = @ptrCast(@alignCast(ptr));
+    if (spec.kind != .render) return error.Unsupported;
+    if (spec.channels == 0 or spec.channels > 2 or spec.rate == 0) return error.Unsupported;
+    _ = w.RoInitialize(w.RO_INIT_MULTITHREADED);
+    errdefer w.CoUninitialize();
+    const slot = self.acquireRender() orelse return error.OutOfMemory;
+    errdefer slot.* = .{};
+    // activate() picks eRender for every kind but .input and resolves
+    // "" to the default endpoint — nothing render-specific to add.
+    const client = try activate(spec);
+    errdefer client.release();
+    var mix: ?*w.WAVEFORMATEX = null;
+    if (!w.failed(client.vtbl.GetMixFormat(client, &mix))) {
+        slot.mix_rate = mix.?.nSamplesPerSec;
+        w.CoTaskMemFree(mix);
+    } else slot.mix_rate = 0;
+    const flags: u32 = w.AUDCLNT_STREAMFLAGS_EVENTCALLBACK | w.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | w.AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    const fmt = renderFormat(spec.rate, spec.channels);
+    // Duration 0 / period 0: shared-mode event-driven, the engine picks
+    // its own period and the smallest buffer that covers it. Measure the
+    // resulting GetBufferSize on hardware (spec: "Risks to measure").
+    if (w.failed(client.vtbl.Initialize(client, w.AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &fmt, null))) return error.FormatRejected;
+    const event = w.CreateEventW(null, 0, 0, null) orelse return error.ActivationFailed;
+    errdefer _ = w.CloseHandle(event);
+    if (w.failed(client.vtbl.SetEventHandle(client, event))) return error.ActivationFailed;
+    var buf_frames: u32 = 0;
+    if (w.failed(client.vtbl.GetBufferSize(client, &buf_frames)) or buf_frames == 0) return error.ActivationFailed;
+    var raw: ?*anyopaque = null;
+    if (w.failed(client.vtbl.GetService(client, &w.IID_IAudioRenderClient, &raw))) return error.ActivationFailed;
+    const rc: *w.IAudioRenderClient = @ptrCast(@alignCast(raw.?));
+    errdefer rc.release();
+    if (w.failed(client.vtbl.Start(client))) return error.ActivationFailed;
+    slot.* = .{
+        .in_use = true,
+        .client = client,
+        .render = rc,
+        .event = event,
+        .buffer_frames = buf_frames,
+        .channels = spec.channels,
+        .mix_rate = slot.mix_rate,
+    };
+    return .{ .ptr = slot, .vtable = &render_vtable };
 }
 
 /// Task 5: default or named endpoint via IMMDeviceEnumerator. Task 9 adds
@@ -338,6 +421,52 @@ fn mixRate(ptr: *anyopaque) u32 {
     return s.mix_rate;
 }
 
+fn renderWait(ptr: *anyopaque, timeout_ms: u32) bool {
+    const r: *Render = @ptrCast(@alignCast(ptr));
+    return w.WaitForSingleObject(r.event.?, timeout_ms) == w.WAIT_OBJECT_0;
+}
+
+fn renderAvailable(ptr: *anyopaque) Backend.Error!u32 {
+    const r: *Render = @ptrCast(@alignCast(ptr));
+    var padding: u32 = 0;
+    if (w.failed(r.client.?.vtbl.GetCurrentPadding(r.client.?, &padding))) return error.ActivationFailed;
+    return r.buffer_frames - @min(padding, r.buffer_frames);
+}
+
+fn renderWrite(ptr: *anyopaque, frames: []const f32) Backend.Error!void {
+    const r: *Render = @ptrCast(@alignCast(ptr));
+    const n: u32 = @intCast(frames.len / r.channels);
+    if (n == 0) return;
+    var data: ?[*]u8 = null;
+    if (w.failed(r.render.?.vtbl.GetBuffer(r.render.?, n, &data))) return error.ActivationFailed;
+    // Silence flag: the engine skips the mix for this packet. Cheap scan;
+    // the paused loop writes zeros every period.
+    const silent = std.mem.allEqual(f32, frames, 0);
+    if (!silent) @memcpy(data.?[0 .. frames.len * @sizeOf(f32)], std.mem.sliceAsBytes(frames));
+    const flags: u32 = if (silent) w.AUDCLNT_BUFFERFLAGS_SILENT else 0;
+    if (w.failed(r.render.?.vtbl.ReleaseBuffer(r.render.?, n, flags))) return error.ActivationFailed;
+}
+
+fn renderStop(ptr: *anyopaque) void {
+    const r: *Render = @ptrCast(@alignCast(ptr));
+    if (r.client) |c| _ = c.vtbl.Stop(c);
+}
+
+fn renderDeinit(ptr: *anyopaque) void {
+    const r: *Render = @ptrCast(@alignCast(ptr));
+    if (r.client) |c| _ = c.vtbl.Stop(c);
+    if (r.render) |rc| rc.release();
+    if (r.client) |c| c.release();
+    if (r.event) |e| _ = w.CloseHandle(e);
+    r.* = .{};
+    w.CoUninitialize();
+}
+
+fn renderMixRate(ptr: *anyopaque) u32 {
+    const r: *Render = @ptrCast(@alignCast(ptr));
+    return r.mix_rate;
+}
+
 test "candidates: first entry is the requested format, all five are well-formed" {
     const c = candidates(96_000, 1);
     try std.testing.expectEqual(@as(u32, 96_000), c[0].nSamplesPerSec);
@@ -346,4 +475,13 @@ test "candidates: first entry is the requested format, all five are well-formed"
         try std.testing.expectEqual(f.nChannels * f.wBitsPerSample / 8, f.nBlockAlign);
         try std.testing.expectEqual(f.nSamplesPerSec * f.nBlockAlign, f.nAvgBytesPerSec);
     }
+}
+
+test "renderFormat is float32 at the clip's rate and channels; AUTOCONVERTPCM does the rest" {
+    const f = renderFormat(96_000, 2);
+    try std.testing.expectEqual(w.WAVE_FORMAT_IEEE_FLOAT, f.wFormatTag);
+    try std.testing.expectEqual(@as(u16, 32), f.wBitsPerSample);
+    try std.testing.expectEqual(@as(u32, 96_000), f.nSamplesPerSec);
+    try std.testing.expectEqual(@as(u16, 8), f.nBlockAlign);
+    try std.testing.expectEqual(@as(u32, 96_000 * 8), f.nAvgBytesPerSec);
 }
