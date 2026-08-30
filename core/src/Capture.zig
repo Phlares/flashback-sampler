@@ -114,14 +114,27 @@ fn run(self: *Capture) void {
     defer self.running.store(false, .release);
     // Tells Ring.flush() to defer to us instead of resetting directly
     // (issue #20) — declared AFTER the `running` defer so it runs FIRST
-    // (defers are LIFO): writer_active must go false before running
-    // does, so a flush arriving right at shutdown is never accepted as
-    // "no writer" while a write from this loop could still be in flight.
+    // (defers are LIFO). This is NOT about a write still being in
+    // flight when this defer runs — the loop has already exited by
+    // then, so there is none. It is about `writer_active` never
+    // outliving `running`: if `running` flipped false FIRST, a control
+    // thread could see `running == 0` in `stats()`, conclude no writer
+    // is active, and call `flush()` — yet still land on the DEFERRED
+    // branch because `writer_active` was still true, with no writer
+    // left to ever drain it (stuck until the next `start()`). Clearing
+    // `writer_active` before `running` closes that window: once
+    // `running` reads false, `flush()` always takes the immediate path.
     self.ring.writer_active.store(true, .release);
     defer self.ring.writer_active.store(false, .release);
     defer stream.deinit();
     defer stream.stop();
     while (!self.stop_flag.load(.acquire)) {
+        // Drains a flush deferred while we were mid-loop (see
+        // `Ring.drainPendingFlush`'s doc comment) BEFORE polling for the
+        // next packet — a silent loopback/process source can leave
+        // `stream.next` returning null indefinitely, and a flush must
+        // not wait on the source to have something to deliver.
+        self.ring.drainPendingFlush();
         const maybe = stream.next(100) catch |e| {
             self.setError("stream failed: {s}", .{@errorName(e)});
             return;
@@ -244,6 +257,36 @@ test "capture marks the ring's writer active for the life of the loop, and stop 
     try std.testing.expect(!ring.writer_active.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
     try std.testing.expect(!ring.flush_pending.load(.acquire));
+}
+
+test "capture drains a pending flush even when the source is idle (no packets)" {
+    // A silent loopback/process endpoint (WasapiBackend.next returning
+    // null, no packet ready) must not stall a flush the user asked for
+    // — `Ring.write` is the only other drain site, and it never runs
+    // while the source is quiet.
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var fake = FakeBackend.init(&.{}); // no packets, ever
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .loopback, .device_id = "", .rate = 48_000, .channels = 2 });
+    try cap.start();
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.running.load(.acquire);
+        }
+    }.f);
+    // Flip the fake's own "stopped" flag WITHOUT calling cap.stop(): this
+    // makes every stream.next() call return null immediately (the fast
+    // exhausted path in FakeBackend.next) instead of spinning in its own
+    // bounded wait — i.e. a source that is up and running but has
+    // nothing to deliver, over and over, exactly the no-packet loop
+    // iteration this test targets.
+    fake.stopped.store(true, .release);
+    ring.flush_pending.store(true, .release);
+    var spins: u32 = 0;
+    while (ring.flush_pending.load(.acquire) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire)); // no packet ever arrived
+    cap.stop();
 }
 
 test "start twice is AlreadyRunning" {
