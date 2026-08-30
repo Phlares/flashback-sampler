@@ -203,9 +203,10 @@ release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
 fn waitRelease(self: *FakeBackend) void {
     // Bounded, like the exhausted-wait in next(): a test that forgets
-    // `release` fails instead of hanging.
+    // `release` fails instead of hanging. Same bound as waitUntil: on a
+    // loaded box 1M yields is not enough for the test thread to get there.
     var spins: u32 = 0;
-    while (!self.release.load(.acquire) and spins < 1_000_000) : (spins += 1) std.Thread.yield() catch {};
+    while (!self.release.load(.acquire) and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
 }
 ```
 
@@ -858,7 +859,7 @@ test "stats: xruns sums the captures' discontinuities, mix_rate is the first sou
     // 44_100 is not fixed. Pin "the first source's" against source 0
     // itself, and that the value is one of the two scripted rates.
     try std.testing.expectEqual(m.sources[0].capture.stats().mix_rate, st.mix_rate);
-    try std.testing.expect(st.mix_rate == 44_100 or st.mix_rate == 48_000);
+    try std.testing.expect(st.mix_rate == 44_100 or st.mix_rate == 0); // b's open fails, so its capture never publishes a rate
     try std.testing.expectEqualStrings("open failed: FormatRejected", m.lastError());
 }
 ```
@@ -878,7 +879,7 @@ Expected: all five compile and pass on the first run (the mechanism exists since
 6. Delete `self.target.writer_active.store(true, .release);` in `start` — window test red at the first `expect(target.writer_active...)`; the flush test also changes shape (the flush is immediate).
 7. In `stats`, drop the `for` that adds capture xruns — stats test: `xruns == 0`.
 8. In `lastError`, return `self.err_buf[0..0 :0]` without consulting the captures — stats test: `""`.
-9. In `stats`, read `self.sources[self.n_sources - 1]` instead of `sources[0]` for `mix_rate` — stats test red on the runs where the 44_100 fake landed on source 0 (run ×3).
+9. In `stats`, read `self.sources[self.n_sources - 1]` instead of `sources[0]` for `mix_rate` — stats test red on every run: `sources[0]` and `sources[1]` always differ (44_100 vs 0, whichever order the router handed them out), and the test pins `st.mix_rate` to `sources[0]`'s value.
 
 - [ ] **Step 4: Run, verify green, count +5; three times**
 
@@ -1025,10 +1026,10 @@ export fn fb_ring_create(rate: u32, channels: u16, seconds: f64, status: ?*FbSta
 Update every existing `fb_ring_create(` call in `abi.zig`'s tests to pass `null` as the fourth argument. Thirteen sites at the pre-edit line numbers 61, 76, 83, 90, 99, 125, 129, 133, 137, 153, 157, 283, 291. Lines 153 and 157 contain a nested `std.math.nan(f64)` / `std.math.inf(f64)` — edit those by hand; for the rest this works:
 
 ```bash
-sed -i '/export fn\|std.math.nan\|std.math.inf/! s/fb_ring_create(\([^)]*\))/fb_ring_create(\1, null)/' core/src/abi.zig
+sed -i '/export fn\|std.math.nan\|std.math.inf\|, null)\|, &st)/! s/fb_ring_create(\([^)]*\))/fb_ring_create(\1, null)/' core/src/abi.zig
 ```
 
-Then: `grep -n "fb_ring_create(" core/src/abi.zig` — every test call shows four arguments.
+(The `, null)` / `, &st)` exclusions skip the five new four-argument call sites from Step 1, which would otherwise gain a fifth argument.) Then: `grep -n "fb_ring_create(" core/src/abi.zig` — every test call shows four arguments.
 
 Replace `fb_capture_create` (`abi.zig:345-357`) and add the mixer exports after `fb_capture_last_error`:
 
@@ -1102,7 +1103,7 @@ export fn fb_mixer_last_error(m: *const Mixer) [*:0]const u8 {
 
 Run: `zig build --build-file core/build.zig test --summary all` — `100/100 tests passed`. Then `zig build --build-file core/build.zig -Doptimize=ReleaseSafe` (the DLL Python loads, `native.py:50`).
 
-Mutation check: in `ringCreate` swap the two switch arms → the `invalid_arg` test and the `out_of_memory` test both go red. Revert. In `fb_mixer_create` delete `if (n == 0 or n > Mixer.max_sources) return null;` → the rejects test goes red on `n == 0` (Windows: `Mixer.init` rejects, but the `n > 8` case indexes past `zspecs` — a Debug panic, which is the red). Revert.
+Mutation check: in `ringCreate` swap the two switch arms → the `invalid_arg` test and the `out_of_memory` test both go red. Revert. In `fb_mixer_create` delete `if (n == 0 or n > Mixer.max_sources) return null;` → the rejects test panics on the `n > 8` case (index out of bounds on `zspecs`); the `n == 0` case stays green because `Mixer.init` rejects it. Revert.
 
 - [ ] **Step 5: Header mirror**
 
@@ -1591,7 +1592,7 @@ def build_mixed_capture_source(devices, buffer, sample_rate: int, channels: int)
     )
 ```
 
-Import line (`audio_devices.py:20`): `from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource`.
+Import line (`audio_devices.py:21`): `from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource`.
 
 - [ ] **Step 4: `state.py` — specs through, no factories**
 
@@ -1615,7 +1616,7 @@ Add `build_mixed_capture_source,` to the `audio_devices` import block (`state.py
         )
 ```
 
-Docstring (`state.py:316-321`): `MixedCaptureSource` → `NativeMixedSource`.
+Docstring (`state.py:314-322`, the mention is at `:320`): `MixedCaptureSource` → `NativeMixedSource`.
 
 - [ ] **Step 5: Run Python, verify green**
 
@@ -1645,9 +1646,10 @@ grep -rn "MixedCaptureSource\|mixed_capture\|sub_factories\|sub-factory" flashba
 Fix each hit (verified sites on the baseline):
 - `core/src/Summary.zig:182-190`: the "but ONLY for a `Capture` writer … PR d closes it" sentences → "`Ring.writer_active` is what enforces that between `update` and `flushNow`'s `poison`: every writer thread's owner registers it (`Capture`, `Mixer` — see `Ring.flush`'s OWNERSHIP note), so no unregistered writer of a ring remains."
 - `flashback_sampler/core/native.py:341-346` (`copy_abs_range` docstring): drop "and mixed_capture.py (the mixer thread, polling a live sub-source ring every 10ms)"; the remaining caller is `checkout.py`.
-- `flashback_sampler/core/capture_slot.py:69-72`: "should be built as a MixedCaptureSource" → "are passed to one Zig mixer (`NativeMixedSource`) that sums them".
+- `flashback_sampler/core/capture_slot.py:68-72` (the mention is at `:71`): "should be built as a MixedCaptureSource" → "are passed to one Zig mixer (`NativeMixedSource`) that sums them".
 - `tests/unit/test_native_smoke.py:88-96` docstring: drop the MixedCaptureSource clause.
 - `tests/unit/test_buffer.py:228` comment: drop `mixed_capture.py`.
+- `flashback_sampler/core/buffer.py:433` comment: drop the `mixed_capture.py` clause (the grep gate below must reach zero honestly).
 - `README.md:56`: `mixed_capture.py     # sum multiple inputs into one slot` → remove the line; if the tree listing has `native_capture.py`, extend its comment with "+ NativeMixedSource (Zig mixer handle)".
 - `PHASE2-HANDOFF.md:42`: the `core/mixed_capture.py` row → `core/native_capture.py` (`NativeMixedSource`) | Zig `Mixer.zig` | staging rings in Zig.
 - `flashback_sampler/app/state.py`: done in Step 4.
@@ -1693,7 +1695,7 @@ def test_two_source_mix_records_frames_on_both(lib):
 ```
 
 Run (Windows, audio playing): `python -m pytest tests/hw -m audio_hw -s -q`
-Expected: 5 passed. If the mixed test reports `frames == 0` with `running == True`, the input endpoint is silent-gated by the OS (some mics deliver no packets until unmuted): retry with the mic unmuted before treating it as a mixer defect.
+Expected: 6 passed (5 today + the mixed test). If the mixed test reports `frames == 0` with `running == True`, the input endpoint is silent-gated by the OS (some mics deliver no packets until unmuted): retry with the mic unmuted before treating it as a mixer defect.
 
 - [ ] **Step 2: Whole-branch gates (no CI runs on this branch)**
 
@@ -1706,7 +1708,7 @@ zig build --build-file core/build.zig -Doptimize=ReleaseSafe -Dtarget=aarch64-ma
 python -m pytest tests/unit -q -m "not audio_hw and not perf"
 ```
 
-Expected: `100/100 tests passed` (83 + 3 + 4 + 5 + 5); both cross-compile legs build (`Mixer.zig` imports `Backend.zig`, `Capture.zig`, `Ring.zig` only — no OS gate needed); pytest green. Record the numbers for the PR body.
+Expected: `100/100 tests passed` (83 + 3 + 4 + 5 + 5); the two `-Dtarget` legs and the native ReleaseSafe build all build (`Mixer.zig` imports `Backend.zig`, `Capture.zig`, `Ring.zig` only — no OS gate needed); pytest green. Record the numbers for the PR body.
 
 - [ ] **Step 3: App smoke (manual, 2 minutes)**
 
@@ -1738,7 +1740,7 @@ gh pr create --base dev --title "feat: Mixer.zig — mixed capture on a Zig thre
 
 1. What / why (3 bullets): the Python mixer thread is gone (`fb_ring_write`'s last production caller); `writer_active` has one owner rule for `Capture` and `Mixer`, closing the start window; `fb_ring_create` tells OOM from a bad config.
 2. `Closes #D`. **`Refs #41`** — not `Closes`: #41's UI half (the arm-time message) stays open for #16.
-3. Deviations to record in the spec (small edits the owner approves with the merge): P1 (clear-then-drain order), P2 (park in `open`), P3 (in-place `init`), P6 (class lives in `native_capture.py`), P7 (`build_mixed_capture_source` + `_spec_kwargs`), P9 (the `err_buf[0]` rider — not in the spec at all).
+3. Deviations already recorded in the spec's "Deviations recorded by the plan" block (P1, P2, P3, P6, P7, P9 — no spec edit needed at merge; point the reviewer at the block). Anything beyond those goes on the sub-issue as a comment.
 4. Gate results: Zig `100/100` (from 83), pytest count, both cross-compile legs, hw run's `frames=` line.
 5. `_ToRemove/` contents for the owner's one-shot deletion approval: `flashback_sampler/core/mixed_capture.py`.
 6. **Zig concepts in this PR:**
@@ -1781,13 +1783,13 @@ State in the final message: branch, PR URL, the counts, the `_ToRemove/` list aw
 - Format builder: `w.waveFormat(tag, bits, rate, channels)` (`wasapi.zig:182-185`). There is no WAVEFORMATEXTENSIBLE builder in the repo; ≤ 2 channels use the plain struct.
 - kernel32 already declared in `wasapi.zig`: `Sleep` (`:91`), `CloseHandle` (`:92`), `LoadLibraryW`/`GetProcAddress` (`:93-94`). NOT declared: `CreateEventW`, `WaitForSingleObject`, `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`, `IAudioRenderClient`, `WAIT_*`. `IAudioClient.SetEventHandle`, `GetBufferSize`, `GetCurrentPadding`, `GetService`, `Start`, `Stop` exist (`wasapi.zig:257-268`).
 - `IID_IAudioRenderClient = {F294ACFC-3146-4483-A7BF-ADDCA7C260E2}` verified against the shipped `soundcard` package (`.venv/Lib/site-packages/soundcard/mediafoundation.py:597`). Verify: also against `audioclient.h` (`DEFINE_GUID(IID_IAudioRenderClient, 0xF294ACFC, 0x3146, 0x4483, ...)`) if an SDK is on the box.
-- `abi.zig`: allocator is `std.heap.smp_allocator` (`:20`); `nativeBackend()` (`:326-329`); `fb_capture_create` guard `spec.kind > 2` (`:346`) stays — render is not a capture kind; Windows-only ABI test pattern (`:289-290`).
+- `abi.zig`: allocator is `std.heap.smp_allocator` (`:20`); `nativeBackend()` (`:326-329`); the `s.kind > 2` clause in `specFromAbi` (PR d Task 4) stays — render is not a capture kind, for `fb_capture_create` and `fb_mixer_create` alike; Windows-only ABI test pattern (`:289-290`).
 - `native.py`: `KIND_INTS` / `_KIND_NAMES` (`:82-83`); `_KIND_NAMES.get(d.kind, "input")` in `list_devices` (`:183`) — kind 3 must be in the dict or it reports `"input"`; `_declare` (`:105-170`); `_as_f32p` (`:190-191`); `wav_write` reshapes 1-D to `[N, 1]` (`:201-202`) — `bind` mirrors that.
-- Player call sites: `turntable_window.py:907-921` (`is_playing`, `pause`, `bind(audio)`, `open()`, `play()`), `:933` (`is_playing`), `:1698-1737` (`is_playing`, `cursor_samples`, `play`), `:1755` (`pause`), `state.py:85-88` (constructor `sample_rate`, `channels`), `:95` and `:255` (`set_device(spec.id)`), `:435` (`close`). Nothing calls `stop`, `seek`, `seek_samples`, `cursor_seconds`, `source_length_samples` in the app today; the spec keeps them on the wrapper.
-- The checkout's rate: `Checkout.sample_rate` (`checkout.py:50`), `channels` (`:51`), `audio` (`:52`), `trimmed_audio()` (`:68-76`). The bind call site is `turntable_window.py:920` with `co` in scope from `:906`.
+- Player call sites: `turntable_window.py:907-921` (`is_playing`, `pause`, `bind(audio)` at `:919`, `open()`, `play()`), `:933` (`is_playing`), `:1698-1737` (`is_playing`, `cursor_samples`, `play`), `:1755` (`pause`), `state.py:85-88` (constructor `sample_rate`, `channels`), `:95` and `:255` (`set_device(spec.id)`), `:435` (`close`). Nothing calls `stop`, `seek`, `seek_samples`, `cursor_seconds`, `source_length_samples` in the app today; the spec keeps them on the wrapper.
+- The checkout's rate: `Checkout.sample_rate` (`checkout.py:50`), `channels` (`:51`), `audio` (`:52`), `trimmed_audio()` (`:68-76`). The bind call site is `turntable_window.py:919` (the `try` block is `:919-921`) with `co` in scope from `:906`.
 - `OutputDevice` (`audio_devices.py:74-80`, `id: int`); `list_output_devices` imports `sounddevice` (`:117-153`); `default_output_device` (`:168-173`); `_list_native_devices` filters `("loopback", "input")` (`:100`) — unchanged by this PR.
 - `AppState.output_spec` (`state.py:93`), `set_output_spec` (`:253-255`), `shutdown` (`:427-437`).
-- Tests to update: `tests/unit/test_scrub_player.py` (20 `_audio_callback` tests, replaced), `tests/unit/test_audio_devices.py:39-42` (`OutputDevice(id=0, ...)`), `tests/unit/test_app_state.py:16,26,31-32` (imports/asserts `ScrubPlayer`) and `:395-412` (calls `_audio_callback`), `tests/unit/test_native_capture.py` (`_FakeLib` pattern at `:14-50`, reused), `tests/unit/test_turntable_window.py` (`qapp`/`state` fixtures `:10-21`).
+- Tests to update: `tests/unit/test_scrub_player.py` (20 tests, 17 of which drive `_audio_callback`; all replaced), `tests/unit/test_audio_devices.py:39-42` (`OutputDevice(id=0, ...)`), `tests/unit/test_app_state.py:16,26,31-32` (imports/asserts `ScrubPlayer`) and `:395-412` (calls `_audio_callback`), `tests/unit/test_native_capture.py` (`_FakeLib` pattern at `:14-50`, reused), `tests/unit/test_turntable_window.py` (`qapp`/`state` fixtures `:10-21`).
 - `AUDCLNT_STREAMFLAGS_EVENTCALLBACK` was deliberately NOT used for capture (part-1 plan line 46, `WasapiBackend.zig:1-6`); render uses it (spec "Render delivery").
 
 **Spec deviations recorded by this plan (Plan choice):**
@@ -1838,9 +1840,10 @@ State in the final message: branch, PR URL, the counts, the `_ToRemove/` list aw
   written: std.ArrayList(f32) = .empty,        // every write(), concatenated
   render_opens: std.atomic.Value(u32), render_waits: std.atomic.Value(usize), render_writes: std.atomic.Value(usize), render_stopped: std.atomic.Value(bool),
   last_render_spec: ?Backend.Spec = null,
+  render_hold: bool = false,                   // park every wait() (after counting) until `release` is true
   pub fn deinitRender(self: *FakeBackend) void   // frees `written`
   ```
-  Fake `wait` yields once, counts, returns `true`. Fake `write` appends to `written` (when an allocator is set), counts. `available` returns `render_available`.
+  Fake `wait` yields once, counts, parks on `render_hold`, returns `true`. Fake `write` rejects (`FormatRejected`) any write that is not `render_available * channels` samples at the OPENED spec's channel count, else appends to `written` (when an allocator is set) and counts. `available` returns `render_available`.
 
 - [ ] **Step 1: Failing tests (render sink round-trip through the fake)**
 
@@ -1859,10 +1862,10 @@ test "fake render sink: openRender records the spec, available is scripted, writ
     try std.testing.expectEqual(@as(u32, 44_100), fake.last_render_spec.?.rate);
     try std.testing.expectEqual(@as(u32, 3), try rs.available());
     try std.testing.expect(rs.wait(100));
-    try rs.write(&[_]f32{ 1, 2 });
-    try rs.write(&[_]f32{ 3, 4, 5, 6 });
+    try rs.write(&[_]f32{ 1, 2, 3, 4, 5, 6 }); // available (3) * channels (2)
+    try std.testing.expectError(error.FormatRejected, rs.write(&[_]f32{ 1, 2, 3 })); // 3 frames at ch 1: wrong size
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1, 2, 3, 4, 5, 6 }, fake.written.items);
-    try std.testing.expectEqual(@as(usize, 2), fake.render_writes.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fake.render_writes.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), fake.render_waits.load(.acquire));
     try std.testing.expectEqual(@as(u32, 48_000), rs.mixRate());
     rs.stop();
@@ -1970,6 +1973,8 @@ render_waits: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 render_writes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 render_stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 last_render_spec: ?Backend.Spec = null,
+/// Park every render wait() until `release` (PR d's knob) is stored true.
+render_hold: bool = false,
 ```
 
 Verify: Zig 0.16 `std.ArrayList(T)` is the unmanaged list (`.empty`, `appendSlice(gpa, items)`, `deinit(gpa)`, `.items`). If the pinned std still names it `std.ArrayListUnmanaged`, use that name; the API is the same.
@@ -2005,6 +2010,9 @@ fn renderWait(ptr: *anyopaque, timeout_ms: u32) bool {
     // test thread that is waiting to observe it.
     std.Thread.yield() catch {};
     _ = self.render_waits.fetchAdd(1, .release);
+    // Counted BEFORE the park so a test can see "the thread is inside
+    // wait()" — past the loop-top reopen check, before fill().
+    if (self.render_hold) self.waitRelease();
     return true;
 }
 
@@ -2015,6 +2023,11 @@ fn renderAvailable(ptr: *anyopaque) Backend.Error!u32 {
 
 fn renderWrite(ptr: *anyopaque, frames: []const f32) Backend.Error!void {
     const self: *FakeBackend = @ptrCast(@alignCast(ptr));
+    // A real engine takes exactly the frames it advertised, at the
+    // channel count the stream was OPENED with. A write sized at any
+    // other count is the bug Playback.fill's `ch` parameter prevents.
+    const ch: usize = self.last_render_spec.?.channels;
+    if (frames.len != self.render_available * ch) return error.FormatRejected;
     if (self.render_allocator) |a| self.written.appendSlice(a, frames) catch return error.OutOfMemory;
     _ = self.render_writes.fetchAdd(1, .release);
 }
@@ -2398,9 +2411,9 @@ git commit -m "feat(core): WasapiBackend.openRender (event-driven shared-mode re
   Thread loop (the whole of it):
   1. `stream = backend.openRender(currentSpec())` — on error: `"open failed: {s}"`, `done = true`, return.
   2. `mix_rate.store`, `running = true`.
-  3. `while (!stop_flag)`: if `reopen.swap(false)`: stop+deinit the stream, `openRender` again (error → record, break). `if (!stream.wait(100)) continue`. `want = min(stream.available(), max_fill_frames)`; `if (want == 0) continue`. `fill(want)` into `scratch`; `stream.write(scratch[0 .. want * channels])`.
-  4. `stream.stop(); stream.deinit(); running = false; done = true`.
-  `fill`: `in_copy = true`; if `!playing` → zeros; else `n = min(want, clip_frames - cursor)`; copy `n` frames; zero-pad; `cursor += n`; if `cursor == clip_frames` → `playing = false`; `in_copy = false`.
+  3. `while (!stop_flag)`: if `reopen.swap(false)`: stop+deinit the stream, `openRender` again (error → record, break), snapshot `ch = channels`. `if (!stream.wait(100)) continue`. `want = min(stream.available(), max_fill_frames)`; `if (want == 0) continue`. `fill(want, ch)` into `scratch`; `stream.write(scratch[0 .. want * ch])`.
+  4. `stream.stop(); stream.deinit(); running = false; playing = false; done = true` — `playing` clears on every exit path, including a failed open.
+  `fill(want, ch)`: `ch` is the open stream's channel count (a `run()` local), never `self.channels`. `in_copy = true`; if `!playing` → zeros; else `n = min(want, clip_frames - cursor)`; copy `n` frames; zero-pad; `cursor += n`; if `cursor == clip_frames` → `playing = false`; `in_copy = false`.
 
 - [ ] **Step 1: Failing tests**
 
@@ -2505,9 +2518,11 @@ test "paused: writes are zeros and the cursor does not move" {
         }
     }.f);
     pb.pause();
+    // A fill that started before pause() saw `playing` may still advance the cursor; let it finish.
+    while (pb.in_copy.load(.seq_cst)) std.Thread.yield() catch {};
     const at = pb.cursor.load(.acquire);
     const writes = fake.render_writes.load(.acquire);
-    try waitUntil(&pb, struct {
+    waitUntil(&pb, struct {
         fn f(p: *Playback) bool {
             _ = p;
             return false;
@@ -2594,6 +2609,41 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     try std.testing.expect(!pb.reopen.load(.acquire));
 }
 
+test "bind mono at the same rate under a stereo stream reopens and never resizes a write" {
+    var fake = FakeBackend.init(&.{});
+    fake.render_allocator = std.testing.allocator;
+    defer fake.deinitRender();
+    fake.render_available = 4;
+    var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
+    defer pb.deinit();
+    // Park the thread INSIDE wait(): past the loop-top reopen check,
+    // before fill(). The bind below then lands where a reopen cannot
+    // rescue a fill that reads self.channels.
+    fake.render_hold = true;
+    const stereo = ramp(1000);
+    try pb.bind(&stereo, 48_000, 2);
+    try pb.play();
+    var spins: u32 = 0;
+    while (fake.render_waits.load(.acquire) == 0 and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
+    try std.testing.expect(fake.render_waits.load(.acquire) == 1);
+    // Mono clip, same rate: self.channels flips to 1 while the stereo
+    // stream is still open. The next fill must still write 4 * 2 samples
+    // (the stream's count); a fill() that read self.channels would hand
+    // the stereo stream 4 * 1 samples and the fake rejects that write.
+    const mono = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    try pb.bind(&mono, 48_000, 1);
+    fake.release.store(true, .release);
+    try waitUntil(&pb, struct {
+        fn f(p: *Playback) bool {
+            return !p.reopen.load(.acquire) and p.running.load(.acquire);
+        }
+    }.f);
+    pb.stop();
+    try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
+    try std.testing.expectEqual(@as(u16, 1), fake.last_render_spec.?.channels);
+    try std.testing.expect(std.mem.indexOf(u8, pb.lastError(), "stream failed") == null);
+}
+
 test "setDevice copies the id, sets reopen, and the new id reaches the backend" {
     var fake = FakeBackend.init(&.{});
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
@@ -2620,12 +2670,12 @@ test "available() == 0 does not spin into zero-length writes" {
     const a = ramp(4);
     try pb.bind(&a, 48_000, 2);
     try pb.play();
-    try waitUntil(&pb, struct {
+    waitUntil(&pb, struct {
         fn f(p: *Playback) bool {
             _ = p;
             return false;
         }
-    }.f) catch {};
+    }.f) catch {}; // burn ~5M yields
     try std.testing.expect(fake.render_waits.load(.acquire) > 100);
     try std.testing.expectEqual(@as(usize, 0), fake.render_writes.load(.acquire));
     try std.testing.expect(pb.running.load(.acquire));
@@ -2747,6 +2797,9 @@ pub fn play(self: *Playback) !void {
     if (self.thread == null) {
         self.stop_flag.store(false, .monotonic);
         self.done.store(false, .monotonic);
+        // Clear the TEXT too, not only the length: lastError() slices
+        // err_buf[0..len :0], and the sentinel check needs err_buf[len] == 0.
+        self.err_buf[0] = 0;
         self.err_len.store(0, .monotonic);
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
@@ -2796,8 +2849,10 @@ fn setError(self: *Playback, comptime fmt: []const u8, args: anytype) void {
 }
 
 /// Render thread. Produces `want` frames into scratch. Never allocates.
-fn fill(self: *Playback, want: usize) []const f32 {
-    const ch: usize = self.channels;
+/// `ch` is the channel count of the OPEN stream, snapshotted by run()
+/// after each open: bind() mutates self.channels on the control thread
+/// while this stream still owns the old count.
+fn fill(self: *Playback, want: usize, ch: usize) []const f32 {
     const out = self.scratch[0 .. want * ch];
     self.in_copy.store(true, .seq_cst);
     defer self.in_copy.store(false, .seq_cst);
@@ -2807,7 +2862,10 @@ fn fill(self: *Playback, want: usize) []const f32 {
     }
     const total = self.clip_frames.load(.acquire);
     const at = self.cursor.load(.acquire);
-    const n = @min(want, total - @min(at, total));
+    // Bound by the slice at the stream's `ch`, not by clip_frames: a
+    // play() that lands between a channel-changing bind and the reopen
+    // must not index past a clip bound at the other count.
+    const n = @min(want, @min(total, self.clip.len / ch) -| at);
     const src = self.clip[at * ch .. (at + n) * ch];
     @memcpy(out[0 .. n * ch], src);
     @memset(out[n * ch ..], 0);
@@ -2818,7 +2876,12 @@ fn fill(self: *Playback, want: usize) []const f32 {
 }
 
 fn run(self: *Playback) void {
-    defer self.done.store(true, .release);
+    defer {
+        // Every exit path (stop, open failure, stream failure) leaves
+        // `playing` false: no thread feeds the stream any more.
+        self.playing.store(false, .seq_cst);
+        self.done.store(true, .release);
+    }
     var stream: ?Backend.RenderStream = self.backend.openRender(self.currentSpec()) catch |e| {
         self.setError("open failed: {s}", .{@errorName(e)});
         return;
@@ -2827,6 +2890,10 @@ fn run(self: *Playback) void {
     // first open is already satisfied.
     self.reopen.store(false, .release);
     self.mix_rate.store(stream.?.mixRate(), .release);
+    // The stream's channel count, fixed until the next reopen. fill()
+    // takes it as a parameter so a bind() that changes self.channels
+    // cannot resize the writes under a stream opened at the old count.
+    var ch: usize = self.channels;
     self.running.store(true, .release);
     defer self.running.store(false, .release);
     defer if (stream) |s| {
@@ -2848,6 +2915,7 @@ fn run(self: *Playback) void {
                 return;
             };
             self.mix_rate.store(stream.?.mixRate(), .release);
+            ch = self.channels;
             self.running.store(true, .release);
         }
         const s = stream.?;
@@ -2858,7 +2926,7 @@ fn run(self: *Playback) void {
         };
         const want: usize = @min(avail, max_fill_frames);
         if (want == 0) continue;
-        s.write(self.fill(want)) catch |e| {
+        s.write(self.fill(want, ch)) catch |e| {
             self.setError("stream failed: {s}", .{@errorName(e)});
             return;
         };
@@ -2868,10 +2936,10 @@ fn run(self: *Playback) void {
 
 Note the `stream` optional: after a failed reopen `stream` is `null`, so the deferred `stop`/`deinit` runs only on a live stream. `done` is stored last (first `defer` declared = last run), after `running` is false, so `play()`'s join-on-done sees a fully torn-down thread.
 
-- [ ] **Step 4: Run, verify green ×3, count +9**
+- [ ] **Step 4: Run, verify green ×3, count +10**
 
 Run: `zig build --build-file core/build.zig test --summary all` three times (threads).
-Expected: pass ×3; count = d's end count + 14. `zig fmt --check core/src` clean.
+Expected: pass ×3; count = d's end count + 15. `zig fmt --check core/src` clean.
 Run: `zig build --build-file core/build.zig -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu` — green (Playback is OS-neutral).
 
 Mutation checks (one per test, edit-then-revert on the real source):
@@ -2880,9 +2948,10 @@ Mutation checks (one per test, edit-then-revert on the real source):
 - "seek/rewind": in `seek`, remove the `@min` → 500 stays → red. In `play`, remove the rewind → cursor stays 10 → red.
 - "bind while playing": remove `self.playing.store(false, .seq_cst)` from `bind` → `playing` reads 1 → red.
 - "rebind reopens": remove `self.reopen.store(true, .release)` from `bind` → `render_opens` stays 1 → red. Remove the `rate != self.rate` condition (always reopen) → the "same rate again" assertion → red.
+- "bind mono under a stereo stream": in `fill`, shadow the parameter with `const ch: usize = self.channels;` as the first line (the pre-fix shape; rename the parameter to `_`) → the fill after the release reads 1, the fake rejects the 4-sample write, the thread exits with `"stream failed: FormatRejected"` → `waitUntil(running)` times out → red, deterministically (the park in `wait()` puts the bind past the reopen check). Delete `ch = self.channels;` after the reopen → the reopened mono stream gets 8-sample writes → red the same way.
 - "setDevice": remove the `@memcpy` in `setDevice` → id mismatch → red.
 - "available()==0": delete `if (want == 0) continue;` → writes > 0 → red.
-- "openRender failure": in `play`, delete the join-on-done block → the second `play()` never spawns → `waitUntil(running)` times out → red.
+- "openRender failure": in `play`, delete the join-on-done block → the second `play()` never spawns → `waitUntil(running)` times out → red. Delete `self.err_buf[0] = 0;` in `play` → the second `play()` resets `err_len` to 0 while `err_buf[0]` is still `'o'`; `pb.lastError()` panics on the sentinel check → red.
 - "bind rejects": delete `frames.len % channels != 0` from the guard → the ragged case returns ok → red.
 
 - [ ] **Step 5: Commit**
@@ -3016,11 +3085,11 @@ Update `core/include/flashback_core.h`: add the two typedefs after `FbProcess` (
 
 - [ ] **Step 4: Run Zig, verify green, count +3; rebuild the DLL**
 
-Run: `zig build --build-file core/build.zig test --summary all` → count = d's end count + 17.
+Run: `zig build --build-file core/build.zig test --summary all` → count = d's end count + 18.
 Run: `zig build --build-file core/build.zig -Doptimize=ReleaseSafe`
 Run: `zig build --build-file core/build.zig -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu`
 
-Mutation check: change `fb_playback_create`'s guard to `channels > 3` → the first test reddens. Change `fb_capture_create`'s guard (`abi.zig:346`) to `spec.kind > 3` → the kind-3 test reddens. Revert both.
+Mutation check: change `fb_playback_create`'s guard to `channels > 3` → the first test reddens. Change the `s.kind > 2` clause in `specFromAbi` (PR d Task 4) to `s.kind > 3` → the kind-3 test reddens (the same mutation un-rejects kind 3 for `fb_mixer_create`, which shares the function). Revert both.
 
 - [ ] **Step 5: Failing Python test (kind 3 in `list_devices`)**
 
@@ -3152,6 +3221,8 @@ class _FakePlaybackLib:
                     self.state = self.state[:3] + (n, self.state[4])
                 return self.bind_status
             if name == "fb_playback_play":
+                if self.play_status == 0:
+                    self.state = (1, 1) + self.state[2:]  # a real play() spawns and sets playing
                 return self.play_status
             if name == "fb_playback_state":
                 st = a[1]._obj if hasattr(a[1], "_obj") else a[1]
@@ -3414,13 +3485,19 @@ Update `tests/unit/test_app_state.py`:
 
 ```python
     seen = {}
+    real_lib = st.scrub_player._lib
     st.scrub_player._lib = type("L", (), {
         "fb_playback_bind": staticmethod(lambda h, p, n, r, c: seen.update(n=n, rate=r, ch=c) or 0),
         "fb_playback_play": staticmethod(lambda h: seen.update(played=True) or 0),
+        # close() (via the fixture's shutdown) destroys through _lib too
+        "fb_playback_destroy": staticmethod(lambda h: None),
     })()
-    st.scrub_player.bind(co.audio, co.sample_rate)
-    st.scrub_player.play()
-    assert seen == dict(n=500, rate=1000, ch=1, played=True)
+    try:
+        st.scrub_player.bind(co.audio, co.sample_rate)
+        st.scrub_player.play()
+        assert seen == dict(n=500, rate=1000, ch=1, played=True)
+    finally:
+        st.scrub_player._lib = real_lib  # the real handle is freed by the real destroy
 ```
 
 (`AppState` is still constructed on the real DLL; `state.py` is updated in Task 7 — until then `AppState.__init__` fails on `ScrubPlayer`. Run Task 6 and Task 7's Python gates together at the end of Task 7.)
@@ -3468,8 +3545,11 @@ Extend `_fake_devices()` (`:~145`) with two render rows and add two tests:
 ```python
 def _fake_devices():
     return [
-        {"kind": "loopback", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
-        {"kind": "loopback", "is_default": False, "mix_rate": 96_000, "mix_channels": 2, "id": "{hp}", "name": "Headphones"},
+        # The loopback default is NOT the render default on purpose: a
+        # list_output_devices that filtered loopback rows would otherwise
+        # still return the right default_output_device.
+        {"kind": "loopback", "is_default": False, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
+        {"kind": "loopback", "is_default": True, "mix_rate": 96_000, "mix_channels": 2, "id": "{hp}", "name": "Headphones"},
         {"kind": "input", "is_default": True, "mix_rate": 44_100, "mix_channels": 1, "id": "{mic}", "name": "Mic"},
         {"kind": "render", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
         {"kind": "render", "is_default": False, "mix_rate": 96_000, "mix_channels": 6, "id": "{hp}", "name": "Headphones"},
@@ -3498,14 +3578,13 @@ def test_capture_list_ignores_render_rows(monkeypatch):
 
 
 def test_audio_devices_does_not_import_sounddevice():
-    import sys
-    sys.modules.pop("sounddevice", None)
-    import importlib
-    importlib.reload(audio_devices)
-    assert "sounddevice" not in sys.modules
+    # Source-level pin: the module imports sounddevice lazily today, so a
+    # sys.modules check is green before the change.
+    import inspect
+    assert "sounddevice" not in inspect.getsource(audio_devices)
 ```
 
-Run: `python -m pytest tests/unit/test_audio_devices.py -q` → the new tests FAIL (`id=0` typed rows / sounddevice path).
+Run: `python -m pytest tests/unit/test_audio_devices.py -q` → the new tests FAIL (`id=0` typed rows; `getsource` still finds `sounddevice` in `list_output_devices` and the module docstring).
 
 - [ ] **Step 2: Implement `audio_devices.py`**
 
@@ -3556,7 +3635,7 @@ Update the module docstring (`:1-13`): drop the "Preview output still goes throu
 Run: `python -m pytest tests/unit/test_audio_devices.py tests/unit/test_app_state.py tests/unit/test_scrub_player.py -q` → pass.
 Run: `python -m pytest tests/unit -q -m "not audio_hw and not perf"` → pass except `tests/unit/test_turntable_window.py` may still be green (no test calls the play path yet); Task 8 changes the call sites.
 
-Mutation check: in `list_output_devices`, change the filter to `d["kind"] == "loopback"` → the two output tests redden (loopback rows carry `mix_channels` 2/2, so the `6` assertion fails). Revert.
+Mutation check: in `list_output_devices`, change the filter to `d["kind"] == "loopback"` → both output tests redden: the loopback rows carry `mix_channels` 2/2, so the `6` assertion fails, and the loopback default is `{hp}`, so `default_output_device().id == "{spk}"` fails. Revert.
 
 - [ ] **Step 5: Commit**
 
@@ -3570,7 +3649,7 @@ git commit -m "feat(app): output devices from the native render list; AppState c
 ### Task 8: Window call sites, window tests with `native` mocked, hardware test
 
 **Files:**
-- Modify: `flashback_sampler/app/turntable_window.py` (`:920-921`), `tests/unit/test_turntable_window.py`
+- Modify: `flashback_sampler/app/turntable_window.py` (`:919-921`), `tests/unit/test_turntable_window.py`
 - Create: `tests/hw/test_native_playback_hw.py`
 
 **Interfaces:**
@@ -3621,7 +3700,7 @@ def test_play_click_binds_the_checkout_at_its_rate_and_plays(qapp, state, monkey
     win = TurntableWindow(state)
     co = _checkout(state)
     win._tick()
-    fake.state = (1, 1, 0, co.audio.shape[0], 48_000)
+    fake.state = (0, 0, 0, co.audio.shape[0], 48_000)  # not playing: the click must take the play branch
     win._on_play_clip_clicked()
     _arr, n, rate, ch = fake.bound
     assert (n, rate, ch) == (co.audio.shape[0], co.sample_rate, co.channels)
@@ -3781,7 +3860,7 @@ git commit -m "feat(app): clip playback binds at the checkout's rate through Nat
 gh issue create --title "PR e: render backend, Playback.zig, output enumeration" --body "Part of #17 (phase 2 part 2, spec docs/superpowers/specs/2026-08-30-zig-core-phase2-d-f-design.md). Branch feat/zig-playback -> dev. Scope: Backend.RenderStream + Kind.render; IAudioRenderClient + event-driven WasapiBackend.openRender; Playback.zig; fb_playback_* ABI; NativeScrubPlayer; output devices from the native list; sounddevice out of audio_devices.py and scrub_player.py. Measurements to record here: AUTOCONVERTPCM at 96 kHz render, GetBufferSize after Initialize(0,0), idle CPU vs the PortAudio stream."
 ```
 
-Comment on it as things land: the GetBufferSize value, the 96 kHz result, the idle-CPU pair, and any spec deviation beyond the eight listed at the top of this section.
+Comment on it as things land: the GetBufferSize value, the 96 kHz result, the idle-CPU pair, and any spec deviation beyond the eight listed at the top of this section (those eight are already in the spec's deviations block).
 
 - [ ] **Step 2: Local gate (the merge gate — no CI runs on feature branches)**
 
@@ -3795,7 +3874,7 @@ zig fmt --check core/build.zig core/src
 python -m pytest tests/hw -m audio_hw -s -q
 ```
 
-Expected: Zig count = PR d's end count + 17 on the Windows host; every leg green; hw suite green with the tone audible. Then `/simplify` (one combined pass) and `/code-review` medium, inline, per the owner's review-cost rule; fix findings; re-run the gate.
+Expected: Zig count = PR d's end count + 18 on the Windows host; every leg green; hw suite green with the tone audible. Then `/simplify` (one combined pass) and `/code-review` medium, inline, per the owner's review-cost rule; fix findings; re-run the gate.
 
 - [ ] **Step 3: PR body**
 
@@ -3813,7 +3892,7 @@ Closes #<sub-issue>. Part of #17.
 
 Measurements (spec "Risks to measure"): 96 kHz render under AUTOCONVERTPCM = <result>; GetBufferSize after Initialize(0,0) = <N> frames; idle CPU after auto-stop = <x %> vs PortAudio <y %>.
 
-Zig tests: <d's count> -> <d's count + 17>.
+Zig tests: <d's count> -> <d's count + 18>.
 
 ## Zig concepts in this PR
 - Event-driven wait vs polling: capture polls (`WasapiBackend.next`, Sleep(10) between GetNextPacketSize calls) because of the loopback quirk; render blocks in `WaitForSingleObject` on an event WASAPI signals once per period, so the thread costs nothing between fills. Same vtable idiom, different wake mechanism, and `Playback` cannot tell which it got.
@@ -3825,7 +3904,7 @@ Zig tests: <d's count> -> <d's count + 17>.
 
 - [ ] **Step 4: After the owner merges**
 
-Tick `- [ ] e — Playback + output-device enumeration` on epic #17 (`gh issue edit 17 --body ...` with the box checked, or edit in the web UI). Confirm the sub-issue closed via `Closes`. List `feat/zig-playback` (remote) with the other branch deletions pending approval on #17. Update the spec's PR e section only if a deviation beyond the eight recorded here shipped; otherwise the sub-issue comments are the record.
+Tick `- [ ] e — Playback + output-device enumeration` on epic #17 (`gh issue edit 17 --body ...` with the box checked, or edit in the web UI). Confirm the sub-issue closed via `Closes`. List `feat/zig-playback` (remote) with the other branch deletions pending approval on #17. The eight deviations listed at the top of this section are already in the spec's "Deviations recorded by the plan" block; update the spec only if a deviation beyond them shipped, otherwise the sub-issue comments are the record.
 ## PR f — Python buffer out, peak bins in Zig, deps and FLAC out, soak
 
 Branch `feat/zig-buffer-only` → `dev`. Spec section: "PR f" in `docs/superpowers/specs/2026-08-30-zig-core-phase2-d-f-design.md:268-332`. The Global Constraints of the part-1 plan (`docs/superpowers/plans/2026-08-16-zig-core-phase2-capture.md:1-65`) apply verbatim: execute in the primary checkout (not a worktree — `soak_test.py` and `ZIG-101.md` are untracked, `CLAUDE.md` is gitignored), `--build-file core/build.zig` on every zig call, no `cd`/`&&`/`$( )` compounds, sequester to `_ToRemove/` (gitignored: `.gitignore:2`), local gates are the merge gate, CI fires only on `dev → main`.
@@ -3843,7 +3922,8 @@ Pattern set: `soundfile|sounddevice|soundcard|FLAC|flac|AudioCircularBuffer|make
 | `.gitignore:59` | `*.flac` | none (ignores stray exports; leave) |
 | `core/src/abi.zig:213` | comment: "corrupts get_peak_bins, which walks the raw buffer" | 1 |
 | `core/src/Ring.zig:42-47` | comment: parity with `AudioCircularBuffer._SUMMARY_SLOT_SAMPLES` | 5 |
-| `core/src/Summary.zig:164` | doc: "Mirror of buffer.py get_summary_bins (buffer.py:421)" | 5 |
+| `core/src/Summary.zig:92` | doc: "Mirror of buffer.py _update_summary_locked" | 5 |
+| `core/src/Summary.zig:165` | doc: "Mirror of buffer.py get_summary_bins (buffer.py:421)" | 5 |
 | `core/src/wav.zig:3`, `:96` | "Parity vs soundfile", "checks against soundfile" | 4 |
 | `core/include/flashback_core.h:35-45` | comment: "a peak-bins reader" walking `fb_ring_storage` | 1 |
 | `flashback_sampler.egg-info/*` | generated, gitignored (`.gitignore:22`) | none (regenerates on the owner's next editable install; no pip run in this PR) |
@@ -3861,7 +3941,7 @@ Pattern set: `soundfile|sounddevice|soundcard|FLAC|flac|AudioCircularBuffer|make
 | `flashback_sampler/core/checkout.py:7,20,22,27,31-32,88,92,157-160,300,317-318,329-335` | FLAC + soundfile + `RingDerivedOps` | 3, 5 |
 | `flashback_sampler/core/drag_export.py:4` | docstring "Pure Python + soundfile" | 6 |
 | `flashback_sampler/core/mixed_capture.py:12,32,46-47,58,64` | `make_ring_buffer`/`RingDerivedOps` | PR d sequestered it (Task 0 verifies) |
-| `flashback_sampler/core/native.py:4-19,29,32-36,213-214,236-241,366-372,398-414` | docstring, import, class base, `get_peak_bins`, `close()` docstring | 1, 3, 5 |
+| `flashback_sampler/core/native.py:4-19,29,32-36,72,213-214,236-241,273,298,366-372,375,378,398-414` | docstring, import, class base, "`make_ring_buffer()`'s fallback contract" (`:72`), `# -- AudioCircularBuffer surface --` (`:273`, `:298`), `get_peak_bins`, bare `AudioCircularBuffer` (`:375`, `:378`), `close()` docstring | 1, 3, 5 |
 | `flashback_sampler/core/native_capture.py:32` | error text names `NativeAudioCircularBuffer` | none (still true) |
 | `flashback_sampler/core/scrub_player.py:16,114,199,202` | `sounddevice` | PR e (Task 0 verifies gone) |
 | `packaging/README.md:28,38,41,46` | `collect_all` bullet, smoke-test items, rough edge | 6 |
@@ -3880,10 +3960,10 @@ Pattern set: `soundfile|sounddevice|soundcard|FLAC|flac|AudioCircularBuffer|make
 | `tests/unit/test_capture_slot.py:10,31-33` | `RingDerivedOps` | 5 |
 | `tests/unit/test_capture_source.py:13,17-18,50` | `AudioCircularBuffer` | 5 |
 | `tests/unit/test_checkout.py:5,17,19` + 24 constructor sites (`:30,49,58,74,88,107,129,145,156,169,177,199,208,219,227,250,313,332,351,360,377,393,403,417,436`) | soundfile import, `AudioCircularBuffer` | 4, 5 |
-| `tests/unit/test_checkout.py:322-327,445-446,465-466,511-513` | `sf.read`/`sf.info` on WAV | 4 |
+| `tests/unit/test_checkout.py` — every `sf.` site (`grep -n "sf\." tests/unit/test_checkout.py` after Task 3) | `sf.read`/`sf.info` on WAV | 4 |
 | `tests/unit/test_checkout.py:331-348,449-460,493-494,519-535` | FLAC tests + docstrings | 3 |
 | `tests/unit/test_drag_export.py:8,10,24,57-59,70-72` | soundfile, `AudioCircularBuffer` | 4, 5 |
-| `tests/unit/test_native_smoke.py:33-35,116-131,142-160,163-212` | comments, `_peak_bins_impl` docstring, fallback test, two soundfile decode tests | 1, 4, 5 |
+| `tests/unit/test_native_smoke.py:33-35,63,96,116-131,142-160,163-212` | comments, stale "stress test in test_buffer.py" (`:63`), "Matches AudioCircularBuffer.copy_abs_range's 3-attempt retry" (`:96`), `_peak_bins_impl` docstring, fallback test, two soundfile decode tests | 1, 4, 5 |
 | `tests/unit/test_scrub_player.py:7,252` | `sounddevice` prose | PR e (Task 0 verifies gone) |
 | `tests/unit/test_turntable_window.py:80,600,618` | comment, `import soundfile`, `sf.info` | 4 |
 
@@ -3919,18 +3999,18 @@ Run and record the output in the sub-issue body:
 - Produces (Zig): `pub const PeakBin = extern struct { min: f32, max: f32 }`; `pub const PeakBinsError = error{ InvalidArgument, Overwritten }`; `pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) PeakBinsError!void` with `out.len == n_bins * channels`, layout `out[bin * channels + ch]`; `pub const peak_bins_max_samples_per_bin: u64 = 256`; `pub const peak_bins_read_headroom: u64 = 4096`.
 - Produces (ABI): `export fn fb_ring_peak_bins(ring: *Ring, n_frames: u64, n_bins: usize, out: [*]Ring.PeakBin) FbStatus` — `invalid_arg` for `n_bins == 0`, `overwritten` after three torn attempts (with `out` zeroed), `ok` otherwise (including the empty window, `out` zeroed).
 - Consumes: `Ring.total_written`, `Ring.capacity`, `Ring.storage_frames`, `Ring.frames` (`Ring.zig:20-32`).
-- **Plan choice (spec deviation, recorded in Step 6):** the spec (`:276-277`) declares `peakBins(abs_start, abs_end, …)`. The numpy port re-snapshots `total_written` and re-applies the headroom clamp on every retry (`buffer.py:84-101`); with absolute bounds that loop, and its arithmetic, would have to live in Python, which the standing rule (`spec:17-20`) forbids. The export therefore takes a window length, the same shape as `fb_ring_summary_bins(ring, n_bins, n_samples, …)` (`abi.zig:251`). Python passes `int(seconds * sample_rate)` — a unit conversion.
+- **Plan choice (spec deviation, recorded in Step 6):** the spec (`:276-277`) declares `peakBins(abs_start, abs_end, …)`. The numpy port re-snapshots `total_written` and re-applies the headroom clamp on every retry (`buffer.py:84-101`); with absolute bounds that loop, and its arithmetic, would have to live in Python, which the standing rule (`spec:18-21`) forbids. The export therefore takes a window length, the same shape as `fb_ring_summary_bins(ring, n_bins, n_samples, …)` (`abi.zig:251`). Python passes `int(seconds * sample_rate)` — a unit conversion.
 
 - [ ] **Step 1: Hand-computed cases (the numbers the tests assert)**
 
-All from `_peak_bins_impl` (`buffer.py:38-165`): `n_avail = min(tw, capacity)`; if `n_avail >= capacity and capacity > 8192` then `n_avail = capacity - 4096`; `n = min(req, n_avail)`; `abs_start = tw - n`; `edges[i] = int64(float(i) * (n / n_bins))` for `i < n_bins`, `edges[n_bins] = n` (numpy `linspace` computes `i * step` in f64 then truncates; the last edge is set to `stop`); `span_ref = edges[1] - edges[0]`; `stride = max(1, span_ref // 256)`; physical index = `abs % storage_frames` (`storage_frames = capacity + 4096`, `Ring.zig:80`).
+All from `_peak_bins_impl` (`buffer.py:40-165`): `n_avail = min(tw, capacity)`; if `n_avail >= capacity and capacity > 8192` then `n_avail = capacity - 4096`; `n = min(req, n_avail)`; `abs_start = tw - n`; `edges[i] = int64(float(i) * (n / n_bins))` for `i < n_bins`, `edges[n_bins] = n` (numpy `linspace` computes `i * step` in f64 then truncates; the last edge is set to `stop`); `span_ref = edges[1] - edges[0]`; `stride = max(1, span_ref // 256)`; physical index = `abs % storage_frames` (`storage_frames = capacity + 4096`, `Ring.zig:80`).
 
 | Case | Ring | Written | Call | Derived | Expected (min, max) per bin |
 |---|---|---|---|---|---|
 | A exact edges | rate 1000, ch 1, 1.0 s (cap 1000, storage 5096, no headroom: 1000 < 8192) | ramp 0..999 | req 1000, 4 bins | step 250, edges 0,250,500,750,1000, stride 1 | (0,249) (250,499) (500,749) (750,999) |
 | B uneven edges | same | ramp 0..9 | req 10, 4 bins | step 2.5 → edges 0,2,5,7,10 | (0,1) (2,4) (5,6) (7,9) |
 | C empty bins | same | ramp 0..2 | req 3, 5 bins | step 0.6 → edges 0,0,1,1,2,3 | bin0 empty → stays (0,0); bin1 (0,0); bin2 empty → copies bin1 (0,0); bin3 (1,1); bin4 (2,2) |
-| D physical wrap | same | ramp 0..5999 in ONE `write` (chunked internally, `Ring.zig:205-256`) | req 1000, 2 bins | tw 6000, n 1000, abs_start 5000, ring_start 5000; bin0 spans physical 5000..5096 then 0..404 | (5000,5499) (5500,5999) |
+| D physical wrap | same | ramp 0..5999 in ONE `write` (chunked internally, `Ring.zig:194-256`) | req 1000, 2 bins | tw 6000, n 1000, abs_start 5000, ring_start 5000; bin0 spans physical 5000..5096 then 0..404 | (5000,5499) (5500,5999) |
 | E headroom + stride grid | rate 10000, ch 1, 1.0 s (cap 10000 > 8192, storage 14096) | ramp 0..9999 | req 10000, 2 bins | n_avail 10000−4096 = 5904, abs_start 4096, step 2952, span_ref 2952, stride 2952//256 = 11, k = 2952//11 + 1 = 269; bin0 first_abs = ceil(4096/11)·11 = 373·11 = 4103, last = 4103 + 268·11 = 7051; bin1 start 7048, first_abs = 641·11 = 7051, last 9999 | (4103,7051) (7051,9999) |
 | F grid anchored to absolute index | ring E after one more frame (value 10000) | tw 10001 | req 10000, 2 bins | abs_start 4097; bin0 first_abs = ceil(4097/11)·11 = 4103 (unchanged) | bin0 still (4103,7051) |
 | H channels independent | rate 1000, ch 2, 1.0 s | 500 frames: ch0 = 0, ch1 = index | req 500, 1 bin | stride 1 | ch0 (0,0); ch1 (0,499) |
@@ -4031,6 +4111,11 @@ test "peakBins: headroom clamp and absolute stride grid (cases E, F)" {
     try ring.peakBins(10_000, 2, &out);
     try expectBin(&out, 0, 4103, 7051);
     try expectBin(&out, 1, 7051, 9999);
+    // Pins the headroom constant itself (4096): at 2 bins a one-frame
+    // shift is invisible, at 100 bins it moves an edge.
+    var out100: [100]PeakBin = undefined;
+    try ring.peakBins(10_000, 100, &out100);
+    try expectBin(&out100, 1, 4155, 4213); // edge 1 = floor(59.04) = 59 → abs 4155; a 4095 headroom gives 4154
     peakRamp(&ring, 1); // roll the window by one frame: the grid does not move
     try ring.peakBins(10_000, 2, &out);
     try expectBin(&out, 0, 4103, 7051);
@@ -4242,8 +4327,8 @@ FbStatus fb_ring_peak_bins(FbRing *, uint64_t n_frames, size_t n_bins, FbPeakBin
 `zig build --build-file core/build.zig test --summary all` → `<Z0> + 9` (7 Ring + 2 abi). `zig fmt --check core/src`.
 
 Mutation check (edit-then-revert, one per clause):
-- `binEdge`: compute `@intFromFloat(@as(f64, @floatFromInt(i * n)) / n_bins_f)` instead → case B still passes (2.5·i is exact) but case E's `span_ref`/edges can move; if E stays green, mutate instead to `@intFromFloat(@round(…))` → case B reddens (edge 2.5 → 3). Record which mutation reddened.
-- Delete the headroom `if` → case E bin0 min becomes 0. Red.
+- `binEdge`: compute `@intFromFloat(@as(f64, @floatFromInt(i * n)) / n_bins_f)` instead (add `_ = step;` so the unused parameter compiles) → case B still passes (2.5·i is exact) but case E's `span_ref`/edges can move; if E stays green, mutate instead to `@intFromFloat(@round(…))` → case B reddens (edge 2.5 → 3). Record which mutation reddened.
+- Delete the headroom `if` → case E bin0 min becomes 0. Red. Change `peak_bins_read_headroom` to 4095 → case E's 100-bin check reads 4154 for bin 1's min. Red.
 - `first_abs = bin_abs` (window-relative grid) → case F bin0 min becomes 4097. Red.
 - `modulus = self.capacity` → case D reads wrong slots. Red.
 - Remove the `i > 0` copy → case C's second ring: bin 3 stays (0,0) instead of (1,1). Red. (The first ring alone would NOT redden — its empty bin's predecessor is (0,0) — which is why the test carries the second ring.)
@@ -4271,8 +4356,11 @@ Replace `get_peak_bins` (`native.py:366-372`):
     def get_peak_bins(self, seconds: float, n_bins: int) -> np.ndarray:
         """(n_bins, 2, channels) float32: [i, 0, c] = min, [i, 1, c] = max.
         The engine fills PeakBin{min, max} per (bin, channel); the transpose
-        below is the only Python work. Zeros for an empty or torn window."""
+        below is the only Python work. Zeros for an empty or torn window,
+        and for a closed handle."""
         out = np.zeros((n_bins, self.channels, 2), dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
         status = self._lib.fb_ring_peak_bins(
             self._h, max(0, int(seconds * self.sample_rate)), n_bins,
             out.ctypes.data_as(C.POINTER(FbPeakBin)),
@@ -4339,7 +4427,7 @@ Rewrite the docstring of `test_get_peak_bins_correct_past_capacity_before_physic
 
 Run: `python -m pytest tests/unit/test_peak_bins_parity.py tests/unit/test_buffer.py tests/unit/test_native_smoke.py -q` → green (the `[python]` parametrizations still run numpy; the `[native]` ones now run Zig).
 
-Mutation check: in `Ring.zig` change `peak_bins_read_headroom` to 4095 → parity case E reddens (`assert_array_equal` on bin0 min). Revert, rebuild the DLL.
+Mutation check: in `Ring.zig` change `peak_bins_read_headroom` to 4095 → the 100-bin and 360-bin parametrizations of the parity test redden (`assert_array_equal`); cases A–E do not (at 2 bins the one-frame shift lands on the same min/max). Revert, rebuild the DLL.
 
 - [ ] **Step 6: Record the deviation, commit**
 
@@ -4360,7 +4448,7 @@ git commit -m "feat(core): Ring.peakBins + fb_ring_peak_bins -- waveform peaks c
 **Interfaces:**
 - Produces (Zig): `pub fn rmsLatest(self: *Ring, n_frames_req: u64, out: []f32) ReadError!void`, `out.len == channels`, window `n = min(req, total_written, capacity)` (the `get_latest` clamp, `native.py:306`), `out` zeroed on error.
 - Produces (ABI): `export fn fb_ring_rms(ring: *Ring, n_frames: u64, out: [*]f32) FbStatus`.
-- **Plan choice:** `RingDerivedOps.get_rms_levels` (`buffer.py:190-195`) is `sqrt(mean(audio²))` in numpy and feeds the level meter (`turntable_window.py:448`). The spec's enumeration (`:288-292`) does not name it, but its rule — methods are "one-line ABI calls or unit conversion" — excludes it. No new sync primitive: the reduction reads in `max_write_frames` chunks through `Ring.read`, so every chunk is a verified seqlock copy and the scratch is a fixed 32 KiB stack array.
+- **Plan choice:** `RingDerivedOps.get_rms_levels` (`buffer.py:190-195`) is `sqrt(mean(audio²))` in numpy and feeds the level meter (`turntable_window.py:448`). The spec's enumeration (`:285-290`) does not name it, but its rule — methods are "one-line ABI calls or unit conversion" — excludes it. No new sync primitive: the reduction reads in `max_write_frames` chunks through `Ring.read`, so every chunk is a verified seqlock copy and the scratch is a fixed 32 KiB stack array.
 
 - [ ] **Step 1: Failing Zig tests**
 
@@ -4437,8 +4525,8 @@ pub fn rmsLatest(self: *Ring, n_frames_req: u64, out: []f32) ReadError!void {
     const tw = self.total_written.load(.acquire);
     const n = @min(n_frames_req, @min(tw, self.capacity));
     if (n == 0) return;
-    var ss: [2]f64 = .{ 0, 0 };
-    var scratch: [max_write_frames * 2]f32 = undefined;
+    var ss: [2]f64 = .{ 0, 0 }; // channels <= 2 is enforced by Ring.init
+    var scratch: [max_write_frames * 2]f32 = undefined; // channels <= 2 is enforced by Ring.init
     var abs = tw - n;
     var left = n;
     while (left > 0) {
@@ -4472,8 +4560,11 @@ export fn fb_ring_rms(ring: *Ring, n_frames: u64, out: [*]f32) FbStatus {
 ```python
     def get_rms_levels(self, window_seconds: float = 0.1) -> np.ndarray:
         """RMS per channel over the newest window (level meter). Zeros when
-        the window is empty or torn -- the engine zeroes `out` on error."""
+        the window is empty or torn -- the engine zeroes `out` on error --
+        and for a closed handle."""
         out = np.zeros(self.channels, dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
         self._lib.fb_ring_rms(self._h, max(0, int(window_seconds * self.sample_rate)), _as_f32p(out))
         return out
 ```
@@ -4563,7 +4654,7 @@ def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
         win.close()
 ```
 
-Verify: `QFileDialog` is imported into `turntable_window`'s namespace (it is called unqualified at `:1197`); `_refresh_clip_side(auto_select_newest=True)` is the call the neighbouring tests use (`:592`).
+Verify: `QFileDialog` is imported into `turntable_window`'s namespace (it is called unqualified at `:1197`); `_refresh_clip_side(auto_select_newest=True)` is the call the neighbouring tests use (`:589` and `:606`).
 
 Run: `python -m pytest tests/unit/test_checkout.py tests/unit/test_turntable_window.py -q` → `test_save_rejects_flac` FAILS (FLAC still accepted), the dialog test FAILS (filter is the two-format string).
 
@@ -4619,7 +4710,7 @@ git commit -m "feat: FLAC out -- WAV-only checkout save, one encoder path, menu 
 
 **Files:**
 - Create: `tests/fixtures/wavread.py`, `tests/unit/test_wavread.py`
-- Modify: `tests/unit/test_native_smoke.py:163-212`, `tests/unit/test_checkout.py:17,322-327,445-446,465-466,511-513`, `tests/unit/test_drag_export.py:8,57-59,70-72`, `tests/unit/test_turntable_window.py:600,618`, `core/src/wav.zig:3,96`
+- Modify: `tests/unit/test_native_smoke.py:163-212`, `tests/unit/test_checkout.py:17` + every `sf.` site (`grep -n "sf\." tests/unit/test_checkout.py` after Task 3 — Task 3's deletions shift the pre-edit numbers), `tests/unit/test_drag_export.py:8,57-59,70-72`, `tests/unit/test_turntable_window.py:600,618`, `core/src/wav.zig:3,96`
 
 **Interfaces:**
 - Produces: `read_wav(path) -> tuple[np.ndarray, WavInfo]` — samples `float32 (frames, channels)`, `WavInfo(samplerate, channels, subtype, frames)` with `subtype ∈ {"FLOAT", "PCM_16", "PCM_24"}`. PCM is scaled by `2**(bits-1)` (the libsndfile convention the old oracle used), so code 32767 decodes to 32767/32768.
@@ -4797,7 +4888,7 @@ def test_wav_pcm_codes_match_the_documented_quantizer(tmp_path, subtype, scale, 
     np.testing.assert_array_equal(got, codes.astype(np.float32) / np.float32(denom))
 ```
 
-`tests/unit/test_checkout.py`: `:17` `import soundfile as sf` → `from tests.fixtures.wavread import read_wav`; `:322-327` →
+`tests/unit/test_checkout.py`: `:17` `import soundfile as sf` → `from tests.fixtures.wavread import read_wav`; then every `sf.` site (`grep -n "sf\." tests/unit/test_checkout.py`), for example the first one →
 
 ```python
     data, info = read_wav(target)
@@ -4815,7 +4906,7 @@ def test_wav_pcm_codes_match_the_documented_quantizer(tmp_path, subtype, scale, 
 
 - [ ] **Step 4: Verify; commit**
 
-`grep -rn "soundfile\|import sf\|sf\." tests flashback_sampler core/src` → zero hits. `python -m pytest tests/unit -q -m "not audio_hw and not perf"` → green. `zig fmt --check core/src`.
+`grep -rnI --exclude-dir=__pycache__ "soundfile\|import sf\|sf\." tests flashback_sampler core/src` → zero hits. `python -m pytest tests/unit -q -m "not audio_hw and not perf"` → green. `zig fmt --check core/src`.
 
 ```bash
 git add tests/fixtures/wavread.py tests/unit/test_wavread.py tests/unit/test_native_smoke.py tests/unit/test_checkout.py tests/unit/test_drag_export.py tests/unit/test_turntable_window.py core/src/wav.zig
@@ -4827,7 +4918,7 @@ git commit -m "test: stdlib WAV oracle (tests/fixtures/wavread.py) replaces ever
 ### Task 5: Delete `buffer.py` — `native.py` stands alone; every importer, fixture, and test moves to the native class
 
 **Files:**
-- Modify: `flashback_sampler/core/native.py`, `flashback_sampler/core/__init__.py`, `flashback_sampler/core/checkout.py`, `flashback_sampler/core/capture_slot.py`, `flashback_sampler/app/state.py`, `flashback_sampler/app/audio_devices.py:184`, `flashback_sampler/app/turntable_window.py:85`, `flashback_sampler/app/widgets/waveform_view.py:7`, `tests/conftest.py`, `tests/fixtures/fake_capture.py`, `tests/hw/test_native_capture_hw.py`, `tests/unit/test_buffer.py`, `tests/unit/test_capture_source.py`, `tests/unit/test_checkout.py`, `tests/unit/test_drag_export.py`, `tests/unit/test_app_state.py`, `tests/unit/test_capture_slot.py`, `tests/unit/test_audio_devices.py:8`, `tests/unit/test_native_smoke.py:33-35,142-160`, `core/src/Ring.zig:42-47`, `core/src/Summary.zig:164`, `soak_test.py:21,26`
+- Modify: `flashback_sampler/core/native.py`, `flashback_sampler/core/__init__.py`, `flashback_sampler/core/checkout.py`, `flashback_sampler/core/capture_slot.py`, `flashback_sampler/app/state.py`, `flashback_sampler/app/audio_devices.py:184`, `flashback_sampler/app/turntable_window.py:85`, `flashback_sampler/app/widgets/waveform_view.py:7`, `tests/conftest.py`, `tests/fixtures/fake_capture.py`, `tests/hw/test_native_capture_hw.py`, `tests/unit/test_buffer.py`, `tests/unit/test_capture_source.py`, `tests/unit/test_checkout.py`, `tests/unit/test_drag_export.py`, `tests/unit/test_app_state.py`, `tests/unit/test_capture_slot.py`, `tests/unit/test_audio_devices.py:8`, `tests/unit/test_native_smoke.py:33-35,63,96,142-160`, `core/src/Ring.zig:42-47`, `core/src/Summary.zig:92,165`, `soak_test.py:21,26`
 - Move to `_ToRemove/`: `flashback_sampler/core/buffer.py`, `tests/unit/test_peak_bins_parity.py`
 
 **Interfaces:**
@@ -4863,7 +4954,7 @@ def buffer_cls():
 
 Delete `test_write_wraps_around_end_of_ring` and its lead comment (`:118-138` — Python-only: its indices assume the physical modulus equals `buffer_size`), and the `make_ring_buffer` section (`:705-732`). Rewrite the comments at `:72-75`, `:230`, `:321`, `:468-469` so they no longer contrast two implementations.
 
-`tests/unit/test_native_smoke.py`: delete `test_load_skips_a_candidate_that_exists_but_is_not_a_valid_library` (`:142-160` — it asserts the fallback contract) and add in its place:
+`tests/unit/test_native_smoke.py`: `:63` "stress test in test_buffer.py" → name the test that now holds it (`grep -n "stress" tests/unit/test_buffer.py`; drop the sentence if none); `:96` "Matches AudioCircularBuffer.copy_abs_range's 3-attempt retry" → "Matches NativeAudioCircularBuffer.copy_abs_range's 3-attempt retry". Delete `test_load_skips_a_candidate_that_exists_but_is_not_a_valid_library` (`:142-160` — it asserts the fallback contract) and add in its place:
 
 ```python
 def test_load_skips_a_candidate_that_exists_but_is_not_a_valid_library(tmp_path, monkeypatch):
@@ -4895,6 +4986,10 @@ Run: `python -m pytest tests/unit/test_buffer.py tests/unit/test_app_state.py -q
 `native.py`:
 - `:1-19` docstring → describe the class as the ring handle: Zig owns memory, writes, reads, peaks (`fb_ring_peak_bins`), RMS (`fb_ring_rms`), summary, WAV; Python holds the handle, converts units, and keeps `self.buffer` as a zero-copy view "with no production reader — tests inspect it; `write_pos` wraps at `storage_frames`". Keep the TWO SIZES paragraph (it still governs `self.buffer`'s shape and `write_pos`).
 - `:29` `from flashback_sampler.core.buffer import RingDerivedOps, _peak_bins_impl` → delete; add `import math`.
+- `:72` "`make_ring_buffer()`'s fallback contract" → "the library is required; `NativeAudioCircularBuffer` raises `RuntimeError` without it".
+- `:273`, `:298` `# -- AudioCircularBuffer surface --` section comments → `# -- ring surface --`.
+- `:375`, `:378` bare `AudioCircularBuffer` → `NativeAudioCircularBuffer` (or drop the comparison where the sentence is about the deleted class).
+- `get_peak_bins` / `get_rms_levels` docstrings (Tasks 1–2): keep the "closed handle" sentence and the `if self._h is None` guard — NULL into a `*Ring` is a process abort, not an exception.
 - `:213` `class NativeAudioCircularBuffer(RingDerivedOps):` → `class NativeAudioCircularBuffer:`; `:214` docstring → "The app's ring buffer: a handle on a Zig `Ring`."
 - `:236-241` comment: "Visualization readers (get_peak_bins) iterate this directly" → "No production reader; tests pin flush zeroing and the physical layout through it."
 - Add after `gain` (`:257-263`), ported from `buffer.py:184-238` with the two-implementation prose removed:
@@ -4982,7 +5077,7 @@ sed -i 's/from flashback_sampler.core.buffer import AudioCircularBuffer/from fla
 ```
 Then fix by hand: `test_capture_source.py:17` return annotation `-> AudioCircularBuffer` → `-> NativeAudioCircularBuffer`; `test_app_state.py:14` → `from flashback_sampler.core.native import NativeAudioCircularBuffer`, `:21-24` → `assert isinstance(st.buffer, NativeAudioCircularBuffer)`, `:240-241` and `:453-454` comments; `test_capture_slot.py:10`, `:31-33` likewise; `test_audio_devices.py:8` "a fake AudioCircularBuffer" → "a fake ring buffer".
 
-Zig prose: `Ring.zig:42-47` → "4096 frames ≈ 85 ms at 48 kHz: fine enough for smooth rolling, coarse enough that the summary stays tiny (≈330 KB for 15 min)." (the Python parity clause is gone); `Summary.zig:164` "Mirror of buffer.py get_summary_bins (buffer.py:421)" → "Aggregates frozen slots into display bins; n_avail clamps against `capacity_frames` (the ring's readable window)".
+Zig prose: `Ring.zig:42-47` → "4096 frames ≈ 85 ms at 48 kHz: fine enough for smooth rolling, coarse enough that the summary stays tiny (≈330 KB for 15 min)." (the Python parity clause is gone); `Summary.zig:92` "Mirror of buffer.py _update_summary_locked" → "Folds one written chunk into the frozen slots"; `Summary.zig:165` "Mirror of buffer.py get_summary_bins (buffer.py:421)" → "Aggregates frozen slots into display bins; n_avail clamps against `capacity_frames` (the ring's readable window)".
 
 Sequester (the recipe from part-1 Tasks 7/10 — `_ToRemove/` is gitignored, `git mv` into it stages nothing):
 
@@ -4997,9 +5092,9 @@ The PR diff shows plain deletions; the bytes survive under `_ToRemove/` for the 
 
 - [ ] **Step 3: Verify**
 
-`grep -rn "core.buffer\|AudioCircularBuffer\b\|make_ring_buffer\|RingDerivedOps\|_peak_bins_impl\|buffer_cls.*params" flashback_sampler tests soak_test.py core/src core/include *.md packaging flashback_sampler.spec | grep -v "NativeAudioCircularBuffer"` → zero hits outside `PHASE2-HANDOFF.md` (untracked history) and `docs/superpowers/` (specs/plans stay as written).
+`grep -rnI --exclude-dir=__pycache__ "core.buffer\|AudioCircularBuffer\b\|make_ring_buffer\|RingDerivedOps\|_peak_bins_impl\|buffer_cls.*params" flashback_sampler tests soak_test.py core/src core/include *.md packaging flashback_sampler.spec | grep -v "NativeAudioCircularBuffer"` → zero hits outside `PHASE2-HANDOFF.md` (untracked history) and `docs/superpowers/` (specs/plans stay as written).
 
-`python -m pytest tests/unit -q -m "not audio_hw and not perf"` → green. Expected count: `<P0>` − 37 (the `[python]` parametrizations of the 38 `buffer_cls` tests minus the perf-marked one, which is deselected) − 1 (`test_write_wraps_around_end_of_ring`) − 2 (`make_ring_buffer` tests) − 4 (FLAC, Task 3) − 8 (parity file, Tasks 1–2) + 2 (Task 3 checkout) + 1 (Task 3 dialog) + 4 (Task 4 wavread) + 1 (package export). Record the actual number in the sub-issue; explain any difference.
+`python -m pytest tests/unit -q -m "not audio_hw and not perf"` → green. Expected count: `<P0>` − 37 (the `[python]` parametrizations of the 38 `buffer_cls` tests minus the perf-marked one, which is deselected) − 1 (`test_write_wraps_around_end_of_ring`) − 2 (`make_ring_buffer` tests) − 4 (FLAC, Task 3) + 2 (Task 3 checkout) + 1 (Task 3 dialog) + 4 (Task 4 wavread) + 1 (package export) (the parity file is added in Task 1 and sequestered in Task 5; net 0 against `<P0>`). From the 527 baseline: 527 − 37 − 1 − 2 − 4 + 2 + 1 + 4 + 1 = 491. Record the actual number in the sub-issue; explain any difference.
 
 Mutation check: put `from .buffer import AudioCircularBuffer` back into `core/__init__.py` → `ImportError` at collection (the module is gone) — the whole suite reddens. That is the pin; revert. Then: temporarily hide the DLL (`ren core\zig-out\bin\flashback_core.dll flashback_core.dll.off`) → `pytest` exits 1 with the build message from `conftest.py`; restore.
 
@@ -5018,14 +5113,14 @@ git commit -m "refactor: delete the Python ring buffer -- NativeAudioCircularBuf
 ### Task 6: Dependencies out; stale comments; the grep gate
 
 **Files:**
-- Modify: `pyproject.toml:14-16`, `requirements.txt:2-4`, `flashback_sampler.spec:13-14,25,34-38`, `packaging/README.md:28,38,41,46`, `flashback_sampler/core/capture_source.py:5-15,29`, `flashback_sampler/core/drag_export.py:4`, `README.md:16`
+- Modify: `pyproject.toml:14-16`, `requirements.txt:2-4`, `flashback_sampler.spec:13-14,26,34-38`, `packaging/README.md:28,38,41,46`, `flashback_sampler/core/capture_source.py:5-15,29`, `flashback_sampler/core/drag_export.py:4`, `README.md:16`
 
 - [ ] **Step 1: The failing gate**
 
 Run the gate before editing so its red state is on record:
 
 ```bash
-grep -rn "sounddevice\|soundcard\|soundfile" flashback_sampler tests soak_test.py flashback_sampler.spec pyproject.toml requirements.txt packaging README.md PLATFORM.md core/src
+grep -rnI --exclude-dir=__pycache__ "sounddevice\|soundcard\|soundfile" flashback_sampler tests soak_test.py flashback_sampler.spec pyproject.toml requirements.txt packaging README.md PLATFORM.md core/src
 ```
 Expected now: hits at exactly the file:lines listed above (plus any PR e left). Expected after Step 2: zero.
 
@@ -5033,7 +5128,7 @@ Expected now: hits at exactly the file:lines listed above (plus any PR e left). 
 
 - `pyproject.toml:14-16` → delete the three lines (`numpy`, `PySide6`, `platformdirs` remain).
 - `requirements.txt:2-4` → delete.
-- `flashback_sampler.spec:13-14` → `- No pip package ships native DLLs any more; the only native binary is flashback_core.dll (below).`; `:25` `from PyInstaller.utils.hooks import collect_all` → delete; `:34-38` (the `for pkg in (…): collect_all` loop) → delete. `datas = []`, `binaries = []`, `hiddenimports = ["flashback_sampler.io"]` stay.
+- `flashback_sampler.spec:13-14` → `- No pip package ships native DLLs any more; the only native binary is flashback_core.dll (below).`; `:26` `from PyInstaller.utils.hooks import collect_all` → delete; `:34-38` (the `for pkg in (…): collect_all` loop) → delete. `datas = []`, `binaries = []`, `hiddenimports = ["flashback_sampler.io"]` stay.
 - `packaging/README.md:28` bullet → `- **No `collect_all` for audio packages** — capture, mixing, playback, and WAV encoding all live in `flashback_core.dll`; the only pip packages are numpy, PySide6, platformdirs.`; `:38` "via `soundcard`" → "via the Zig core"; `:41` "Tests `soundfile` / `libsndfile` made it into the bundle." → "Tests `fb_wav_write` in the bundled `flashback_core.dll`."; `:46` (the `soundcard` Realtek rough edge) → delete.
 - `capture_source.py:5-15` docstring → "The concrete backend is `core/native_capture.py` (`NativeCaptureSource`, one Zig `Capture` per source) and `<MIXED_MODULE>` (`NativeMixedSource`, N sources into one ring). This module is import-cheap: no Qt, no ctypes, so unit tests can instantiate fake sources."; `:29` "concrete CaptureSource -> AudioCircularBuffer.write(frames)" → "concrete CaptureSource -> Ring.write (in Zig; fakes call NativeAudioCircularBuffer.write)".
 - `drag_export.py:4` "Pure Python + soundfile — no Qt." → "Pure Python — no Qt; the write goes through CheckoutManager.save and fb_wav_write."
@@ -5044,11 +5139,11 @@ Do NOT run `pip uninstall`; the packages stay installed in the owner's environme
 - [ ] **Step 3: Verify**
 
 - The grep from Step 1 → zero hits.
-- `grep -rn "^import sound\|^from sound\|import sound" flashback_sampler tests soak_test.py` → zero.
+- `grep -rnI --exclude-dir=__pycache__ "^import sound\|^from sound\|import sound" flashback_sampler tests soak_test.py` → zero.
 - Import smoke: `python -c "import flashback_sampler.app.main, flashback_sampler.app.state, flashback_sampler.core.checkout, flashback_sampler.core.native, flashback_sampler.core.drag_export, tests.fixtures.fake_capture"` → exit 0.
 - `python -m flashback_sampler.app.main --help` → prints the argparse usage and exits 0 (`_parse_args` runs before `QApplication`, `main.py:47-49`).
 - `python -m pytest tests/unit -q -m "not audio_hw and not perf"` → green, count unchanged from Task 5.
-- Mutation check (the gate itself): add `import soundfile` to `drag_export.py` → the import smoke fails on a venv without it, and the grep gate reports one hit; revert. This proves the gate reads the paths it claims to.
+- Mutation check (the gate itself): add `import soundfile` to `drag_export.py` → the import smoke fails on a venv without it, and the grep gate reports one hit; revert. This proves the gate reads the paths it claims to. The gate reads source only: `-I` skips binaries and `--exclude-dir=__pycache__` skips stale `.pyc` files, which otherwise print "Binary file … matches" for names that left the source long ago and never let the count reach zero.
 
 - [ ] **Step 4: Commit**
 
@@ -5129,7 +5224,7 @@ git commit -m "docs: Windows-only capture/mixing/playback, arm-time RAM, part-2 
 
 Current script (`soak_test.py:1-67`) builds one ring and one `NativeCaptureSource`. Edits:
 
-- `:15-22` imports → add `import argparse`; drop `from flashback_sampler.core import native`; keep `NativeAudioCircularBuffer` (Task 5) and `NativeCaptureSource`; add `from flashback_sampler.core.<MIXED_MODULE> import <MIXED_CLASS>` (Task 0 names).
+- `:15-22` imports → add `import argparse`; drop `from flashback_sampler.core import native` and `import sys` (dead once argparse owns the arguments); keep `NativeAudioCircularBuffer` (Task 5) and `NativeCaptureSource`; add `from flashback_sampler.core.<MIXED_MODULE> import <MIXED_CLASS>` (Task 0 names).
 - `:24` `SECONDS = …` → 
 
 ```python

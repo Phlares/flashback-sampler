@@ -384,3 +384,36 @@ is authoritative where it differs below.
   Python stays filter-only.
 - `NativeScrubPlayer` drops `open()`: the stream opens lazily on the
   first `play()`.
+- PR d: the `writer_active` start-window test parks `FakeBackend` in
+  `open()` (a `hold` knob), not in the first `next()`: the window to
+  pin is before any stream exists.
+- PR d: `audio_devices.build_mixed_capture_source(...)` is the mixed
+  factory, beside `build_capture_source`; both share one
+  `_spec_kwargs` helper. `state.build_capture_for_slot` passes specs
+  through and never picks a class itself.
+- PR d rider (not in the spec): `Capture.start` and `Playback.play`
+  reset `err_buf[0]` with `err_len`. `lastError()` slices
+  `err_buf[0..len :0]`; a length reset alone trips the sentinel check
+  on a restart after a recorded error.
+- PR e: `NativeScrubPlayer.bind(audio, sample_rate)` — channels come
+  from the array shape (1-D reshapes to `[N, 1]`); the checkout's rate
+  is the second argument.
+- PR e: wrapper `stop()` = `pause()` + `seek_samples(0)`. Zig has no
+  unbind; a clip stays bound until the next `bind` or `close`.
+- PR e: `bind` against a render thread mid-copy uses a two-flag
+  handshake (`playing` + `in_copy`, both `seq_cst`) instead of a lock.
+  `bind` clears `playing`, then spins until `in_copy` is false; the
+  thread raises `in_copy` before it reads `playing` or the clip.
+- PR e: after an `openRender` failure the thread exits with `done`
+  set; the next `play()` joins it and spawns again, so a fixed device
+  is retried without a `destroy`.
+- PR e: `fb_playback_seek` takes `u64`; Python `seek_samples` clamps
+  with `max(0, int(pos))` and Zig clamps to `clip_frames`.
+- PR e: the FakeBackend render sink records writes through a
+  test-supplied `render_allocator` (`std.testing.allocator` is a
+  compile error outside a `test` block, and `FakeBackend` is analyzed
+  in the DLL build).
+- PR e: `Playback.max_fill_frames = 8192` caps one write; a larger
+  `available()` is filled over several wakes. `fill` takes the open
+  stream's channel count as a parameter so a rebind cannot resize a
+  write under a stream opened at the old count.
