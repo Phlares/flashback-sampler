@@ -392,7 +392,7 @@ def test_shutdown_is_idempotent_without_capture_or_stream():
     st.shutdown()  # must not raise
 
 
-def test_checkout_from_live_buffer_then_bind_to_scrub_player():
+def test_checkout_from_live_buffer_then_bind_to_scrub_player(monkeypatch):
     """
     End-to-end headless: push audio into the buffer, create a checkout,
     bind it to the scrub player, and verify the callback plays it back.
@@ -406,17 +406,20 @@ def test_checkout_from_live_buffer_then_bind_to_scrub_player():
     assert co.audio.shape == (500, 1)
 
     seen = {}
-    real_lib = st.scrub_player._lib
-    st.scrub_player._lib = type("L", (), {
+    # The player's handle is lazy, so a fake library serves the whole
+    # native side: no DLL, no device, and no real handle to free.
+    from flashback_sampler.core import native
+
+    fake_lib = type("L", (), {
+        "fb_playback_create": staticmethod(lambda d, r, c: 0xF00D),
         "fb_playback_bind": staticmethod(lambda h, p, n, r, c: seen.update(n=n, rate=r, ch=c) or 0),
         "fb_playback_play": staticmethod(lambda h: seen.update(played=True) or 0),
+        "fb_playback_destroy": staticmethod(lambda h: None),
     })()
-    try:
-        st.scrub_player.bind(co.audio, co.sample_rate)
-        st.scrub_player.play()
-        assert seen == dict(n=500, rate=1000, ch=1, played=True)
-    finally:
-        st.scrub_player._lib = real_lib  # the real handle is freed by the real destroy
+    monkeypatch.setattr(native, "load", lambda: fake_lib)
+    st.scrub_player.bind(co.audio, co.sample_rate)
+    st.scrub_player.play()
+    assert seen == dict(n=500, rate=1000, ch=1, played=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────

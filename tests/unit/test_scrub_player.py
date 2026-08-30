@@ -58,16 +58,26 @@ def _calls(lib, name):
     return [a for n, a in lib.calls if n == name]
 
 
-def test_create_passes_rate_channels_and_device(lib):
-    NativeScrubPlayer(44_100, 1, device="{hp}")
+def test_create_is_lazy_and_first_bind_passes_rate_channels_and_device(lib):
+    p = NativeScrubPlayer(44_100, 1, device="{hp}")
+    assert not _calls(lib, "fb_playback_create")
+    p.bind(np.zeros(4, dtype=np.float32), 44_100)
     assert _calls(lib, "fb_playback_create") == [(b"{hp}", 44_100, 1)]
+    p.bind(np.zeros(4, dtype=np.float32), 44_100)
+    assert len(_calls(lib, "fb_playback_create")) == 1  # created once, reused
 
 
-def test_create_without_library_raises(monkeypatch):
+def test_construct_without_library_is_silent_and_the_first_native_call_raises(monkeypatch):
+    """Zig-less workstations stay green (tests/conftest.py): AppState
+    builds a player at startup, so construction must not touch the
+    native library. Only a call that needs the handle may raise."""
     monkeypatch.setattr(native, "_lib", None)
     monkeypatch.setattr(native, "_lib_tried", True)
+    p = NativeScrubPlayer()
     with pytest.raises(RuntimeError):
-        NativeScrubPlayer()
+        p.bind(np.zeros(4, dtype=np.float32), 48_000)
+    with pytest.raises(RuntimeError):
+        p.play()
 
 
 def test_bind_passes_frames_rate_channels_and_updates_attributes(lib):
@@ -113,12 +123,14 @@ def test_play_pause_forward_and_play_failure_raises(lib):
 
 def test_stop_is_pause_then_seek_zero(lib):
     p = NativeScrubPlayer()
+    p.play()  # materialize the handle; pause/seek are inert without one
     p.stop()
     assert [(n, a[1:]) for n, a in lib.calls[-2:]] == [("fb_playback_pause", ()), ("fb_playback_seek", (0,))]
 
 
 def test_seek_samples_clamps_negative_to_zero_and_passes_through(lib):
     p = NativeScrubPlayer()
+    p.play()  # materialize the handle
     p.seek_samples(-5)
     p.seek_samples(123)
     assert [a[1] for a in _calls(lib, "fb_playback_seek")] == [0, 123]
@@ -143,15 +155,20 @@ def test_state_properties_read_native_state(lib):
     assert p.is_playing is False
 
 
-def test_set_device_passes_encoded_id(lib):
+def test_set_device_before_the_handle_reaches_create_and_after_it_forwards(lib):
     p = NativeScrubPlayer()
-    p.set_device("{spk}")
-    assert _calls(lib, "fb_playback_set_device") == [(0xF00D, b"{spk}")]
+    p.set_device("{spk}")  # AppState does this at startup, before any play
     assert p.device == "{spk}"
+    assert not _calls(lib, "fb_playback_set_device")
+    p.play()
+    assert _calls(lib, "fb_playback_create") == [(b"{spk}", 48_000, 2)]
+    p.set_device("{hp}")
+    assert _calls(lib, "fb_playback_set_device") == [(0xF00D, b"{hp}")]
 
 
 def test_last_error_none_when_empty(lib):
     p = NativeScrubPlayer()
+    p.play()  # materialize the handle
     assert p.last_error() is None
     lib.err = b"stream failed: ActivationFailed"
     assert p.last_error() == "stream failed: ActivationFailed"
@@ -159,6 +176,7 @@ def test_last_error_none_when_empty(lib):
 
 def test_close_destroys_once_and_is_inert_after(lib):
     p = NativeScrubPlayer()
+    p.play()  # materialize the handle
     p.close()
     p.close()
     assert len(_calls(lib, "fb_playback_destroy")) == 1
@@ -167,8 +185,11 @@ def test_close_destroys_once_and_is_inert_after(lib):
     assert p.is_playing is False and p.cursor_samples == 0
 
 
-def test_bind_after_close_is_inert(lib):
+def test_bind_after_close_is_inert_and_never_recreates_the_handle(lib):
     p = NativeScrubPlayer()
+    p.play()  # materialize the handle
     p.close()
     p.bind(np.zeros((4, 1), dtype=np.float32), 48_000)  # neither crashes nor reaches the fake
     assert not _calls(lib, "fb_playback_bind")
+    # Lazy creation must not resurrect a closed player.
+    assert len(_calls(lib, "fb_playback_create")) == 1
