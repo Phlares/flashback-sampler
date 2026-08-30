@@ -22,6 +22,7 @@ ss: []f64, // sum of squares — f64 like the Python original, so long
 // accumulations don't lose precision in f32
 count: []u64, // per slot (frames counted)
 slot_abs: []i64, // generation tag; -1 = never written / poisoned
+gen: std.atomic.Value(u64), // seqlock: odd = a writer is mid-update/poison
 
 pub fn init(allocator: std.mem.Allocator, capacity_frames: u64, slot_frames: u32, channels: u16) !Summary {
     const n_slots = @max(1, capacity_frames / slot_frames);
@@ -46,6 +47,7 @@ pub fn init(allocator: std.mem.Allocator, capacity_frames: u64, slot_frames: u32
         .ss = ss,
         .count = count,
         .slot_abs = slot_abs,
+        .gen = std.atomic.Value(u64).init(0),
     };
     s.poison();
     @memset(s.min, 0);
@@ -65,6 +67,11 @@ pub fn deinit(self: *Summary) void {
 }
 
 pub fn poison(self: *Summary) void {
+    // Seqlock: bump to odd before mutating, back to even after. A reader
+    // (rmsBins) that samples gen while it's odd knows a write is in
+    // flight and retries — the writer itself never waits on anyone.
+    _ = self.gen.fetchAdd(1, .release);
+    defer _ = self.gen.fetchAdd(1, .release);
     @memset(self.slot_abs, -1);
 }
 
@@ -81,6 +88,11 @@ pub const max_bins: usize = 4096;
 /// extra multiply is nothing, and it keeps write()'s fast path free of
 /// a second pass). Runs on the audio thread: no locks, no allocation.
 pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u64) void {
+    // Seqlock: odd gen = "being written". Readers (rmsBins, on the UI
+    // thread) snapshot gen before and after; a mismatch or an odd value
+    // means retry. The writer never waits — same discipline as Ring.
+    _ = self.gen.fetchAdd(1, .release);
+    defer _ = self.gen.fetchAdd(1, .release);
     const chans: u64 = self.channels;
     const n: u64 = interleaved.len / chans;
     if (n == 0) return;
@@ -127,13 +139,13 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
 ///
 /// THREADING: called from a control/UI thread (Task 6 exposes this as
 /// `fb_ring_summary_bins`, polled at ~30 Hz), reading `Summary` fields
-/// that `update` — running concurrently on the audio thread — mutates
-/// with no atomics and no seqlock (unlike `Ring.read`/`write`, this pair
-/// has no synchronization at all). Worst case is one inconsistent or
-/// NaN bin for one frame: `bin_cnt[b] == 0` is guarded above, and a
-/// torn `ss` read produces NaN through the sqrt rather than trapping —
-/// no memory unsafety, no crash path. A design decision for the arc,
-/// not fixed here. See issue #23.
+/// that `update` — running concurrently on the audio thread — mutates.
+/// `Summary` is a seqlock, the same discipline as `Ring.read`/`write`:
+/// `update` and `poison` bump `gen` to odd before mutating and back to
+/// even after; this function snapshots `gen` before and after computing
+/// into its scratch, and retries (bounded to 3 attempts) if `gen` was
+/// odd or changed in between — a torn read is detected and discarded,
+/// never published. The writer never waits: it just bumps an atomic.
 ///
 /// STACK: allocates ~96 KiB of scratch on the caller's stack (`bin_ss`:
 /// max_bins * 2 channels * 8 bytes = 64 KiB, plus `bin_cnt`: max_bins * 8
@@ -143,6 +155,20 @@ pub fn update(self: *Summary, interleaved: []const f32, gain: f32, start_abs: u6
 /// C ABI precisely so other hosts can link it) with a constrained-stack
 /// thread must account for this before calling in.
 pub fn rmsBins(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
+    // Bounded retry: never spin forever, never block the writer. If gen
+    // is still unstable after 3 attempts, hand back the last computation
+    // — a stale or briefly-torn bin beats a UI thread that never returns.
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        const g0 = self.gen.load(.acquire);
+        self.rmsBinsOnce(total_written, n_samples_req, bin_span_frames, out);
+        const g1 = self.gen.load(.acquire);
+        if ((g0 & 1) == 0 and g0 == g1) return;
+        if (attempt >= 3) return;
+    }
+}
+
+fn rmsBinsOnce(self: *const Summary, total_written: u64, n_samples_req: u64, bin_span_frames: u64, out: []f32) void {
     const chans = self.channels;
     const n_bins = out.len / chans;
     @memset(out, 0);
@@ -265,4 +291,32 @@ test "rmsBins with n_bins exceeding the number of populated slots leaves the res
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[1], 1e-6);
     try std.testing.expectEqual(@as(f32, 0), out[2]);
     try std.testing.expectEqual(@as(f32, 0), out[3]);
+}
+
+test "update and poison bump the generation twice; rmsBins re-reads until it sees a stable even generation" {
+    var s = try Summary.init(std.testing.allocator, 4096 * 4, 4096, 1);
+    defer s.deinit();
+    // init itself calls poison() (Summary.zig:50), so a fresh Summary
+    // already sits at generation 2 — not 0.
+    try std.testing.expectEqual(@as(u64, 2), s.gen.load(.acquire));
+    const block = [_]f32{0.5} ** 4096;
+    s.update(&block, 1.0, 0);
+    try std.testing.expectEqual(@as(u64, 4), s.gen.load(.acquire));
+    s.poison();
+    try std.testing.expectEqual(@as(u64, 6), s.gen.load(.acquire));
+    // A torn snapshot: force gen odd, rmsBins must not spin forever and must return.
+    s.gen.store(7, .release);
+    var out: [1]f32 = undefined;
+    s.rmsBins(4096, 0, 0, &out);
+    s.gen.store(8, .release);
+}
+
+test "rmsBins result equals the value read after the writer finished (no torn read across a full slot rewrite)" {
+    var s = try Summary.init(std.testing.allocator, 4096 * 2, 4096, 1);
+    defer s.deinit();
+    const a = [_]f32{0.5} ** 4096;
+    s.update(&a, 1.0, 0);
+    var out: [1]f32 = undefined;
+    s.rmsBins(4096, 4096, 4096, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0], 1e-4);
 }
