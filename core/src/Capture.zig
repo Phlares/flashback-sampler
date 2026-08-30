@@ -6,11 +6,12 @@ const std = @import("std");
 const Ring = @import("Ring.zig");
 const Backend = @import("Backend.zig");
 const FakeBackend = @import("FakeBackend.zig");
+const ErrorSlot = @import("ErrorSlot.zig");
 const Capture = @This();
 
 pub const Stats = extern struct { running: u8, frames_written: u64, xruns: u32, mix_rate: u32 };
 pub const max_device_id = 256;
-pub const max_error = 256;
+pub const max_error = ErrorSlot.max_len;
 
 // The idle loop's sleep. Zig 0.16 has no std.Thread.sleep; blocking waits
 // live under std.Io. Same single-threaded Io singleton Mixer.zig and
@@ -31,8 +32,7 @@ running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 frames_written: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 xruns: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 mix_rate: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-err_buf: [max_error]u8 = [_]u8{0} ** max_error,
-err_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+err: ErrorSlot = .{},
 
 fn waitUntil(cap: *Capture, comptime pred: fn (*Capture) bool) !void {
     var spins: u32 = 0;
@@ -69,14 +69,13 @@ fn currentSpec(self: *const Capture) Backend.Spec {
 pub fn start(self: *Capture) !void {
     if (self.thread != null) return error.AlreadyRunning;
     self.stop_flag.store(false, .monotonic);
-    // Clear the TEXT too, not only the length. err_buf backs lastError(),
-    // and fb_capture_last_error hands lastError()'s pointer straight to
-    // ctypes as a C string. A stale byte at position 0 caused the
-    // restart-after-error sentinel panic (issue #45); lastError()'s
-    // n == 0 guard covers that panic too, but this reset keeps err_buf
-    // itself clean, not just the guarded read.
-    self.err_buf[0] = 0;
-    self.err_len.store(0, .monotonic);
+    // Clear the TEXT too, not only the length. err backs lastError(), and
+    // fb_capture_last_error hands lastError()'s pointer straight to ctypes
+    // as a C string. A stale byte at position 0 caused the restart-after-
+    // error sentinel panic (issue #45); ErrorSlot.last's n == 0 guard
+    // covers that panic too, but this reset keeps err itself clean, not
+    // just the guarded read.
+    self.err.reset();
     // `writer_active` is owned by THIS thread, not the worker: the scope
     // that spawns is the scope that joins, so it holds the flag across
     // both. Stored BEFORE the spawn so a flush that lands while the
@@ -111,28 +110,11 @@ pub fn stats(self: *const Capture) Stats {
 }
 
 pub fn lastError(self: *const Capture) [:0]const u8 {
-    const n = self.err_len.load(.acquire);
-    // setError runs at most once per run() call. Only the n == 0 -> n > 0
-    // transition can race a reader: the sentinel check below reads
-    // err_buf[n], and n == 0 is exactly the stale value a reader sees
-    // while setError (another thread) is mid-way through writing a FIRST
-    // error message starting at err_buf[0] (issue #45). This guard skips
-    // the sentinel check on that path only; n > 0 below still gets the
-    // full, type-checked sentinel slice.
-    if (n == 0) return "";
-    return self.err_buf[0..n :0];
+    return self.err.last();
 }
 
 fn setError(self: *Capture, comptime fmt: []const u8, args: anytype) void {
-    // bufPrintZ into a fixed buffer: no allocation on the audio thread.
-    // On overflow 0.16's bufPrintZ leaves err_buf FULL — no sentinel byte
-    // survives — so the fallback must write the terminator itself before
-    // taking a [:0] slice, or the slice aborts on the sentinel check.
-    const s = std.fmt.bufPrintZ(self.err_buf[0..], fmt, args) catch blk: {
-        self.err_buf[max_error - 1] = 0;
-        break :blk self.err_buf[0 .. max_error - 1 :0];
-    };
-    self.err_len.store(s.len, .release);
+    self.err.set(fmt, args);
 }
 
 fn run(self: *Capture) void {
@@ -225,7 +207,7 @@ test "open failure lands in lastError and running stays false" {
     try cap.start();
     try waitUntil(&cap, struct {
         fn f(c: *Capture) bool {
-            return c.err_len.load(.acquire) > 0;
+            return c.err.len.load(.acquire) > 0;
         }
     }.f);
     cap.stop();
@@ -371,7 +353,7 @@ test "restart after a recorded error: lastError is empty and does not trap on th
     try cap.start();
     try waitUntil(&cap, struct {
         fn f(c: *Capture) bool {
-            return c.err_len.load(.acquire) > 0;
+            return c.err.len.load(.acquire) > 0;
         }
     }.f);
     cap.stop();
@@ -379,11 +361,11 @@ test "restart after a recorded error: lastError is empty and does not trap on th
     try cap.start();
     defer cap.stop();
     // lastError()'s n == 0 guard pins the observable API: no panic, empty
-    // string, even though this restart's err_len == 0 races nothing here
-    // (single-threaded). err_buf[0] pins the ACTUAL reset in start() that
+    // string, even though this restart's err.len == 0 races nothing here
+    // (single-threaded). err.buf[0] pins the ACTUAL reset in start() that
     // this whole test is about, independent of lastError()'s return shape.
     try std.testing.expectEqualStrings("", cap.lastError());
-    try std.testing.expectEqual(@as(u8, 0), cap.err_buf[0]);
+    try std.testing.expectEqual(@as(u8, 0), cap.err.buf[0]);
 }
 
 test "a worker that lost its stream keeps draining flushes until stop()" {
@@ -403,7 +385,7 @@ test "a worker that lost its stream keeps draining flushes until stop()" {
     defer cap.stop();
     try waitUntil(&cap, struct {
         fn f(c: *Capture) bool {
-            return c.err_len.load(.acquire) > 0;
+            return c.err.len.load(.acquire) > 0;
         }
     }.f);
     // Only stop() clears writer_active, so this flush is DEFERRED to the
@@ -422,11 +404,11 @@ test "setError truncates a message longer than max_error instead of trapping on 
     defer ring.deinit();
     var fake = FakeBackend.init(&.{});
     var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "", .rate = 48_000, .channels = 2 });
-    // 300 bytes into a 256-byte buffer: bufPrintZ fills err_buf completely
+    // 300 bytes into a 256-byte buffer: bufPrintZ fills err.buf completely
     // before reporting NoSpaceLeft, so the overflow fallback must restore
     // the sentinel itself — slicing a full buffer as [:0] aborts.
     cap.setError("{s}", .{"x" ** 300});
     const e = cap.lastError();
     try std.testing.expect(e.len <= max_error - 1);
-    try std.testing.expectEqual(@as(u8, 0), cap.err_buf[max_error - 1]);
+    try std.testing.expectEqual(@as(u8, 0), cap.err.buf[ErrorSlot.max_len - 1]);
 }

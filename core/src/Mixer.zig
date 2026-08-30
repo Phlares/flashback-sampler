@@ -17,12 +17,13 @@ const Ring = @import("Ring.zig");
 const Backend = @import("Backend.zig");
 const Capture = @import("Capture.zig");
 const FakeBackend = @import("FakeBackend.zig");
+const ErrorSlot = @import("ErrorSlot.zig");
 const Mixer = @This();
 
 pub const max_sources = 8;
 pub const stage_seconds = 2.0;
 pub const tick_ms = 10;
-pub const max_error = Capture.max_error;
+pub const max_error = ErrorSlot.max_len;
 
 const Source = struct { capture: Capture, stage: Ring, cursor: u64 };
 
@@ -47,8 +48,7 @@ stop_flag: std.atomic.Value(bool),
 running: std.atomic.Value(bool),
 frames_written: std.atomic.Value(u64),
 xruns: std.atomic.Value(u32),
-err_buf: [max_error]u8,
-err_len: std.atomic.Value(usize),
+err: ErrorSlot,
 
 pub fn init(self: *Mixer, allocator: std.mem.Allocator, backend: Backend.Backend, target: *Ring, specs: []const Backend.Spec) !void {
     if (specs.len == 0 or specs.len > max_sources) return error.InvalidArgument;
@@ -70,8 +70,7 @@ pub fn init(self: *Mixer, allocator: std.mem.Allocator, backend: Backend.Backend
         .running = std.atomic.Value(bool).init(false),
         .frames_written = std.atomic.Value(u64).init(0),
         .xruns = std.atomic.Value(u32).init(0),
-        .err_buf = [_]u8{0} ** max_error,
-        .err_len = std.atomic.Value(usize).init(0),
+        .err = .{},
     };
     // errdefer with a progress counter: if Ring.init fails on source k,
     // only stages 0..k-1 exist and only those are freed.
@@ -97,8 +96,7 @@ pub fn deinit(self: *Mixer) void {
 pub fn start(self: *Mixer) !void {
     if (self.thread != null) return error.AlreadyRunning;
     self.stop_flag.store(false, .monotonic);
-    self.err_buf[0] = 0;
-    self.err_len.store(0, .monotonic);
+    self.err.reset();
     // Control-thread ownership of the target's writer flag (Ring.flush):
     // registered before any thread that could write the target exists,
     // cleared by the errdefer if anything below fails.
@@ -145,27 +143,17 @@ pub fn stats(self: *const Mixer) Capture.Stats {
 }
 
 pub fn lastError(self: *const Mixer) [:0]const u8 {
-    const n = self.err_len.load(.acquire);
-    if (n > 0) return self.err_buf[0..n :0];
+    const own = self.err.last();
+    if (own.len > 0) return own;
     for (self.sources[0..self.n_sources]) |*s| {
         const e = s.capture.lastError();
         if (e.len > 0) return e;
     }
-    // "" not err_buf[0..0 :0]: the empty sentinel slice still reads
-    // err_buf[0], which a racing setError may be mid-write on (issue #45,
-    // same shape as Capture.lastError).
     return "";
 }
 
 fn setError(self: *Mixer, comptime fmt: []const u8, args: anytype) void {
-    // On overflow 0.16's bufPrintZ leaves err_buf FULL — no sentinel byte
-    // survives — so the fallback writes the terminator before slicing
-    // (same constraint as Capture.setError).
-    const s = std.fmt.bufPrintZ(self.err_buf[0..], fmt, args) catch blk: {
-        self.err_buf[max_error - 1] = 0;
-        break :blk self.err_buf[0 .. max_error - 1 :0];
-    };
-    self.err_len.store(s.len, .release);
+    self.err.set(fmt, args);
 }
 
 fn run(self: *Mixer) void {

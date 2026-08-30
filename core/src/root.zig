@@ -11,6 +11,7 @@ pub const convert = @import("convert.zig");
 pub const abi = @import("abi.zig");
 pub const Backend = @import("Backend.zig");
 pub const FakeBackend = @import("FakeBackend.zig");
+pub const ErrorSlot = @import("ErrorSlot.zig");
 pub const Capture = @import("Capture.zig");
 pub const Mixer = @import("Mixer.zig");
 
