@@ -467,6 +467,16 @@ test "fb_ring_create: status is out_of_memory when the allocator fails (issue #4
     try std.testing.expectEqual(FbStatus.out_of_memory, st);
 }
 
+test "fb_ring_create: out_of_memory when Ring.init's own allocation fails (the #41 path)" {
+    // fail_index = 1: the first allocation (alloc.create(Ring)) succeeds, the
+    // second — Ring.init's storage — fails, so this pins the INNER switch arm.
+    // Backed by std.testing.allocator, so a leak on the unwind path fails too.
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var st: FbStatus = .ok;
+    try std.testing.expectEqual(@as(?*Ring, null), ringCreate(fa.allocator(), 48_000, 2, 1.0, &st));
+    try std.testing.expectEqual(FbStatus.out_of_memory, st);
+}
+
 test "fb_ring_create: a null status pointer is accepted" {
     const ring = fb_ring_create(8, 1, 1.0, null) orelse return error.CreateFailed;
     fb_ring_destroy(ring);
