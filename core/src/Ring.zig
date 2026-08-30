@@ -31,7 +31,7 @@ channels: u16,
 sample_rate: u32,
 total_written: std.atomic.Value(u64),
 gain: std.atomic.Value(f32),
-writer_active: std.atomic.Value(bool), // set by Capture for the life of its loop; tells flush() whether to defer
+writer_active: std.atomic.Value(bool), // owned by the control thread that starts/stops the writer thread; tells flush() whether to defer
 flush_pending: std.atomic.Value(bool), // control thread asked for a flush while a writer was active; write() drains it
 summary: Summary, // pre-decimated stats ring; fed per-chunk by write(), poisoned by flush()
 
@@ -114,23 +114,23 @@ pub fn deinit(self: *Ring) void {
     self.* = undefined; // poison: use-after-deinit becomes loud in Debug
 }
 
-/// Discard all buffered audio. If a writer is active (Capture sets
-/// `writer_active`), the flush is handed to the writer, which performs
-/// it before its next write — so a writer that already loaded
-/// `total_written` can never republish over the reset (issue #20). With
-/// no writer, it happens here, immediately. Called from a control
-/// thread, never the audio thread.
+/// Discard all buffered audio. If a writer is registered
+/// (`writer_active`), the flush is handed to the writer thread, which
+/// performs it before its next write (`drainPendingFlush`) — so a
+/// writer that already loaded `total_written` can never republish over
+/// the reset (issue #20). With no writer, it happens here, immediately.
+/// Called from a control thread, never the audio thread.
 ///
-/// `writer_active` is set ONLY by `Capture`, for the life of its own
-/// loop. A host that writes through `fb_ring_write` directly — today,
-/// the Python mixer thread in `flashback_sampler/core/mixed_capture.py`
-/// — never sets it, because it is not a `Capture`. On a mixed slot, a
-/// control-thread `flush()` there always takes the IMMEDIATE branch
-/// below and can race that writer on both `total_written` (issue #20)
-/// and `Summary.gen` (issue #23, see `Summary.zig`'s own THREADING
-/// note) — the single-writer assumption both of those rely on is not
-/// enforced on that path. PR d closes this by moving the mixer into
-/// Zig and having it set `writer_active` the same way `Capture` does.
+/// OWNERSHIP: `writer_active` belongs to the CONTROL thread that owns
+/// the writer thread — `Capture.start`/`stop`, and `Mixer.start`/`stop`
+/// for the mixed-slot target. Stored true BEFORE the spawn, false AFTER
+/// the join; the writer thread never touches it. Storing before the
+/// spawn closes the start window: a flush that lands while the worker
+/// is still opening its stream is deferred to the loop top, not
+/// executed under a writer about to appear. Every writer of a ring
+/// registers this way; a host that wrote through `fb_ring_write` without
+/// it would race both this reset and `Summary.gen` (issue #23) — no such
+/// host remains once the mixer runs in Zig.
 pub fn flush(self: *Ring) void {
     if (self.writer_active.load(.acquire)) {
         self.flush_pending.store(true, .release);
