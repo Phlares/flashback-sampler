@@ -37,9 +37,9 @@ def test_capture_device_is_frozen():
 
 
 def test_output_device_is_frozen():
-    d = OutputDevice(id=0, name="Out", max_output_channels=2)
+    d = OutputDevice(id="{spk}", name="Out", max_output_channels=2)
     with pytest.raises(Exception):
-        d.id = 1  # type: ignore[misc]
+        d.id = "{hp}"  # type: ignore[misc]
 
 
 def test_list_capture_devices_does_not_raise():
@@ -146,6 +146,14 @@ def _fake_devices():
         {"kind": "loopback", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
         {"kind": "loopback", "is_default": False, "mix_rate": 96_000, "mix_channels": 2, "id": "{hp}", "name": "Headphones"},
         {"kind": "input", "is_default": True, "mix_rate": 44_100, "mix_channels": 1, "id": "{mic}", "name": "Mic"},
+        # Render rows: the same endpoints appear again under "render" for
+        # output enumeration. The render default (spk) is deliberately NOT
+        # the loopback default (hp) above, so a list_output_devices that
+        # accidentally read loopback rows would return the wrong default.
+        {"kind": "render", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
+        {"kind": "render", "is_default": False, "mix_rate": 96_000, "mix_channels": 6, "id": "{hp}", "name": "Headphones"},
+        # mix_channels 0 (or missing) must fall back to 2, not surface as 0.
+        {"kind": "render", "is_default": False, "mix_rate": 44_100, "mix_channels": 0, "id": "{disabled}", "name": "Disabled"},
     ]
 
 
@@ -156,6 +164,48 @@ def test_list_capture_devices_maps_native_list(monkeypatch):
     assert ("loopback", "{spk}", 48_000, True) in kinds
     assert ("input", "{mic}", 44_100, True) in kinds
     assert all(d.name.endswith("[loopback]") for d in devs if d.kind == "loopback")
+
+
+def test_list_output_devices_maps_render_rows_only(monkeypatch):
+    monkeypatch.setattr(audio_devices.native, "list_devices", _fake_devices)
+    devs = audio_devices.list_output_devices()
+    assert [(d.id, d.name, d.max_output_channels, d.is_default) for d in devs] == [
+        ("{spk}", "Speakers", 2, True),
+        ("{hp}", "Headphones", 6, False),
+        ("{disabled}", "Disabled", 2, False),
+    ]
+    assert all(isinstance(d.id, str) for d in devs)
+
+
+def test_default_output_device_is_the_default_render_row(monkeypatch):
+    monkeypatch.setattr(audio_devices.native, "list_devices", _fake_devices)
+    assert audio_devices.default_output_device().id == "{spk}"
+
+
+def test_capture_list_ignores_render_rows(monkeypatch):
+    monkeypatch.setattr(audio_devices.native, "list_devices", _fake_devices)
+    kinds = {d.kind for d in audio_devices.list_capture_devices()}
+    assert kinds == {"loopback", "input"}
+
+
+def test_audio_devices_does_not_import_sounddevice():
+    # Source-level pin: the module imports sounddevice lazily today, so a
+    # sys.modules check is green before the change.
+    import inspect
+    assert "sounddevice" not in inspect.getsource(audio_devices)
+
+
+def test_default_output_device_enumerates_once(monkeypatch):
+    calls = {"n": 0}
+    real = list(_fake_devices())
+
+    def _counted():
+        calls["n"] += 1
+        return real
+
+    monkeypatch.setattr(audio_devices.native, "list_devices", _counted)
+    audio_devices.default_output_device()
+    assert calls["n"] == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────
