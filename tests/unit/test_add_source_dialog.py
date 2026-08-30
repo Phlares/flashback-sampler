@@ -26,3 +26,19 @@ def test_hi_res_rates_offered_descending():
 def test_dialog_still_defaults_to_48k(qapp):
     dlg = AddSourceDialog(default_name="Deck 1")
     assert dlg.result_preset().sample_rate == 48000
+
+
+def test_ram_readout_states_reservation(qapp):
+    # The ring is fully committed at slot creation -- the readout must
+    # say "Reserves", not just show a bare number, so it can't be read
+    # as a live/current usage figure.
+    dlg = AddSourceDialog(
+        default_name="Deck 1",
+        default_buffer_seconds=900.0,
+        default_sample_rate=48_000,
+        default_channels=2,
+    )
+    text = dlg._ram_label.text()
+    assert text.startswith("Reserves")
+    assert "48k STEREO" in text
+    assert "15:00" in text
