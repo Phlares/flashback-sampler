@@ -28,10 +28,11 @@ from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.core.scrub_player import ScrubPlayer
 
 
-# Default capture target: 15-minute rolling buffer at 48 kHz stereo.
-# Size: 15 * 60 * 48_000 * 2 * 4 bytes ≈ 330 MB. Matches the original
-# prototype default and is what the UI will display initially.
-DEFAULT_BUFFER_SECONDS = 15 * 60
+# Default capture target: 5-minute rolling buffer at 48 kHz stereo.
+# Size: 5 * 60 * 48_000 * 2 * 4 bytes ≈ 110 MB. main.py's --buffer-minutes
+# argparse default derives from this constant, so this is the one place
+# that sets the launch default.
+DEFAULT_BUFFER_SECONDS = 5 * 60
 DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_CHANNELS = 2
 

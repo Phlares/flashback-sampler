@@ -32,6 +32,14 @@ def test_appstate_wires_core_objects_with_matching_sample_rate_and_channels():
     assert st.scrub_player.channels == 2
 
 
+def test_appstate_default_buffer_seconds_matches_5min_launch_default():
+    from flashback_sampler.app.state import DEFAULT_BUFFER_SECONDS
+
+    assert DEFAULT_BUFFER_SECONDS == 5 * 60
+    st = AppState(sample_rate=1000, channels=1)  # buffer_seconds omitted
+    assert st.buffer.duration == 300.0
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Multi-slot AppState (M10.4)
 # ─────────────────────────────────────────────────────────────────────────
