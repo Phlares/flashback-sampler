@@ -79,7 +79,7 @@ def load() -> C.CDLL | None:
     return _lib
 
 
-KIND_INTS = {"loopback": 0, "input": 1, "process": 2}
+KIND_INTS = {"loopback": 0, "input": 1, "process": 2, "render": 3}
 _KIND_NAMES = {v: k for k, v in KIND_INTS.items()}
 
 MAX_MIXER_SOURCES = 8  # Mixer.max_sources
@@ -102,6 +102,11 @@ class FbCaptureStats(C.Structure):
 
 class FbProcess(C.Structure):
     _fields_ = [("pid", C.c_uint32), ("ppid", C.c_uint32), ("name", C.c_char * 128)]
+
+
+class FbPlaybackState(C.Structure):
+    _fields_ = [("running", C.c_uint8), ("playing", C.c_uint8), ("cursor", C.c_uint64),
+                ("clip_frames", C.c_uint64), ("mix_rate", C.c_uint32)]
 
 
 def _declare(lib: C.CDLL) -> None:
@@ -184,11 +189,31 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_processes_list.argtypes = [C.POINTER(FbProcess), C.c_size_t]
     lib.fb_processes_list.restype = C.c_size_t
 
+    lib.fb_playback_create.argtypes = [C.c_char_p, C.c_uint32, C.c_uint16]
+    lib.fb_playback_create.restype = C.c_void_p
+    lib.fb_playback_bind.argtypes = [C.c_void_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16]
+    lib.fb_playback_bind.restype = C.c_int
+    lib.fb_playback_play.argtypes = [C.c_void_p]
+    lib.fb_playback_play.restype = C.c_int
+    lib.fb_playback_pause.argtypes = [C.c_void_p]
+    lib.fb_playback_pause.restype = None
+    lib.fb_playback_seek.argtypes = [C.c_void_p, C.c_uint64]
+    lib.fb_playback_seek.restype = None
+    lib.fb_playback_set_device.argtypes = [C.c_void_p, C.c_char_p]
+    lib.fb_playback_set_device.restype = None
+    lib.fb_playback_state.argtypes = [C.c_void_p, C.POINTER(FbPlaybackState)]
+    lib.fb_playback_state.restype = None
+    lib.fb_playback_last_error.argtypes = [C.c_void_p]
+    lib.fb_playback_last_error.restype = C.c_char_p
+    lib.fb_playback_destroy.argtypes = [C.c_void_p]
+    lib.fb_playback_destroy.restype = None
 
-def list_devices(max_devices: int = 64) -> list[dict]:
-    """Every active WASAPI endpoint: render endpoints as kind="loopback",
-    capture endpoints as kind="input". Empty when the library is missing
-    or the OS has no backend."""
+
+def list_devices(max_devices: int = 128) -> list[dict]:
+    """Every active WASAPI endpoint: capture endpoints as kind="loopback"
+    or kind="input", render endpoints appear twice: as kind="loopback"
+    (capture candidate) and kind="render" (playback output). Empty when
+    the library is missing or the OS has no backend."""
     lib = load()
     if lib is None:
         return []
