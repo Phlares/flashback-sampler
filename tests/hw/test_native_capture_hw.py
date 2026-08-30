@@ -8,6 +8,7 @@ import pytest
 from flashback_sampler.core import native
 from flashback_sampler.core.buffer import make_ring_buffer
 from flashback_sampler.core.native_capture import NativeCaptureSource
+from flashback_sampler.core.native_capture import NativeMixedSource
 
 pytestmark = pytest.mark.audio_hw
 
@@ -71,3 +72,19 @@ def test_process_loopback_of_this_python_process_opens(lib):
     running, err = src.is_running(), src.last_error()
     src.stop(); src.close(); buf.close()
     assert running and err is None, err
+
+
+def test_two_source_mix_records_frames_on_both(lib):
+    """Default loopback + default input through one Zig mixer for 2 s.
+    frames_written counts the COMMON span, so > 1 s of frames proves
+    both sources delivered at least that much."""
+    buf = make_ring_buffer(duration_seconds=10, sample_rate=48_000, channels=2)
+    src = NativeMixedSource(buf, specs=[{"kind": "loopback"}, {"kind": "input"}])
+    src.start()
+    time.sleep(2.0)
+    running, err, frames, xruns, mix = src.is_running(), src.last_error(), src.frames_written(), src.xrun_count(), src.mix_rate()
+    src.stop(); src.close(); buf.close()
+    assert running, err
+    assert err is None, err
+    assert frames > 48_000, frames
+    print(f"mixed(loopback+input): frames={frames} xruns={xruns} mix_rate={mix}")
