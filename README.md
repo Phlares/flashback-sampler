@@ -23,7 +23,7 @@ python -m flashback_sampler.app.main
 
 CLI flags:
 
-- `--buffer-minutes N` — ring buffer length (default 15). Use `0.5` to force a rollover quickly when testing.
+- `--buffer-minutes N` — ring buffer length (default 5). Use `0.5` to force a rollover quickly when testing.
 - `--sample-rate N` — capture sample rate (default 48000). The **Add Source** dialog offers rates up to 192 kHz; when a device can't honestly deliver a requested rate (e.g. loopback is capped at the Windows output mix format), Flashback notifies you and captures at the device's true rate instead.
 - `--channels N` — 1 mono or 2 stereo (default 2).
 

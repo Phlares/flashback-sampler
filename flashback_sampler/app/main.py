@@ -5,7 +5,7 @@ Boots the QApplication, applies the Erebus base stylesheet, builds the
 AppState object graph, shows the main window, and runs the event loop.
 
 CLI:
-    --buffer-minutes N    ring buffer length in minutes (default 15)
+    --buffer-minutes N    ring buffer length in minutes (default 5)
     --sample-rate N       override the capture sample rate (default 48000)
     --channels N          1 = mono, 2 = stereo (default)
 """
@@ -19,8 +19,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QApplication
 
-from flashback_sampler.app.state import AppState
+from flashback_sampler.app.state import DEFAULT_BUFFER_SECONDS, AppState
 from flashback_sampler.app.theme import EREBUS, base_stylesheet, load_fonts
+
+# Single source of truth for the launch default: state.py's
+# DEFAULT_BUFFER_SECONDS. Derived, not duplicated, so the ruling only
+# has to be changed in one place.
+_DEFAULT_BUFFER_MINUTES = DEFAULT_BUFFER_SECONDS / 60.0
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -28,8 +33,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--buffer-minutes",
         type=float,
-        default=15.0,
-        help="ring buffer length in minutes (default: 15). "
+        default=_DEFAULT_BUFFER_MINUTES,
+        help=f"ring buffer length in minutes (default: {_DEFAULT_BUFFER_MINUTES:g}). "
         "Use a small value like 0.5 to test rollover quickly.",
     )
     p.add_argument("--sample-rate", type=int, default=48_000)
