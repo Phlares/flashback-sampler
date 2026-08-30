@@ -477,3 +477,35 @@ def test_rebuild_buffer_preserves_record_gain():
         assert abs(s.active_slot.buffer.gain - prev) < 1e-9
     finally:
         s.shutdown()
+
+
+def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
+    """Two or more capture_specs go to build_mixed_capture_source with the
+    devices themselves — no factories, no staging buffers in Python."""
+    from flashback_sampler.app.audio_devices import CaptureDevice
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    import flashback_sampler.app.state as state_mod
+    seen = {}
+
+    def fake_mixed(devices, buffer, sample_rate, channels):
+        seen.update(devices=list(devices), buffer=buffer, sample_rate=sample_rate, channels=channels)
+        return object()
+
+    def fake_single(device, buffer, sample_rate, channels):
+        raise AssertionError("single-source builder must not run for two specs")
+
+    real_mixed, real_single = state_mod.build_mixed_capture_source, state_mod.build_capture_source
+    state_mod.build_mixed_capture_source, state_mod.build_capture_source = fake_mixed, fake_single
+    try:
+        st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+        slot = st.add_slot(preset_by_name("SCRATCH"))
+        d1 = CaptureDevice(kind="loopback", name="A", id="a")
+        d2 = CaptureDevice(kind="input", name="B", id="b")
+        slot.capture_specs = [d1, d2]
+        st.build_capture_for_slot(slot)
+        assert seen["devices"] == [d1, d2]
+        assert seen["buffer"] is slot.buffer
+        assert (seen["sample_rate"], seen["channels"]) == (slot.sample_rate, slot.channels)
+    finally:
+        state_mod.build_mixed_capture_source, state_mod.build_capture_source = real_mixed, real_single

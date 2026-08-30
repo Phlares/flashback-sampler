@@ -212,3 +212,24 @@ def test_apply_rate_probe_rebuilds_preset():
     )
     same, none_notice = audio_devices.apply_rate_probe(ok_preset, dev)
     assert same is ok_preset and none_notice is None
+
+
+def test_build_mixed_capture_source_maps_every_device(monkeypatch):
+    """Two devices become two spec dicts through the SAME mapping the
+    single builder uses; the process id goes through resolve_root_pid."""
+    import flashback_sampler.app.audio_devices as ad
+    from flashback_sampler.app.audio_devices import CaptureDevice, build_mixed_capture_source
+
+    seen = {}
+
+    class _Mixed:
+        def __init__(self, buffer, specs, sample_rate=48_000, channels=2):
+            seen.update(specs=specs, sample_rate=sample_rate, channels=channels)
+
+    monkeypatch.setattr(ad, "NativeMixedSource", _Mixed)
+    monkeypatch.setattr(ad.native, "resolve_root_pid", lambda pid: pid + 1)
+    spk = CaptureDevice(kind="loopback", name="Spk", id="{spk}")
+    proc = CaptureDevice(kind="process_loopback", name="P", id="1234")
+    build_mixed_capture_source([spk, proc], buffer=_FakeBuffer(), sample_rate=44_100, channels=1)
+    assert seen["specs"] == [{"kind": "loopback", "device_id": "{spk}"}, {"kind": "process", "pid": 1235}]
+    assert (seen["sample_rate"], seen["channels"]) == (44_100, 1)
