@@ -16,7 +16,7 @@ pub fn backend() Backend.Backend {
     return .{ .ptr = &instance, .vtable = &backend_vtable };
 }
 
-const backend_vtable = Backend.Backend.VTable{ .enumerate = enumerate, .open = open };
+const backend_vtable = Backend.Backend.VTable{ .enumerate = enumerate, .open = open, .openRender = openRender };
 const stream_vtable = Backend.Stream.VTable{ .next = next, .stop = stop, .deinit = deinit, .mixRate = mixRate };
 
 const poll_ms: u32 = 10;
@@ -197,6 +197,13 @@ fn open(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.Stream {
         .scratch = undefined,
     };
     return .{ .ptr = slot, .vtable = &stream_vtable };
+}
+
+/// Stub. Task 3 replaces this with a real render-stream open.
+fn openRender(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.RenderStream {
+    _ = ptr;
+    _ = spec;
+    return error.Unsupported;
 }
 
 /// Task 5: default or named endpoint via IMMDeviceEnumerator. Task 9 adds

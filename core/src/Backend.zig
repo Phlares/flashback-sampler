@@ -5,7 +5,7 @@
 //! CoreAudio/ALSA backend later is one more file, not a Capture change.
 const std = @import("std");
 
-pub const Kind = enum(u8) { loopback = 0, input = 1, process = 2 };
+pub const Kind = enum(u8) { loopback = 0, input = 1, process = 2, render = 3 };
 
 pub const Error = error{ DeviceNotFound, FormatRejected, ActivationFailed, Unsupported, OutOfMemory };
 
@@ -43,6 +43,45 @@ pub const Stream = struct {
     }
 };
 
+/// The output side. Event-driven, not polled: `wait` blocks until the
+/// engine wants frames (WASAPI signals an event once per period), so the
+/// render thread sleeps at zero CPU between fills.
+pub const RenderStream = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Blocks up to timeout_ms until the engine wants frames. false = timeout.
+        wait: *const fn (*anyopaque, timeout_ms: u32) bool,
+        /// Frames the engine can take now (buffer_size - padding).
+        available: *const fn (*anyopaque) Error!u32,
+        /// Copies frames into the device buffer. Caller passes at most `available()` frames.
+        write: *const fn (*anyopaque, frames: []const f32) Error!void,
+        stop: *const fn (*anyopaque) void,
+        deinit: *const fn (*anyopaque) void,
+        mixRate: *const fn (*anyopaque) u32,
+    };
+
+    pub fn wait(s: RenderStream, timeout_ms: u32) bool {
+        return s.vtable.wait(s.ptr, timeout_ms);
+    }
+    pub fn available(s: RenderStream) Error!u32 {
+        return s.vtable.available(s.ptr);
+    }
+    pub fn write(s: RenderStream, frames: []const f32) Error!void {
+        return s.vtable.write(s.ptr, frames);
+    }
+    pub fn stop(s: RenderStream) void {
+        return s.vtable.stop(s.ptr);
+    }
+    pub fn deinit(s: RenderStream) void {
+        return s.vtable.deinit(s.ptr);
+    }
+    pub fn mixRate(s: RenderStream) u32 {
+        return s.vtable.mixRate(s.ptr);
+    }
+};
+
 pub const Backend = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -52,6 +91,10 @@ pub const Backend = struct {
         enumerate: *const fn (*anyopaque, out: []Device) usize,
         /// Opens AND starts the stream. Called on the capture thread.
         open: *const fn (*anyopaque, Spec) Error!Stream,
+        /// Opens AND starts a render stream at spec.rate/spec.channels
+        /// (float32). The backend resamples to its mix rate; FormatRejected
+        /// if it cannot. Called on the render thread.
+        openRender: *const fn (*anyopaque, Spec) Error!RenderStream,
     };
 
     pub fn enumerate(b: Backend, out: []Device) usize {
@@ -59,5 +102,8 @@ pub const Backend = struct {
     }
     pub fn open(b: Backend, spec: Spec) Error!Stream {
         return b.vtable.open(b.ptr, spec);
+    }
+    pub fn openRender(b: Backend, spec: Spec) Error!RenderStream {
+        return b.vtable.openRender(b.ptr, spec);
     }
 };
