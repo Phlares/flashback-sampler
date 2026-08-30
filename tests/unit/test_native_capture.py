@@ -17,6 +17,7 @@ class _FakeLib:
         self.stats = (0, 0, 0, 48_000)  # running, frames, xruns, mix_rate
         self.err = b""
         self.devices = []
+        self.ring_status = 0
 
     def __getattr__(self, name):  # argtypes/restype assignment is a no-op
         def _fn(*a):
@@ -42,6 +43,9 @@ class _FakeLib:
                     arr[i].kind, arr[i].is_default, arr[i].mix_rate, arr[i].mix_channels = d[:4]
                     arr[i].id, arr[i].name = d[4].encode(), d[5].encode()
                 return n
+            if name == "fb_ring_create":
+                a[3]._obj.value = self.ring_status  # byref(status) -> the c_int
+                return 0 if self.ring_status else 0xA11
             return None
         return _fn
 
@@ -159,3 +163,24 @@ def test_start_close_stop_never_calls_fb_capture_stop_with_null_handle(lib):
     src.close()
     src.stop()
     assert sum(1 for c in lib.calls if c[0] == "fb_capture_stop") == 0
+
+
+def test_ring_create_out_of_memory_raises_memory_error_with_the_byte_count(lib):
+    lib.ring_status = native._OUT_OF_MEMORY
+    with pytest.raises(MemoryError) as e:
+        native.NativeAudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=2)
+    assert "16,000 bytes" in str(e.value)  # 2 s * 1000 Hz * 2 ch * 4 B
+
+
+def test_ring_create_invalid_arg_raises_value_error(lib):
+    lib.ring_status = native._INVALID_ARG
+    with pytest.raises(ValueError):
+        native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=3)
+
+
+def test_ring_create_passes_a_status_out_param(lib):
+    lib.ring_status = native._OUT_OF_MEMORY
+    with pytest.raises(MemoryError):
+        native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    name, args = next(c for c in lib.calls if c[0] == "fb_ring_create")
+    assert len(args) == 4 and hasattr(args[3], "_obj")
