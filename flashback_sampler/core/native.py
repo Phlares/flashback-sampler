@@ -79,7 +79,7 @@ def load() -> C.CDLL | None:
     return _lib
 
 
-KIND_INTS = {"loopback": 0, "input": 1, "process": 2}
+KIND_INTS = {"loopback": 0, "input": 1, "process": 2, "render": 3}
 _KIND_NAMES = {v: k for k, v in KIND_INTS.items()}
 
 MAX_MIXER_SOURCES = 8  # Mixer.max_sources
@@ -102,6 +102,11 @@ class FbCaptureStats(C.Structure):
 
 class FbProcess(C.Structure):
     _fields_ = [("pid", C.c_uint32), ("ppid", C.c_uint32), ("name", C.c_char * 128)]
+
+
+class FbPlaybackState(C.Structure):
+    _fields_ = [("running", C.c_uint8), ("playing", C.c_uint8), ("cursor", C.c_uint64),
+                ("clip_frames", C.c_uint64), ("mix_rate", C.c_uint32)]
 
 
 def _declare(lib: C.CDLL) -> None:
@@ -184,11 +189,31 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_processes_list.argtypes = [C.POINTER(FbProcess), C.c_size_t]
     lib.fb_processes_list.restype = C.c_size_t
 
+    lib.fb_playback_create.argtypes = [C.c_char_p, C.c_uint32, C.c_uint16]
+    lib.fb_playback_create.restype = C.c_void_p
+    lib.fb_playback_bind.argtypes = [C.c_void_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16]
+    lib.fb_playback_bind.restype = C.c_int
+    lib.fb_playback_play.argtypes = [C.c_void_p]
+    lib.fb_playback_play.restype = C.c_int
+    lib.fb_playback_pause.argtypes = [C.c_void_p]
+    lib.fb_playback_pause.restype = None
+    lib.fb_playback_seek.argtypes = [C.c_void_p, C.c_uint64]
+    lib.fb_playback_seek.restype = None
+    lib.fb_playback_set_device.argtypes = [C.c_void_p, C.c_char_p]
+    lib.fb_playback_set_device.restype = None
+    lib.fb_playback_state.argtypes = [C.c_void_p, C.POINTER(FbPlaybackState)]
+    lib.fb_playback_state.restype = None
+    lib.fb_playback_last_error.argtypes = [C.c_void_p]
+    lib.fb_playback_last_error.restype = C.c_char_p
+    lib.fb_playback_destroy.argtypes = [C.c_void_p]
+    lib.fb_playback_destroy.restype = None
 
-def list_devices(max_devices: int = 64) -> list[dict]:
-    """Every active WASAPI endpoint: render endpoints as kind="loopback",
-    capture endpoints as kind="input". Empty when the library is missing
-    or the OS has no backend."""
+
+def list_devices(max_devices: int = 128) -> list[dict]:
+    """Every active WASAPI endpoint: capture endpoints as kind="loopback"
+    or kind="input", render endpoints appear twice: as kind="loopback"
+    (capture candidate) and kind="render" (playback output). Empty when
+    the library is missing or the OS has no backend."""
     lib = load()
     if lib is None:
         return []
@@ -206,16 +231,22 @@ def _as_f32p(a: np.ndarray):
     return a.ctypes.data_as(C.POINTER(C.c_float))
 
 
+def _frames2d(a: np.ndarray) -> np.ndarray:
+    """The frame layout every fb_* call takes: C-contiguous float32
+    [N, channels]. Mono 1-D input is reshaped to [N, 1] so `shape`
+    unpacks into two names; the contiguous float32 layout is what makes
+    the pointer safe to read n_frames * channels floats from."""
+    if a.ndim == 1:
+        a = a[:, np.newaxis]
+    return np.ascontiguousarray(a, dtype=np.float32)
+
+
 def wav_write(path, audio: np.ndarray, sample_rate: int, subtype: str) -> None:
-    """Write `audio` [N, channels] float32 via the Zig encoder. Mono 1-D
-    input is reshaped to [N, 1], matching NativeAudioCircularBuffer.write's
-    own mono handling -- audio.shape would otherwise fail to unpack below."""
+    """Write `audio` [N, channels] float32 via the Zig encoder."""
     lib = load()
     if lib is None:
         raise RuntimeError("flashback_core library not available")
-    if audio.ndim == 1:
-        audio = audio[:, np.newaxis]
-    audio = np.ascontiguousarray(audio, dtype=np.float32)
+    audio = _frames2d(audio)
     n_frames, channels = audio.shape
     status = lib.fb_wav_write(
         str(path).encode("utf-8"), _as_f32p(audio), n_frames,
@@ -289,8 +320,7 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         self._lib.fb_ring_set_gain(self._h, float(value))
 
     def write(self, frames: np.ndarray) -> None:
-        if frames.ndim == 1:
-            frames = frames[:, np.newaxis]
+        frames = _frames2d(frames)
         # fb_ring_write trusts len(frames) and reads n_frames * self.channels
         # floats from whatever buffer we hand it -- a caller that passes a
         # narrower array (e.g. mono into a stereo ring) would otherwise make
@@ -305,7 +335,6 @@ class NativeAudioCircularBuffer(RingDerivedOps):
                 f"write() frames has {frames.shape[1]} channel(s), "
                 f"ring has {self.channels}"
             )
-        frames = np.ascontiguousarray(frames, dtype=np.float32)
         self._lib.fb_ring_write(self._h, _as_f32p(frames), len(frames))
 
     def flush(self) -> None:

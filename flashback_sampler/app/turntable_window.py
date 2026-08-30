@@ -248,6 +248,13 @@ class TurntableWindow(QMainWindow):
         # explicitly (False). LOOP only auto-restarts while this is
         # True, so pressing STOP while LOOP is on actually stops.
         self._intending_playback: bool = False
+        # Last native last_error() string shown to the user as a
+        # playback-failed dialog. The native player opens its device
+        # lazily on the Zig render thread, so an open failure surfaces
+        # later — as last_error() plus playing flipping back to 0 — not
+        # as an exception at the play() call. This remembers what was
+        # already shown so the ~100ms tick doesn't re-pop the dialog.
+        self._last_playback_error_shown: str | None = None
 
         # FREEZE state: when True, the buffer panel's waveform + time
         # labels + timeline are held at the snapshot taken when freeze
@@ -916,8 +923,7 @@ class TurntableWindow(QMainWindow):
         has_trim = self._checkout_has_trim(co)
         audio = co.trimmed_audio() if has_trim else co.audio
         try:
-            player.bind(audio)
-            player.open()
+            player.bind(audio, co.sample_rate)
             player.play()
         except Exception as e:
             QMessageBox.warning(
@@ -925,6 +931,12 @@ class TurntableWindow(QMainWindow):
             )
             return
         self._intending_playback = True
+        # Arm the "was playing" edge here, not on the next tick: the
+        # render thread's open failure lands before the 33 ms tick that
+        # would otherwise set this, and _update_clip_playback_state()
+        # only reads last_error() on that edge.
+        self._was_playing_last_tick = True
+        self._last_playback_error_shown = None  # fresh attempt: allow re-showing a repeat error
         self._refresh_play_button()
 
     def _refresh_play_button(self) -> None:
@@ -1715,17 +1727,33 @@ class TurntableWindow(QMainWindow):
             self.clip_panel.waveform.set_playhead(frac)
         else:
             self.clip_panel.waveform.set_playhead(None)
+            just_stopped = (
+                co is not None
+                and not player.is_playing
+                and getattr(self, "_was_playing_last_tick", False)
+            )
+            if just_stopped:
+                # The native player opens its output device lazily on
+                # the Zig render thread: an open failure never raises
+                # here, it arrives later as last_error() plus playing
+                # flipping back to 0. Show it once per distinct error —
+                # this method runs every tick and would otherwise pop
+                # the same dialog every ~100ms.
+                err = player.last_error()
+                if err and err != self._last_playback_error_shown:
+                    self._last_playback_error_shown = err
+                    QMessageBox.warning(
+                        self, "Playback failed", f"Could not start playback:\n\n{err}"
+                    )
             # LOOP: if checked, the user hasn't explicitly stopped,
             # a clip is bound, and playback just drained, restart.
             # Gating on _intending_playback keeps STOP-while-LOOPing
             # from immediately re-triggering playback.
-            if (
-                self.loop_btn.isChecked()
-                and self._intending_playback
-                and co is not None
-                and not player.is_playing
-                and getattr(self, "_was_playing_last_tick", False)
-            ):
+            # The once-guard is NOT re-armed here: a LOOP restart against
+            # a failing device drains every tick, and clearing the guard
+            # would pop the same dialog every ~33 ms. Only the explicit
+            # user click above re-arms it.
+            if self.loop_btn.isChecked() and self._intending_playback and just_stopped:
                 try:
                     player.play()
                 except Exception:

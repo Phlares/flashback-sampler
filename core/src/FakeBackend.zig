@@ -23,6 +23,23 @@ opened: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 delivered: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 last_spec: ?Backend.Spec = null,
+// ── Render sink (PR e) ───────────────────────────────────────────────
+// Scripted output: `available` is a constant, `wait` returns at once,
+// every `write` is appended to `written` so a test can read back exactly
+// what the Playback loop produced. `render_allocator` is set by tests
+// (std.testing.allocator is a compile error outside a test block, and
+// this file is analyzed in the DLL build through root.zig).
+render_available: u32 = 256,
+render_open_error: ?Backend.Error = null,
+render_allocator: ?std.mem.Allocator = null,
+written: std.ArrayList(f32) = .empty,
+render_opens: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+render_waits: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+render_writes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+render_stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+last_render_spec: ?Backend.Spec = null,
+/// Park every render wait() until `release` (PR d's knob) is stored true.
+render_hold: bool = false,
 hold: Hold = .none,
 release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 /// Per-source doubles for a multi-source owner (Mixer): when set, each
@@ -49,7 +66,8 @@ pub fn backend(self: *FakeBackend) Backend.Backend {
     return .{ .ptr = self, .vtable = &backend_vtable };
 }
 
-const backend_vtable = Backend.Backend.VTable{ .enumerate = enumerate, .open = open };
+const backend_vtable = Backend.Backend.VTable{ .enumerate = enumerate, .open = open, .openRender = openRender };
+const render_vtable = Backend.RenderStream.VTable{ .wait = renderWait, .available = renderAvailable, .write = renderWrite, .stop = renderStop, .deinit = renderDeinit, .mixRate = mixRate };
 const stream_vtable = Backend.Stream.VTable{ .next = next, .stop = stop, .deinit = deinit, .mixRate = mixRate };
 
 fn enumerate(ptr: *anyopaque, out: []Backend.Device) usize {
@@ -104,6 +122,58 @@ fn deinit(ptr: *anyopaque) void {
 fn mixRate(ptr: *anyopaque) u32 {
     const self: *FakeBackend = @ptrCast(@alignCast(ptr));
     return self.mix_rate;
+}
+
+pub fn deinitRender(self: *FakeBackend) void {
+    if (self.render_allocator) |a| self.written.deinit(a);
+    self.written = .empty;
+}
+
+fn openRender(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.RenderStream {
+    const self: *FakeBackend = @ptrCast(@alignCast(ptr));
+    if (self.render_open_error) |e| return e;
+    self.last_render_spec = spec;
+    _ = self.render_opens.fetchAdd(1, .release);
+    self.render_stopped.store(false, .release);
+    return .{ .ptr = self, .vtable = &render_vtable };
+}
+
+fn renderWait(ptr: *anyopaque, timeout_ms: u32) bool {
+    _ = timeout_ms;
+    const self: *FakeBackend = @ptrCast(@alignCast(ptr));
+    // Yield so a Playback loop spinning on this fake does not starve the
+    // test thread that is waiting to observe it.
+    std.Thread.yield() catch {};
+    _ = self.render_waits.fetchAdd(1, .release);
+    // Counted BEFORE the park so a test can see "the thread is inside
+    // wait()" — past the loop-top reopen check, before fill().
+    if (self.render_hold) self.waitRelease();
+    return true;
+}
+
+fn renderAvailable(ptr: *anyopaque) Backend.Error!u32 {
+    const self: *FakeBackend = @ptrCast(@alignCast(ptr));
+    return self.render_available;
+}
+
+fn renderWrite(ptr: *anyopaque, frames: []const f32) Backend.Error!void {
+    const self: *FakeBackend = @ptrCast(@alignCast(ptr));
+    // A real engine takes exactly the frames it advertised, at the
+    // channel count the stream was OPENED with. A write sized at any
+    // other count is the bug Playback.fill's `ch` parameter prevents.
+    const ch: usize = self.last_render_spec.?.channels;
+    if (frames.len != self.render_available * ch) return error.FormatRejected;
+    if (self.render_allocator) |a| self.written.appendSlice(a, frames) catch return error.OutOfMemory;
+    _ = self.render_writes.fetchAdd(1, .release);
+}
+
+fn renderStop(ptr: *anyopaque) void {
+    const self: *FakeBackend = @ptrCast(@alignCast(ptr));
+    self.render_stopped.store(true, .release);
+}
+
+fn renderDeinit(ptr: *anyopaque) void {
+    _ = ptr;
 }
 
 test "fake backend hands out packets in order then null after stop" {
@@ -171,4 +241,33 @@ test "children route each open() to the next child in order" {
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1, 1 }, p1.frames);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 2 }, p2.frames);
     try std.testing.expectError(error.DeviceNotFound, router.backend().open(spec)); // a third open has no child
+}
+
+test "fake render sink: openRender records the spec, available is scripted, writes are recorded in order" {
+    var fake = FakeBackend.init(&.{});
+    fake.render_allocator = std.testing.allocator;
+    defer fake.deinitRender();
+    fake.render_available = 3;
+    const rs = try fake.backend().openRender(.{ .kind = .render, .device_id = "{out}", .rate = 44_100, .channels = 2 });
+    defer rs.deinit();
+    try std.testing.expectEqual(@as(u32, 1), fake.render_opens.load(.acquire));
+    try std.testing.expectEqualStrings("{out}", fake.last_render_spec.?.device_id);
+    try std.testing.expectEqual(@as(u32, 44_100), fake.last_render_spec.?.rate);
+    try std.testing.expectEqual(@as(u32, 3), try rs.available());
+    try std.testing.expect(rs.wait(100));
+    try rs.write(&[_]f32{ 1, 2, 3, 4, 5, 6 }); // available (3) * channels (2)
+    try std.testing.expectError(error.FormatRejected, rs.write(&[_]f32{ 1, 2, 3 })); // 3 frames at ch 1: wrong size
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 1, 2, 3, 4, 5, 6 }, fake.written.items);
+    try std.testing.expectEqual(@as(usize, 1), fake.render_writes.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fake.render_waits.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 48_000), rs.mixRate());
+    rs.stop();
+    try std.testing.expect(fake.render_stopped.load(.acquire));
+}
+
+test "fake render sink: render_open_error propagates and opens are not counted" {
+    var fake = FakeBackend.init(&.{});
+    fake.render_open_error = error.FormatRejected;
+    try std.testing.expectError(error.FormatRejected, fake.backend().openRender(.{ .kind = .render, .device_id = "", .rate = 48_000, .channels = 2 }));
+    try std.testing.expectEqual(@as(u32, 0), fake.render_opens.load(.acquire));
 }

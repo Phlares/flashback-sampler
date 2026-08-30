@@ -90,6 +90,15 @@ pub extern "ole32" fn CoTaskMemFree(p: ?*anyopaque) callconv(.winapi) void;
 pub extern "ole32" fn PropVariantClear(p: *PROPVARIANT) callconv(.winapi) HRESULT;
 pub extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 pub extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) i32;
+
+// Event-driven render: WASAPI signals this event once per engine period
+// (SetEventHandle + AUDCLNT_STREAMFLAGS_EVENTCALLBACK). The render thread
+// blocks in WaitForSingleObject at zero CPU until then. Auto-reset event
+// (manual_reset = 0): one signal wakes one wait, no explicit ResetEvent.
+pub extern "kernel32" fn CreateEventW(attrs: ?*anyopaque, manual_reset: i32, initial_state: i32, name: ?[*:0]const u16) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn WaitForSingleObject(h: HANDLE, timeout_ms: u32) callconv(.winapi) u32;
+pub const WAIT_OBJECT_0: u32 = 0;
+pub const WAIT_TIMEOUT: u32 = 0x102;
 pub extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?HMODULE;
 pub extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 pub const HMODULE = *anyopaque;
@@ -140,6 +149,7 @@ pub const DEVICE_STATE_ACTIVE: u32 = 1;
 pub const STGM_READ: u32 = 0;
 pub const AUDCLNT_SHAREMODE_SHARED: u32 = 0;
 pub const AUDCLNT_STREAMFLAGS_LOOPBACK: u32 = 0x00020000;
+pub const AUDCLNT_STREAMFLAGS_EVENTCALLBACK: u32 = 0x00040000;
 pub const AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM: u32 = 0x80000000;
 pub const AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY: u32 = 0x08000000;
 pub const AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY: u32 = 0x1;
@@ -153,6 +163,7 @@ pub const CLSID_MMDeviceEnumerator = guid("{BCDE0395-E52F-467C-8E3D-C4579291692E
 pub const IID_IMMDeviceEnumerator = guid("{A95664D2-9614-4F35-A746-DE8DB63617E6}");
 pub const IID_IAudioClient = guid("{1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}");
 pub const IID_IAudioCaptureClient = guid("{C8ADBD64-E71E-48A0-A4DE-185C395CD317}");
+pub const IID_IAudioRenderClient = guid("{F294ACFC-3146-4483-A7BF-ADDCA7C260E2}");
 pub const IID_IUnknown = guid("{00000000-0000-0000-C000-000000000046}");
 
 pub const PROPERTYKEY = extern struct { fmtid: GUID, pid: u32 };
@@ -285,6 +296,21 @@ pub const IAudioCaptureClient = extern struct {
     }
 };
 
+pub const IAudioRenderClient = extern struct {
+    vtbl: *const VTable,
+    pub const VTable = extern struct {
+        base: IUnknownVTable,
+        /// Hands out `n_frames` frames of engine buffer to fill; ReleaseBuffer
+        /// with AUDCLNT_BUFFERFLAGS_SILENT tells the engine to ignore the
+        /// bytes and play silence.
+        GetBuffer: *const fn (*IAudioRenderClient, n_frames: u32, data: *?[*]u8) callconv(.winapi) HRESULT,
+        ReleaseBuffer: *const fn (*IAudioRenderClient, n_frames: u32, flags: u32) callconv(.winapi) HRESULT,
+    };
+    pub fn release(self: *IAudioRenderClient) void {
+        _ = self.vtbl.base.Release(self);
+    }
+};
+
 pub const IID_IActivateAudioInterfaceCompletionHandler = guid("{41D949AB-9862-444A-80F6-C261334DA5EB}");
 pub const IID_IAgileObject = guid("{94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90}");
 pub const VT_BLOB: u16 = 0x41;
@@ -402,4 +428,20 @@ test "AUDIOCLIENT_ACTIVATION_PARAMS is 12 bytes and PROCESS params sit at offset
 test "PROCESSENTRY32W layout: szExeFile at 44, size 568" {
     try std.testing.expectEqual(@as(usize, 44), @offsetOf(PROCESSENTRY32W, "szExeFile"));
     try std.testing.expectEqual(@as(usize, 568), @sizeOf(PROCESSENTRY32W));
+}
+
+test "guid parses IID_IAudioRenderClient" {
+    const g = IID_IAudioRenderClient;
+    try std.testing.expectEqual(@as(u32, 0xF294ACFC), g.d1);
+    try std.testing.expectEqual(@as(u16, 0x3146), g.d2);
+    try std.testing.expectEqual(@as(u16, 0x4483), g.d3);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2 }, &g.d4);
+}
+
+test "IAudioRenderClient vtable: GetBuffer is slot 3, ReleaseBuffer slot 4 (after IUnknown's three)" {
+    // Method order IS the binary interface; a swap here would call
+    // ReleaseBuffer when we mean GetBuffer and corrupt the engine buffer.
+    try std.testing.expectEqual(3 * @sizeOf(usize), @offsetOf(IAudioRenderClient.VTable, "GetBuffer"));
+    try std.testing.expectEqual(4 * @sizeOf(usize), @offsetOf(IAudioRenderClient.VTable, "ReleaseBuffer"));
+    try std.testing.expectEqual(@as(u32, 0x00040000), AUDCLNT_STREAMFLAGS_EVENTCALLBACK);
 }
