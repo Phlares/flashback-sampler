@@ -144,20 +144,14 @@ pub fn stats(self: *const Mixer) Capture.Stats {
     };
 }
 
-pub fn lastError(self: *const Mixer) []const u8 {
-    // Not a sentinel slice here either -- see Capture.lastError()'s doc
-    // comment; same race is possible against this struct's own err_buf
-    // if a caller ever polls lastError() from another thread while
-    // setError() runs (currently setError only runs on the control
-    // thread inside start(), but the fix costs nothing and removes the
-    // landmine for good).
+pub fn lastError(self: *const Mixer) [:0]const u8 {
     const n = self.err_len.load(.acquire);
-    if (n > 0) return self.err_buf[0..n];
+    if (n > 0) return self.err_buf[0..n :0];
     for (self.sources[0..self.n_sources]) |*s| {
         const e = s.capture.lastError();
         if (e.len > 0) return e;
     }
-    return self.err_buf[0..0];
+    return self.err_buf[0..0 :0];
 }
 
 fn setError(self: *Mixer, comptime fmt: []const u8, args: anytype) void {
@@ -233,6 +227,9 @@ test "init rejects a spec whose rate or channels does not match the target's for
     try std.testing.expectError(error.InvalidArgument, m.init(std.testing.allocator, fake.backend(), &target, &.{wrong_channels}));
     const wrong_rate = Backend.Spec{ .kind = .loopback, .device_id = "", .rate = 48_000, .channels = 1 };
     try std.testing.expectError(error.InvalidArgument, m.init(std.testing.allocator, fake.backend(), &target, &.{wrong_rate}));
+    // A good spec first, a bad one second: pins that the guard loops over
+    // EVERY spec, not just specs[0].
+    try std.testing.expectError(error.InvalidArgument, m.init(std.testing.allocator, fake.backend(), &target, &.{ test_spec, wrong_rate }));
     try m.init(std.testing.allocator, fake.backend(), &target, &.{test_spec}); // matching spec still inits fine
     defer m.deinit();
 }

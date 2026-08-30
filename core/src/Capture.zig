@@ -64,8 +64,12 @@ fn currentSpec(self: *const Capture) Backend.Spec {
 pub fn start(self: *Capture) !void {
     if (self.thread != null) return error.AlreadyRunning;
     self.stop_flag.store(false, .monotonic);
-    // Clear the TEXT too, not only the length: lastError() slices
-    // err_buf[0..len :0], and the sentinel check needs err_buf[len] == 0.
+    // Clear the TEXT too, not only the length. err_buf backs lastError(),
+    // and fb_capture_last_error hands lastError()'s pointer straight to
+    // ctypes as a C string. A stale byte at position 0 caused the
+    // restart-after-error sentinel panic (issue #45); lastError()'s
+    // n == 0 guard covers that panic too, but this reset keeps err_buf
+    // itself clean, not just the guarded read.
     self.err_buf[0] = 0;
     self.err_len.store(0, .monotonic);
     // `writer_active` is owned by THIS thread, not the worker: the scope
@@ -101,19 +105,17 @@ pub fn stats(self: *const Capture) Stats {
     };
 }
 
-pub fn lastError(self: *const Capture) []const u8 {
+pub fn lastError(self: *const Capture) [:0]const u8 {
     const n = self.err_len.load(.acquire);
-    // NOT a sentinel slice (`buf[0..n :0]`): that syntax's runtime bounds
-    // check reads `err_buf[n]` unconditionally, even when the slice is
-    // logically empty (n == 0) -- and n == 0 is exactly the stale value a
-    // concurrent reader sees while `setError` (another thread) is mid-way
-    // through writing a FIRST error message starting at byte 0. The
-    // sentinel byte IS always there once a write completes (bufPrintZ
-    // guarantees it), so a caller that wants a null-terminated view
-    // still gets one from `err_buf` directly (see fb_capture_last_error);
-    // this function just stops asserting it on a byte a writer thread may
-    // be touching right now.
-    return self.err_buf[0..n];
+    // setError runs at most once per run() call. Only the n == 0 -> n > 0
+    // transition can race a reader: the sentinel check below reads
+    // err_buf[n], and n == 0 is exactly the stale value a reader sees
+    // while setError (another thread) is mid-way through writing a FIRST
+    // error message starting at err_buf[0] (issue #45). This guard skips
+    // the sentinel check on that path only; n > 0 below still gets the
+    // full, type-checked sentinel slice.
+    if (n == 0) return "";
+    return self.err_buf[0..n :0];
 }
 
 fn setError(self: *Capture, comptime fmt: []const u8, args: anytype) void {
@@ -348,6 +350,10 @@ test "restart after a recorded error: lastError is empty and does not trap on th
     fake.open_error = null;
     try cap.start();
     defer cap.stop();
-    // Before the fix this line panics: err_len is 0 but err_buf[0] is 'o'.
+    // lastError()'s n == 0 guard pins the observable API: no panic, empty
+    // string, even though this restart's err_len == 0 races nothing here
+    // (single-threaded). err_buf[0] pins the ACTUAL reset in start() that
+    // this whole test is about, independent of lastError()'s return shape.
     try std.testing.expectEqualStrings("", cap.lastError());
+    try std.testing.expectEqual(@as(u8, 0), cap.err_buf[0]);
 }
