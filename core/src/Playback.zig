@@ -173,12 +173,20 @@ fn fill(self: *Playback, want: usize, ch: usize) []const f32 {
     const total = self.clip_frames.load(.acquire);
     // Bound by the slice at the stream's `ch`, not by clip_frames: a
     // play() or seek() that lands between a channel-changing bind and the
-    // reopen must not index past a clip bound at the other count. The
-    // cursor takes the same bound — seek() clamps to clip_frames, which
-    // counts frames at the NEW channel count, so it can sit past the end
-    // of the same clip read at the stream's count.
+    // reopen must not index past a clip bound at the other count.
     const limit = @min(total, self.clip.len / ch);
-    const at = @min(self.cursor.load(.acquire), limit);
+    const at = self.cursor.load(.acquire);
+    // Stale stream: the cursor counts frames at the NEW channel count
+    // while this stream still reads the clip at the OLD one, so a legal
+    // seek can sit past `limit`. Output silence and leave the cursor
+    // ALONE — writing a clamped value back would move the user's seek
+    // (seek(8) on an 8-frame mono clip would become 4 under a stereo
+    // stream, and the reopened stream would resume halfway). The reopen
+    // is already pending, so this window is at most one fill long.
+    if (at > limit) {
+        @memset(out, 0);
+        return out;
+    }
     const n = @min(want, limit - at);
     const src = self.clip[at * ch .. (at + n) * ch];
     @memcpy(out[0 .. n * ch], src);
@@ -367,6 +375,10 @@ test "bind while playing pauses, resets the cursor, and replaces the clip" {
 
 test "rebind at a new rate reopens the stream on the render thread with the new spec" {
     var fake = FakeBackend.init(&.{});
+    // The DEVICE mix rate the fake reports, not the rate Playback asks
+    // for. It changes between the two opens so each mix_rate publish is
+    // pinned on its own: one value would let either store cover the other.
+    fake.mix_rate = 44_100;
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const a = ramp(4);
@@ -378,6 +390,11 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
         }
     }.f);
     try std.testing.expectEqual(@as(u32, 1), fake.render_opens.load(.acquire));
+    // run() publishes mix_rate before it sets running, so this is safe here.
+    try std.testing.expectEqual(@as(u32, 44_100), pb.state().mix_rate);
+    // Written before the bind that requests the reopen: the render thread
+    // reads it only inside openRender, and `reopen` orders the two.
+    fake.mix_rate = 96_000;
     try pb.bind(&a, 96_000, 2);
     // Wait on the fake's open COUNT, not on `running`: `running` is still
     // true from the first open, so a wait on it would pass before the
@@ -385,7 +402,12 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     var spins: u32 = 0;
     while (fake.render_opens.load(.acquire) != 2 and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
+    // The counter moves INSIDE openRender, so the publish that follows it
+    // needs its own wait.
+    var published: u32 = 0;
+    while (pb.state().mix_rate != 96_000 and published < 5_000_000) : (published += 1) std.Thread.yield() catch {};
     pb.stop();
+    try std.testing.expectEqual(@as(u32, 96_000), pb.state().mix_rate);
     try std.testing.expectEqual(@as(u32, 96_000), fake.last_render_spec.?.rate);
     // Same rate again: no reopen.
     try pb.bind(&a, 96_000, 2);
@@ -431,7 +453,7 @@ test "bind mono at the same rate under a stereo stream reopens and never resizes
     try std.testing.expect(std.mem.indexOf(u8, pb.lastError(), "stream failed") == null);
 }
 
-test "a seek past the stream's channel bound never indexes outside the clip" {
+test "a seek past the stream's channel bound outputs silence and keeps the seek target" {
     var fake = FakeBackend.init(&.{});
     fake.render_allocator = std.testing.allocator;
     defer fake.deinitRender();
@@ -446,8 +468,10 @@ test "a seek past the stream's channel bound never indexes outside the clip" {
     while (fake.render_waits.load(.acquire) == 0 and spins < 5_000_000) : (spins += 1) std.Thread.yield() catch {};
     // 8 mono frames = 4 stereo frames. seek(8) is legal against
     // clip_frames, but the parked fill still runs at the stereo stream's
-    // ch = 2, where the clip holds only 4 frames. An unclamped cursor
-    // slices clip[16..16] on a 8-sample clip and panics.
+    // ch = 2, where the clip holds only 4 frames. Two failures are
+    // pinned here: an unclamped cursor slices clip[16..16] on an 8-sample
+    // clip and panics, and a cursor CLAMPED to 4 and written back would
+    // silently move the user's seek to the middle of the clip.
     const mono = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     try pb.bind(&mono, 48_000, 1);
     // play() before seek(): play() rewinds a cursor already at the end,
@@ -460,6 +484,15 @@ test "a seek past the stream's channel bound never indexes outside the clip" {
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
     pb.stop();
     try std.testing.expect(std.mem.indexOf(u8, pb.lastError(), "stream failed") == null);
+    // The seek target survives both the stale-stream fill and the reopen.
+    try std.testing.expectEqual(@as(u64, 8), pb.state().cursor);
+    // The cursor sits at the clip end, so NOTHING is ever played: the
+    // stale fill writes silence and the reopened stream finds the cursor
+    // still at 8. This is what pins the rewind, not the end-state cursor
+    // above — a cursor clamped to 4 and written back also ends at 8,
+    // because the reopened stream gets there by PLAYING frames 4..8.
+    try std.testing.expect(fake.written.items.len >= 12);
+    for (fake.written.items) |s| try std.testing.expectEqual(@as(f32, 0), s);
 }
 
 test "setDevice copies the id, sets reopen, and the new id reaches the backend" {
