@@ -7,6 +7,7 @@
 //! Render (PR e) is event-driven: the loopback quirk does not apply to a
 //! real output stream.
 const std = @import("std");
+const builtin = @import("builtin");
 const w = @import("wasapi.zig");
 const Backend = @import("Backend.zig");
 const convert = @import("convert.zig");
@@ -63,7 +64,11 @@ const Stream = struct {
 /// on the audio path. The engine owns the sample buffer (GetBuffer hands
 /// us a pointer into it), so no scratch is needed here.
 const Render = struct {
-    in_use: bool = false,
+    // Render is the first pool with concurrent openers: each Playback's
+    // render thread calls openRender independently, so two decks starting
+    // together can race to claim the same slot. in_use must be atomic and
+    // claimed with a compare-and-swap, not a plain read-then-write.
+    in_use: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     client: ?*w.IAudioClient = null,
     render: ?*w.IAudioRenderClient = null,
     event: ?w.HANDLE = null,
@@ -90,8 +95,9 @@ pub fn renderFormat(rate: u32, channels: u16) w.WAVEFORMATEX {
 
 fn acquireRender(self: *WasapiBackend) ?*Render {
     for (&self.renders) |*r| {
-        if (!r.in_use) {
-            r.in_use = true;
+        // cmpxchgStrong returns null on success (the old value it swapped
+        // out matched `false`) — that is the "I won the claim" case.
+        if (r.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
             return r;
         }
     }
@@ -278,7 +284,7 @@ fn openRender(ptr: *anyopaque, spec: Backend.Spec) Backend.Error!Backend.RenderS
     errdefer rc.release();
     if (w.failed(client.vtbl.Start(client))) return error.ActivationFailed;
     slot.* = .{
-        .in_use = true,
+        .in_use = std.atomic.Value(bool).init(true),
         .client = client,
         .render = rc,
         .event = event,
@@ -437,12 +443,17 @@ fn renderWrite(ptr: *anyopaque, frames: []const f32) Backend.Error!void {
     const r: *Render = @ptrCast(@alignCast(ptr));
     const n: u32 = @intCast(frames.len / r.channels);
     if (n == 0) return;
+    // GetBuffer(n) hands back exactly n * channels floats of engine
+    // buffer. frames.len may not be a multiple of channels; take only
+    // the whole frames and drop the trailing partial one rather than
+    // read/write past the engine's buffer.
+    const take = n * r.channels;
     var data: ?[*]u8 = null;
     if (w.failed(r.render.?.vtbl.GetBuffer(r.render.?, n, &data))) return error.ActivationFailed;
     // Silence flag: the engine skips the mix for this packet. Cheap scan;
     // the paused loop writes zeros every period.
-    const silent = std.mem.allEqual(f32, frames, 0);
-    if (!silent) @memcpy(data.?[0 .. frames.len * @sizeOf(f32)], std.mem.sliceAsBytes(frames));
+    const silent = std.mem.allEqual(f32, frames[0..take], 0);
+    if (!silent) @memcpy(data.?[0 .. take * @sizeOf(f32)], std.mem.sliceAsBytes(frames[0..take]));
     const flags: u32 = if (silent) w.AUDCLNT_BUFFERFLAGS_SILENT else 0;
     if (w.failed(r.render.?.vtbl.ReleaseBuffer(r.render.?, n, flags))) return error.ActivationFailed;
 }
@@ -484,4 +495,24 @@ test "renderFormat is float32 at the clip's rate and channels; AUTOCONVERTPCM do
     try std.testing.expectEqual(@as(u32, 96_000), f.nSamplesPerSec);
     try std.testing.expectEqual(@as(u16, 8), f.nBlockAlign);
     try std.testing.expectEqual(@as(u32, 96_000 * 8), f.nAvgBytesPerSec);
+}
+
+test "openRender guard clause rejects bad kind/channels/rate before any COM call" {
+    // root.zig only imports this file on Windows, so this is already
+    // Windows-only in practice; the explicit skip documents that as a
+    // standing contract rather than an accident of the import graph.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const base = Backend.Spec{ .kind = .render, .device_id = "", .rate = 48_000, .channels = 2 };
+    var wrong_kind = base;
+    wrong_kind.kind = .input;
+    try std.testing.expectError(error.Unsupported, backend().openRender(wrong_kind));
+    var zero_channels = base;
+    zero_channels.channels = 0;
+    try std.testing.expectError(error.Unsupported, backend().openRender(zero_channels));
+    var too_many_channels = base;
+    too_many_channels.channels = 3;
+    try std.testing.expectError(error.Unsupported, backend().openRender(too_many_channels));
+    var zero_rate = base;
+    zero_rate.rate = 0;
+    try std.testing.expectError(error.Unsupported, backend().openRender(zero_rate));
 }
