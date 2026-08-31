@@ -716,7 +716,12 @@ class NativeScratch:
         """(n_bins, 2, channels) float32 — the get_peak_bins layout."""
         channels = int(self.checkout_info(h).channels)
         out = np.zeros((int(n_bins), channels, 2), dtype=np.float32)
-        out_len = int(n_bins) * channels  # FbPeakBin count (R-h6a), not the float count
+        # out_len must be the BUFFER's own FbPeakBin count (R-h6a), same
+        # as wav_peak_bins above — never n_bins * channels re-derived
+        # separately, which is exactly the stale-length bug R-h6a exists
+        # to catch (a re-derivation can silently drift from what `out`
+        # actually holds if this method's own math ever changes).
+        out_len = out.size // 2
         _status_raise(self._lib.fb_checkout_peak_bins(self._h, h, int(n_bins), out.ctypes.data_as(C.POINTER(FbPeakBin)), out_len), "fb_checkout_peak_bins")
         return np.ascontiguousarray(out.transpose(0, 2, 1))
 

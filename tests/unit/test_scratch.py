@@ -166,10 +166,16 @@ def test_bind_checkout_plays_the_range(ring, scratch, tmp_path, monkeypatch):
 
 
 def test_checkout_peak_bins_passes_the_real_out_len(ring, scratch, tmp_path):
-    """R-h6a: the Python side must pass the buffer's ACTUAL FbPeakBin
-    count, not a value re-derived some other way — spy on the real call
-    and confirm the argument matches n_bins * channels."""
+    """R-h6a: the Python side must pass the ACTUAL FbPeakBin count of the
+    (n_bins, channels, 2) buffer it builds — not a formula (n_bins *
+    channels) re-derived in parallel, which is exactly the anti-pattern
+    R-h6a exists to catch: the two can silently drift apart. Pin against
+    an independently-built buffer of the documented output shape, not
+    against the implementation's own internal arithmetic."""
     h = scratch.checkout_create(ring, 0, 100, tmp_path / "h.wav")
+    channels = int(scratch.checkout_info(h).channels)
+    n_bins = 5
+    out = np.zeros((n_bins, channels, 2), dtype=np.float32)  # the shape checkout_peak_bins documents building
     lib = scratch._lib
     orig = lib.fb_checkout_peak_bins
     calls = []
@@ -179,7 +185,7 @@ def test_checkout_peak_bins_passes_the_real_out_len(ring, scratch, tmp_path):
         return orig(*a)
 
     with mock.patch.object(lib, "fb_checkout_peak_bins", side_effect=spy):
-        scratch.checkout_peak_bins(h, 5)
+        scratch.checkout_peak_bins(h, n_bins)
     assert len(calls) == 1
-    assert calls[0][-1] == 5 * 2  # n_bins * channels
+    assert calls[0][-1] == out.size // 2  # the buffer's own FbPeakBin count
     scratch.checkout_destroy(h)
