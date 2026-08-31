@@ -14,6 +14,7 @@
 //! See the guard-band note above `read` for why.
 const std = @import("std");
 const Summary = @import("Summary.zig");
+const peaks = @import("peaks.zig");
 
 const Ring = @This();
 
@@ -350,7 +351,7 @@ pub fn read(self: *Ring, abs_start: u64, out: []f32) ReadError!void {
 /// One (min, max) pair per channel per display bin. `extern` fixes the
 /// layout to two consecutive f32 — the ctypes host maps a numpy
 /// float32[n_bins][channels][2] view straight onto `[*]PeakBin`.
-pub const PeakBin = extern struct { min: f32, max: f32 };
+pub const PeakBin = peaks.PeakBin;
 
 pub const PeakBinsError = error{ InvalidArgument, Overwritten };
 
@@ -413,13 +414,13 @@ pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) P
         // different rounding order moves edges by one frame and shifts
         // every waveform golden (spec "Risks", peak-bin parity).
         const step: f64 = @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(n_bins));
-        const span_ref = binEdge(step, 1, n, n_bins) - binEdge(step, 0, n, n_bins);
+        const span_ref = peaks.binEdge(step, 1, n, n_bins) - peaks.binEdge(step, 0, n, n_bins);
         const stride: u64 = @max(1, span_ref / peak_bins_max_samples_per_bin);
 
         if (stride == 1) {
             for (0..n_bins) |i| {
-                const a = binEdge(step, i, n, n_bins);
-                const b = binEdge(step, i + 1, n, n_bins);
+                const a = peaks.binEdge(step, i, n, n_bins);
+                const b = peaks.binEdge(step, i + 1, n, n_bins);
                 if (b <= a) {
                     if (i > 0) @memcpy(out[i * chans .. (i + 1) * chans], out[(i - 1) * chans .. i * chans]);
                     continue;
@@ -438,7 +439,7 @@ pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) P
             // 1–2 positions from the next bin (ported behaviour).
             const k: usize = @intCast(span_ref / stride + 1);
             for (0..n_bins) |i| {
-                const bin_abs = abs_start + binEdge(step, i, n, n_bins);
+                const bin_abs = abs_start + peaks.binEdge(step, i, n, n_bins);
                 const first_abs = ((bin_abs + stride - 1) / stride) * stride; // ceil to the grid
                 var first = true;
                 for (0..k) |j| {
@@ -460,27 +461,12 @@ pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) P
     return error.Overwritten;
 }
 
-/// The clip waveform's `_peak_bins_from_audio` (turntable_window.py) computes
-/// the same edges in numpy; keep them in step.
-fn binEdge(step: f64, i: usize, n: u64, n_bins: usize) u64 {
-    if (i == n_bins) return n; // numpy sets the last edge to `stop` exactly
-    // @intFromFloat truncates toward zero == numpy's int64 cast here (non-negative).
-    return @intFromFloat(@as(f64, @floatFromInt(i)) * step);
-}
-
-/// Fold one physical frame into a bin's per-channel (min, max).
-fn reduceFrame(self: *const Ring, frame_idx: u64, bin: []PeakBin, first: *bool) void {
-    const base: usize = @intCast(frame_idx * self.channels);
-    for (bin, 0..) |*pb, c| {
-        const v = self.frames[base + c];
-        if (first.*) {
-            pb.* = .{ .min = v, .max = v };
-        } else {
-            pb.min = @min(pb.min, v);
-            pb.max = @max(pb.max, v);
-        }
-    }
-    first.* = false;
+/// Frame at PHYSICAL index `idx` (already wrapped by the caller) folded
+/// through the shared reducer — Ring owns the wrap, peaks owns the fold.
+fn reduceFrame(self: *const Ring, idx: u64, out_bin: []PeakBin, first: *bool) void {
+    const chans: usize = self.channels;
+    const at: usize = @intCast(idx * chans);
+    peaks.reduceFrame(self.frames[at .. at + chans], out_bin, first);
 }
 
 /// RMS per channel over the newest `n_frames_req` frames, clamped like
