@@ -210,8 +210,14 @@ class CheckoutManager:
                 # disk forever -- adoption only scans *.json, so it would
                 # never be found or cleaned up.
                 if handle is not None:
-                    self._scratch.checkout_destroy(handle)
-                path.unlink(missing_ok=True)
+                    try:
+                        self._scratch.checkout_destroy(handle)
+                    except Exception:
+                        pass  # cleanup must not mask the original error
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass  # cleanup must not mask the original error
                 raise RuntimeError(f"could not create checkout; {e}") from e
         return co
 
@@ -266,7 +272,10 @@ class CheckoutManager:
             # PRE-EXISTING file this manager did not create -- only the
             # handle is ours to release on failure, never the file.
             if handle is not None:
-                self._scratch.checkout_destroy(handle)
+                try:
+                    self._scratch.checkout_destroy(handle)
+                except Exception:
+                    pass  # cleanup must not mask the original error
             raise RuntimeError(f"could not adopt root {audio}; {e}") from e
         return co
 
@@ -293,7 +302,10 @@ class CheckoutManager:
             # the parent checkout's own refcount -- only this slice's
             # handle is ours to release.
             if handle is not None:
-                self._scratch.checkout_destroy(handle)
+                try:
+                    self._scratch.checkout_destroy(handle)
+                except Exception:
+                    pass  # cleanup must not mask the original error
             raise RuntimeError(f"could not adopt slice {m.id}; {e}") from e
         return co
 
@@ -345,25 +357,43 @@ class CheckoutManager:
     # ------------------------------------------------------------------
 
     def set_trim(self, checkout_id: str, trim_in: int, trim_out: int) -> None:
-        co = self.get(checkout_id)
+        # R-h8l (round 2): look up AND mutate under one lock acquisition --
+        # `self.get(checkout_id)` fetches `co` and releases the lock before
+        # this method touches it, the same fetch-then-use gap closed
+        # elsewhere for write_state/resident_bytes/peak_bins/export_range.
         with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            co = self._checkouts[checkout_id]
             co.trim_in_samples = max(0, int(trim_in))
             co.trim_out_samples = max(co.trim_in_samples, int(trim_out)) if trim_out > 0 else 0
-            self._write_manifest(co)
+            self._write_manifest(co)  # takes no lock of its own -- safe to call here
 
     def pin(self, checkout_id: Optional[str]) -> None:
         """The selected clip: pinned (never evicted) and preloaded. One
         at a time per manager; None unpins."""
+        # R-h8l (round 2): the previous shape released the lock between
+        # recording `_pinned_id` and looking up `prev`'s/`checkout_id`'s
+        # handle via `self.get(...)` -- both fetch-then-use gaps, plus
+        # `self.get()` itself takes `self._lock`, so it CANNOT be called
+        # from inside this block (would deadlock; `threading.Lock` is not
+        # reentrant). Index `self._checkouts` directly instead.
         with self._lock:
             prev = self._pinned_id
             self._pinned_id = checkout_id
-        if prev and prev != checkout_id:
-            try:
-                self._scratch.checkout_pin(self.get(prev).handle, False)
-            except KeyError:
-                pass
-        if checkout_id is not None:
-            self._scratch.checkout_pin(self.get(checkout_id).handle, True)
+            prev_handle = None
+            if prev and prev != checkout_id and prev in self._checkouts:
+                prev_handle = self._checkouts[prev].handle
+            cur_handle = None
+            if checkout_id is not None:
+                if checkout_id not in self._checkouts:
+                    raise KeyError(checkout_id)
+                cur_handle = self._checkouts[checkout_id].handle
+            # checkout_pin is a raw ctypes call -- no lock of its own.
+            if prev_handle is not None:
+                self._scratch.checkout_pin(prev_handle, False)
+            if cur_handle is not None:
+                self._scratch.checkout_pin(cur_handle, True)
 
     # ------------------------------------------------------------------
     # Save / discard
@@ -414,8 +444,11 @@ class CheckoutManager:
         return target
 
     def mark_saved(self, checkout_id: str) -> None:
-        co = self.get(checkout_id)
+        # R-h8l (round 2): same fetch-then-use fix as set_trim.
         with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            co = self._checkouts[checkout_id]
             co.state = "saved"
             self._write_manifest(co)
 
