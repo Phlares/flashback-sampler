@@ -111,10 +111,16 @@ def test_checkout_duration_clamps_to_oldest_on_a_lapped_ring(scratch, tmp_path):
     # cannot pin the `max(oldest, ...)` clamp in create(). This ring has
     # capacity 1000 frames but 1500 written -- only samples 500..1500 are
     # still live -- so a 5 s request must clamp to the oldest live sample,
-    # not run off the front of the ring.
+    # not run off the front of the ring. This also wraps the ring
+    # (1500 written into 1000 frames of capacity) -- R-h8j: the
+    # `_audio()` check below is what pins a correct wrapped-physical-read
+    # (dropping test_create_from_abs_range_succeeds_within_live_ring in
+    # the h8 rewrite lost that pin; this restores it).
     mgr = _mgr(scratch, tmp_path, seconds=1.0, frames=1500)
     co = mgr.create(duration_s=5.0)
     assert co.n_frames == 1000 and co.abs_sample_start == 500 and co.abs_sample_end == 1500
+    audio = _audio(mgr, co)
+    assert audio[0, 0] == pytest.approx(500.0) and audio[-1, 0] == pytest.approx(1499.0)
 
 
 def test_checkout_anchor_offset_rejects_negative(scratch, tmp_path):
@@ -150,25 +156,65 @@ def test_max_active_cap_refuses_new_checkouts(scratch, tmp_path):
         mgr.create(duration_s=0.1)
 
 
+@pytest.mark.timeout(20)
+@pytest.mark.perf
 def test_checkout_create_does_not_stall_writer(scratch, tmp_path):
-    mgr = _mgr(scratch, tmp_path, seconds=2.0, rate=48_000, channels=2, frames=0)
-    buf = mgr._buffer  # noqa: SLF001
+    """R-h8h: restores the pre-h8 shape (48 kHz-paced writer, per-write
+    timing, `@pytest.mark.perf`) that a prior rewrite dropped in favor of
+    a busy-loop + a `written[0] > 4096 * 5` assertion any spinning thread
+    satisfies (~54% flaky on this box for reasons unrelated to
+    checkout.py). `perf` keeps this out of the default filtered run --
+    it costs ~5.5 s and asserts a real timing bound."""
+    buf = NativeAudioCircularBuffer(duration_seconds=30.0, sample_rate=48_000, channels=2)
+    mgr = CheckoutManager(buffer=buf, scratch=scratch, scratch_dir=tmp_path, slot_name="Main", max_active_checkouts=1024)
     stop = threading.Event()
-    written = [0]
+    results = {}
 
     def writer():
-        block = np.zeros((4096, 2), dtype=np.float32)
+        max_t = 0.0
+        count = 0
+        block = np.zeros((512, 2), dtype=np.float32)
+        # ~48 kHz real-time: 512 samples / 48000 Hz ≈ 10.67 ms/block
+        interval = 512 / 48_000
+        next_tick = time.monotonic()
         while not stop.is_set():
+            t0 = time.monotonic()
             buf.write(block)
-            written[0] += 4096
+            t1 = time.monotonic()
+            dt = t1 - t0
+            if dt > max_t:
+                max_t = dt
+            count += 1
+            next_tick += interval
+            sleep_for = next_tick - time.monotonic()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                next_tick = time.monotonic()
+        results["max_t"] = max_t
+        results["count"] = count
+
     t = threading.Thread(target=writer, daemon=True)
     t.start()
-    time.sleep(0.05)
-    for _ in range(5):
-        mgr.create(duration_s=0.5)
+    # Prime the ring with real-time audio -- need ~5 s of buffer to take 3 s checkouts
+    time.sleep(5.0)
+
+    checkouts = []
+    for _ in range(15):
+        co = mgr.create(duration_s=3.0)
+        assert co.n_frames > 0, (
+            f"checkout returned empty; total_written={buf.total_written}"
+        )
+        checkouts.append(co)
+
     stop.set()
-    t.join()
-    assert written[0] > 4096 * 5
+    t.join(timeout=1.0)
+    # ~5.5 s of real-time audio → at least 500 writer iterations
+    assert results["count"] > 400, f"writer count too low: {results['count']}"
+    assert results["max_t"] < 0.001, (
+        f"writer stalled during checkout creation: "
+        f"{results['max_t']*1000:.2f}ms"
+    )
 
 
 def test_save_as_wav_writes_correct_samples(scratch, tmp_path):
@@ -229,10 +275,15 @@ def test_discard_removes_manifest_and_wav(scratch, tmp_path):
     assert not manifest_path(tmp_path, co.id).exists() and not co.path.exists()
 
 
-def test_discard_before_the_write_lands_still_cleans_up(scratch, tmp_path):
+def test_discard_cleans_up_manifest_and_wav(scratch, tmp_path):
+    # R-h8i: renamed from ..._before_the_write_lands_still_cleans_up --
+    # write_state reads "written" immediately after create() returns on
+    # this box (measured), so this never actually exercises a discard
+    # racing an in-flight write. That race is an untested coverage gap,
+    # not something this test proves; see the h8 fix report.
     mgr = _mgr(scratch, tmp_path, seconds=2.0, rate=48_000, channels=2, frames=96_000)
-    co = mgr.create(duration_s=2.0)  # 768 KB: the write is still queued or running
-    mgr.discard(co.id)  # destroy waits for the job, then the file goes
+    co = mgr.create(duration_s=2.0)  # 768 KB
+    mgr.discard(co.id)
     assert not co.path.exists() and not (tmp_path / f"{co.id}.wav.part").exists()
 
 
@@ -299,3 +350,70 @@ def test_adopt_root_partial_clamps_to_the_file(scratch, tmp_path):
     a = mgr2.adopt_root(m, root.path, partial=True)
     assert a.n_frames == 200 and a.partial is True
     assert read_manifest(manifest_path(tmp_path, a.id)).partial is True
+
+
+def _boom(*_a, **_k):
+    raise FileNotFoundError("scratch dir gone")
+
+
+def test_engine_errors_surface_as_one_runtimeerror_everywhere(scratch, tmp_path, monkeypatch):
+    """R-h8k: every writer-reaching public method converts the engine's
+    (RuntimeError, OSError) into a single RuntimeError, regardless of
+    which underlying call fails -- create_from_abs_range, export_range
+    (save's path), adopt_root, adopt_slice."""
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+
+    mgr = _mgr(scratch, tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(scratch, "checkout_create", _boom)
+        with pytest.raises(RuntimeError):
+            mgr.create_from_abs_range(200, 260)
+
+    co = mgr.create(duration_s=0.1)
+    with monkeypatch.context() as m:
+        m.setattr(scratch, "checkout_export", _boom)
+        with pytest.raises(RuntimeError):
+            mgr.save(co.id, tmp_path / "x.wav")
+
+    root = mgr.create(duration_s=0.5)
+    _wait_written(mgr, root)
+    m_root = read_manifest(manifest_path(tmp_path, root.id))
+    mgr.close()
+    mgr2 = _mgr(scratch, tmp_path, frames=0)
+    with monkeypatch.context() as m:
+        m.setattr(scratch, "checkout_open", _boom)
+        with pytest.raises(RuntimeError):
+            mgr2.adopt_root(m_root, root.path, partial=False)
+
+    a = mgr2.adopt_root(m_root, root.path, partial=False)
+    m_slice = Manifest(id="slice1", slot="Main", rate=1000, channels=1, abs_start=1100, abs_end=1200,
+                       created_at=2.0, parent=a.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
+                       state="saved", partial=False, bins=None)
+    write_manifest(tmp_path, m_slice)
+    with monkeypatch.context() as m:
+        m.setattr(scratch, "checkout_slice", _boom)
+        with pytest.raises(RuntimeError):
+            mgr2.adopt_slice(m_slice, a)
+
+
+def test_create_from_abs_range_cleans_up_on_manifest_failure(scratch, tmp_path, monkeypatch):
+    """R-h8m: a failure AFTER checkout_create (bins or the manifest
+    write) must not leak the handle or leave a manifest-less orphan
+    .wav -- adoption only scans *.json, so an orphan file would never
+    be found or cleaned up. Uses a large (768 KB) span so the scratch
+    write is still in flight when the manifest write fails; without
+    `checkout_destroy` in the cleanup path the job keeps running
+    unowned and eventually writes the orphan to disk anyway, so a
+    single immediate glob (nothing written *yet*) would pass by
+    accident -- poll instead."""
+    mgr = _mgr(scratch, tmp_path, seconds=2.0, rate=48_000, channels=2, frames=96_000)
+    monkeypatch.setattr(CheckoutManager, "_write_manifest", _boom)
+    with pytest.raises(RuntimeError):
+        mgr.create(duration_s=2.0)
+    assert mgr.list() == []
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 2.0:
+        if list(tmp_path.glob("*.wav")) or list(tmp_path.glob("*.wav.part")):
+            break
+        time.sleep(0.02)
+    assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.wav.part")) == []

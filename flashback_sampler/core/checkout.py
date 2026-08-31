@@ -91,7 +91,33 @@ class CheckoutManager:
     """
     Creates, tracks, saves and discards Checkouts for one slot. A single
     CheckoutManager per CaptureSlot; all share one NativeScratch (the
-    process-wide writer + cache). Public operations are thread-safe.
+    process-wide writer + cache).
+
+    Thread-safety guarantee (R-h8l): every method that touches a
+    `Checkout.handle` looks the checkout up AND uses its handle inside
+    the SAME `self._lock` acquisition, so a concurrent `discard()`
+    cannot free a handle out from under `write_state` / `resident_bytes`
+    / `peak_bins` / `export_range` (a fetch-then-use gap there is a
+    Zig-side use-after-free -- a crash, not a catchable exception).
+    `export_range` holds the lock across its own file I/O too; today's
+    only caller is the UI thread, so this trades a theoretical
+    multi-exporter stall for correctness. Lock scope on the four
+    creation paths is uneven, unchanged from before this fix:
+    `create`/`create_from_abs_range` hold `self._lock` for the WHOLE
+    body (`checkout_create`, the bins computation, and `_register`);
+    `adopt_root`/`adopt_slice` hold it only around `_register` --
+    `checkout_open`/`checkout_slice`/`checkout_info`/`checkout_peak_bins`
+    run unlocked there, so two concurrent adoptions can run those calls
+    in parallel (a deliberate cost/latency tradeoff at launch, not
+    touched by R-h8l -- that ruling is about handle-freeing races on an
+    ALREADY-registered checkout, not about serializing adoption itself).
+
+    Every method that reaches the engine (creates, opens, slices, or
+    exports through a Zig handle, including the manifest write that
+    follows) converts `RuntimeError`/`OSError` from the engine into a
+    single `RuntimeError` (R-h8k) -- callers see one exception type
+    regardless of whether the underlying failure was a ring race, a
+    corrupt scratch file, or an unwritable disk.
     """
 
     _VALID_FORMATS: tuple[str, ...] = ("WAV",)
@@ -158,29 +184,47 @@ class CheckoutManager:
             cid = uuid.uuid4().hex[:12]
             path = audio_path(self._scratch_dir, cid)
             path.parent.mkdir(parents=True, exist_ok=True)
+            handle = None
             try:
+                # overwritten / out_of_range / io_error from the engine, or
+                # an OSError from the manifest write below (an unwritable
+                # scratch dir): every failure past this point surfaces as
+                # ONE RuntimeError (R-h8k) -- the UI handler widens this
+                # further in h10.
                 handle = self._scratch.checkout_create(buf, int(abs_start), int(abs_end), path)
+                co = Checkout(
+                    id=cid, handle=handle, path=path, created_at=time.monotonic(),
+                    sample_rate=buf.sample_rate, channels=buf.channels,
+                    n_frames=int(abs_end - abs_start), start_frame=0,
+                    abs_sample_start=int(abs_start), abs_sample_end=int(abs_end),
+                )
+                co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+                self._register(co)
             except (RuntimeError, OSError) as e:
-                # overwritten / out_of_range / io_error from the engine:
-                # an unwritable scratch dir surfaces the same as any other
-                # engine rejection here (R-h8c) -- the UI handler widens
-                # this further in h10.
-                raise RuntimeError(f"could not read requested range; {e}") from e
-            co = Checkout(
-                id=cid, handle=handle, path=path, created_at=time.monotonic(),
-                sample_rate=buf.sample_rate, channels=buf.channels,
-                n_frames=int(abs_end - abs_start), start_frame=0,
-                abs_sample_start=int(abs_start), abs_sample_end=int(abs_end),
-            )
-            co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
-            self._register(co)
+                # R-h8m: this cid's path is freshly minted (uuid4) and was
+                # never returned to a caller -- nothing else can reference
+                # it, so cleanup on any failure past checkout_create is
+                # unconditionally safe: destroy the handle (if one was
+                # obtained) and delete the orphan .wav. Without this, a
+                # bins/manifest failure leaves a manifest-less .wav on
+                # disk forever -- adoption only scans *.json, so it would
+                # never be found or cleaned up.
+                if handle is not None:
+                    self._scratch.checkout_destroy(handle)
+                path.unlink(missing_ok=True)
+                raise RuntimeError(f"could not create checkout; {e}") from e
         return co
 
     def _register(self, co: Checkout) -> None:
-        """Lock held. Track the checkout, count its file, write its manifest."""
+        """Lock held. Write the manifest FIRST, then commit to the
+        tracking dicts -- if the manifest write raises (a disk error),
+        this checkout must not appear half-registered: the callers that
+        clean up on failure (create_from_abs_range / adopt_root /
+        adopt_slice) rely on `list()` and `file_refcount()` being
+        unaffected by a `_register` that never finished."""
+        self._write_manifest(co)
         self._checkouts[co.id] = co
         self._file_refs[co.path] = self._file_refs.get(co.path, 0) + 1
-        self._write_manifest(co)
 
     def _write_manifest(self, co: Checkout) -> None:
         write_manifest(self._scratch_dir, Manifest(
@@ -199,40 +243,58 @@ class CheckoutManager:
         """A root whose file already exists. Frame count comes from the
         file (a partial file reports its true prefix); bins from the
         manifest when present, else computed once from the file."""
-        handle = self._scratch.checkout_open(audio, 0, max(1, int(m.n_frames)))
-        info = self._scratch.checkout_info(handle)
-        co = Checkout(
-            id=m.id, handle=handle, path=Path(audio), created_at=time.monotonic(),
-            sample_rate=int(info.rate), channels=int(info.channels),
-            n_frames=int(info.n_frames), start_frame=0,
-            abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
-            trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
-            state=m.state if m.state in ("pending", "ready", "saved") else "pending",
-            partial=bool(partial or m.partial),
-        )
-        co.bins = bins_from_json(m.bins, co.channels)
-        if set(co.bins) != {str(n) for n in BIN_COUNTS}:
-            co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
-        with self._lock:
-            self._register(co)
+        handle = None
+        try:
+            handle = self._scratch.checkout_open(audio, 0, max(1, int(m.n_frames)))
+            info = self._scratch.checkout_info(handle)
+            co = Checkout(
+                id=m.id, handle=handle, path=Path(audio), created_at=time.monotonic(),
+                sample_rate=int(info.rate), channels=int(info.channels),
+                n_frames=int(info.n_frames), start_frame=0,
+                abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
+                trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
+                state=m.state if m.state in ("pending", "ready", "saved") else "pending",
+                partial=bool(partial or m.partial),
+            )
+            co.bins = bins_from_json(m.bins, co.channels)
+            if set(co.bins) != {str(n) for n in BIN_COUNTS}:
+                co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+            with self._lock:
+                self._register(co)
+        except (RuntimeError, OSError) as e:
+            # R-h8k/R-h8m: unlike create_from_abs_range, `audio` is a
+            # PRE-EXISTING file this manager did not create -- only the
+            # handle is ours to release on failure, never the file.
+            if handle is not None:
+                self._scratch.checkout_destroy(handle)
+            raise RuntimeError(f"could not adopt root {audio}; {e}") from e
         return co
 
     def adopt_slice(self, m: Manifest, parent: Checkout) -> Checkout:
         """A slice of an adopted parent in THIS manager."""
-        handle = self._scratch.checkout_slice(parent.handle, int(m.start_frame), int(m.n_frames))
-        co = Checkout(
-            id=m.id, handle=handle, path=parent.path, created_at=time.monotonic(),
-            sample_rate=parent.sample_rate, channels=parent.channels,
-            n_frames=int(m.n_frames), start_frame=int(m.start_frame),
-            abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
-            parent_id=parent.id, trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
-            state=m.state if m.state in ("pending", "ready", "saved") else "saved",
-        )
-        co.bins = bins_from_json(m.bins, co.channels)
-        if set(co.bins) != {str(n) for n in BIN_COUNTS}:
-            co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
-        with self._lock:
-            self._register(co)
+        handle = None
+        try:
+            handle = self._scratch.checkout_slice(parent.handle, int(m.start_frame), int(m.n_frames))
+            co = Checkout(
+                id=m.id, handle=handle, path=parent.path, created_at=time.monotonic(),
+                sample_rate=parent.sample_rate, channels=parent.channels,
+                n_frames=int(m.n_frames), start_frame=int(m.start_frame),
+                abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
+                parent_id=parent.id, trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
+                state=m.state if m.state in ("pending", "ready", "saved") else "saved",
+            )
+            co.bins = bins_from_json(m.bins, co.channels)
+            if set(co.bins) != {str(n) for n in BIN_COUNTS}:
+                co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+            with self._lock:
+                self._register(co)
+        except (RuntimeError, OSError) as e:
+            # Same rule as adopt_root: `parent.path` is shared, owned by
+            # the parent checkout's own refcount -- only this slice's
+            # handle is ours to release.
+            if handle is not None:
+                self._scratch.checkout_destroy(handle)
+            raise RuntimeError(f"could not adopt slice {m.id}; {e}") from e
         return co
 
     # ------------------------------------------------------------------
@@ -250,13 +312,29 @@ class CheckoutManager:
             return self._checkouts[checkout_id]
 
     def write_state(self, checkout_id: str) -> str:
-        return native.WRITE_STATES[self._scratch.checkout_info(self.get(checkout_id).handle).write_state]
+        # R-h8l: look up AND use the handle under one lock acquisition --
+        # `self.get(checkout_id).handle` would fetch the handle, release
+        # the lock, THEN use it, leaving a gap where a concurrent
+        # discard() can free it out from under this call.
+        with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            handle = self._checkouts[checkout_id].handle
+            return native.WRITE_STATES[self._scratch.checkout_info(handle).write_state]
 
     def resident_bytes(self, checkout_id: str) -> int:
-        return int(self._scratch.checkout_info(self.get(checkout_id).handle).resident_bytes)
+        with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            handle = self._checkouts[checkout_id].handle
+            return int(self._scratch.checkout_info(handle).resident_bytes)
 
     def peak_bins(self, checkout_id: str, n_bins: int) -> np.ndarray:
-        return self._scratch.checkout_peak_bins(self.get(checkout_id).handle, n_bins)
+        with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            handle = self._checkouts[checkout_id].handle
+            return self._scratch.checkout_peak_bins(handle, n_bins)
 
     def file_refcount(self, path: Path | str) -> int:
         with self._lock:
@@ -297,10 +375,23 @@ class CheckoutManager:
         still in flight) — no audio crosses into Python."""
         if subtype not in _VALID_SUBTYPES:
             raise ValueError(f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}")
-        co = self.get(checkout_id)
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        self._scratch.checkout_export(co.handle, target, int(start), int(n), subtype)
+        # R-h8l: hold the lock across the handle-using export call itself
+        # (not just the lookup) -- a concurrent discard() must not be able
+        # to free the handle while checkout_export is reading through it.
+        # This means export_range holds the lock for its own file I/O;
+        # today's only caller is the UI thread, so a slow export stalls
+        # other manager calls rather than racing a freed handle.
+        with self._lock:
+            if checkout_id not in self._checkouts:
+                raise KeyError(checkout_id)
+            handle = self._checkouts[checkout_id].handle
+            try:
+                self._scratch.checkout_export(handle, target, int(start), int(n), subtype)
+            except (RuntimeError, OSError) as e:
+                # R-h8k: one exception type out of every engine-reaching call.
+                raise RuntimeError(f"could not export checkout {checkout_id}; {e}") from e
         return target
 
     def save(
