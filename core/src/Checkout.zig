@@ -14,6 +14,7 @@ const Ring = @import("Ring.zig");
 const wav = @import("wav.zig");
 const peaks = @import("peaks.zig");
 const Playback = @import("Playback.zig");
+const test_util = @import("test_util.zig");
 
 const Checkout = @This();
 
@@ -132,6 +133,59 @@ pub fn destroy(self: *Checkout) void {
     self.allocator.destroy(self);
 }
 
+/// Read this checkout's range from its file into a fresh allocation.
+/// Idempotent: resident frames stay. Called by the writer thread for a
+/// `.load` job, or by tests.
+pub fn load(self: *Checkout) !void {
+    if (self.frames != null) return;
+    // `n_frames * channels` alone can wrap `usize` on a corrupt adopted
+    // manifest (h7) before `@intCast` ever runs — same divide-form guard
+    // as createFromRing's, checked before the multiply itself.
+    const chans: u64 = self.channels;
+    if (chans == 0 or self.n_frames > std.math.maxInt(usize) / chans) return error.InvalidArgument;
+    var o = try wav.open(self.path());
+    defer o.file.close(wav.io);
+    const buf = try self.allocator.alloc(f32, @intCast(self.n_frames * chans));
+    errdefer self.allocator.free(buf);
+    try wav.readFrames(o.file, o.info, self.start_frame, buf);
+    self.frames = buf;
+}
+
+/// Drop the RAM copy. The caller (Scratch) has checked write_state and
+/// pin; the audio lives on in the file.
+pub fn evict(self: *Checkout) void {
+    if (self.frames) |f| {
+        self.allocator.free(f);
+        self.frames = null;
+    }
+}
+
+/// Bins for the deck: from RAM when resident, streamed from the file
+/// otherwise. `out.len == n_bins * channels`. Same reducer both ways,
+/// so the bins are identical whichever path served them.
+pub fn peakBins(self: *Checkout, n_bins: usize, out: []peaks.PeakBin) !void {
+    if (self.frames) |f| {
+        peaks.peakBinsFlat(f, self.channels, n_bins, out);
+        return;
+    }
+    var o = try wav.open(self.path());
+    defer o.file.close(wav.io);
+    try peaks.peakBinsFile(o.file, o.info, self.start_frame, self.n_frames, n_bins, out);
+}
+
+/// `[start, start + n)` of this checkout as a Playback.ClipSource: a
+/// sub-slice of the RAM copy, or a file range at the checkout's
+/// offset. The caller has validated `start + n <= n_frames`.
+pub fn source(self: *const Checkout, start: u64, n: u64) Playback.ClipSource {
+    const chans: u64 = self.channels;
+    if (self.frames) |f| {
+        const a: usize = @intCast(start * chans);
+        const b: usize = @intCast((start + n) * chans);
+        return .{ .frames = f[a..b] };
+    }
+    return .{ .file = .{ .path = self.path(), .start_frame = self.start_frame + start, .n_frames = n } };
+}
+
 test "createFromRing copies the exact span and starts queued" {
     var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 2, .seconds = 1.0 });
     defer ring.deinit();
@@ -227,4 +281,72 @@ test "slice: a hostile start or parent.start_frame is InvalidArgument, not an ov
 test "a path at max_path is rejected" {
     const long = [_]u8{'a'} ** max_path;
     try std.testing.expectError(error.PathTooLong, adopt(std.testing.allocator, &long, 0, 1, 8_000, 1));
+}
+
+test "load reads the file range into frames; evict frees them" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    var in: [20]f32 = undefined; // 10 stereo frames
+    for (&in, 0..) |*s, i| s.* = @floatFromInt(i);
+    const wav_path = test_util.tmpPath(&pb, &tmp, "l.wav");
+    try wav.writeFile(wav_path, &in, 8_000, 2, .float32);
+    const co = try adopt(std.testing.allocator, wav_path, 2, 5, 8_000, 2);
+    defer co.destroy();
+    try co.load();
+    try std.testing.expectEqual(@as(u64, 40), co.residentBytes());
+    try std.testing.expectEqualSlices(f32, in[4..14], co.frames.?);
+    try co.load(); // idempotent: no second allocation (testing.allocator would report a leak)
+    co.evict();
+    try std.testing.expectEqual(@as(?[]f32, null), co.frames);
+    try std.testing.expectEqual(@as(u64, 0), co.residentBytes());
+}
+
+test "peakBins from RAM equals peakBins from the file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    var in: [200]f32 = undefined; // 100 stereo frames
+    for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt((i * 37) % 101)) / 101.0 - 0.5;
+    const wav_path = test_util.tmpPath(&pb, &tmp, "p.wav");
+    try wav.writeFile(wav_path, &in, 8_000, 2, .float32);
+    const co = try adopt(std.testing.allocator, wav_path, 10, 80, 8_000, 2);
+    defer co.destroy();
+    var from_file: [9 * 2]peaks.PeakBin = undefined;
+    try co.peakBins(9, &from_file);
+    try co.load();
+    var from_ram: [9 * 2]peaks.PeakBin = undefined;
+    try co.peakBins(9, &from_ram);
+    for (from_file, from_ram) |a, b| {
+        try std.testing.expectEqual(b.min, a.min);
+        try std.testing.expectEqual(b.max, a.max);
+    }
+    // and both equal the flat reducer on the same slice
+    var flat: [9 * 2]peaks.PeakBin = undefined;
+    peaks.peakBinsFlat(in[20..180], 2, 9, &flat);
+    for (flat, from_ram) |a, b| try std.testing.expectEqual(a.max, b.max);
+}
+
+test "source: resident gives a frames sub-slice, evicted gives a file range at the parent offset" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 0, 1, 2, 3, 4, 5, 6, 7 }; // 8 mono frames
+    const wav_path = test_util.tmpPath(&pb, &tmp, "s.wav");
+    try wav.writeFile(wav_path, &in, 8_000, 1, .float32);
+    const co = try adopt(std.testing.allocator, wav_path, 2, 5, 8_000, 1); // frames 2..7
+    defer co.destroy();
+    switch (co.source(1, 3)) {
+        .file => |f| {
+            try std.testing.expectEqual(@as(u64, 3), f.start_frame);
+            try std.testing.expectEqual(@as(u64, 3), f.n_frames);
+            try std.testing.expectEqualSlices(u8, wav_path, f.path);
+        },
+        .frames => return error.TestUnexpectedResult,
+    }
+    try co.load();
+    switch (co.source(1, 3)) {
+        .frames => |f| try std.testing.expectEqualSlices(f32, &[_]f32{ 3, 4, 5 }, f),
+        .file => return error.TestUnexpectedResult,
+    }
 }
