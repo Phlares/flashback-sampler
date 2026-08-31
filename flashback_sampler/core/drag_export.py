@@ -1,9 +1,10 @@
 """
 Render a checkout into the export pool for an OS drag-out.
 
-Pure Python + soundfile — no Qt. The app layer decides when to render
-(drag-start) and what to do afterward (mark saved on drop, delete on
-cancel); this module only owns naming and the write itself.
+Pure Python — no Qt. The app layer decides when to render (drag-start)
+and what to do afterward (mark saved on drop, delete on cancel); this
+module only owns naming, routing the write through
+`CheckoutManager.save`.
 """
 
 from __future__ import annotations

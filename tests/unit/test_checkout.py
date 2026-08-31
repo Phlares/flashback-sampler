@@ -14,11 +14,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import soundfile as sf
 
 from flashback_sampler.core.buffer import AudioCircularBuffer
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
 from tests.fixtures.sine_source import ramp_block, sine_block
+from tests.fixtures.wavread import read_wav
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -319,11 +319,11 @@ def test_save_as_wav_writes_correct_samples(tmp_path: Path):
     mgr.save(co.id, target, fmt="WAV")
 
     assert target.exists()
-    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
-    assert sr == 48_000
+    data, info = read_wav(target)
+    assert info.samplerate == 48_000
     assert data.shape == (9600, 1)
     # WAV defaults to float32 subtype (bit-perfect round-trip)
-    assert sf.info(str(target)).subtype == "FLOAT"
+    assert info.subtype == "FLOAT"
     assert np.allclose(data, co.audio, atol=1e-7)
     assert co.state == "saved"
 
@@ -428,8 +428,8 @@ def test_save_rejects_flac(tmp_path):
 
 
 def test_save_without_native_library_raises(tmp_path, monkeypatch):
-    """No soundfile fallback remains: a missing engine is an error, not a
-    silent detour through another encoder."""
+    """No fallback encoder remains: a missing engine is an error, not a
+    silent detour."""
     from flashback_sampler.core import native
     mgr, co = _mgr_with_checkout()
     monkeypatch.setattr(native, "load", lambda: None)
@@ -440,13 +440,13 @@ def test_save_without_native_library_raises(tmp_path, monkeypatch):
 def test_save_wav_defaults_to_float32_subtype(tmp_path):
     mgr, co = _mgr_with_checkout()
     target = mgr.save(co.id, tmp_path / "clip.wav")
-    assert sf.info(str(target)).subtype == "FLOAT"
+    assert read_wav(target)[1].subtype == "FLOAT"
 
 
 def test_save_explicit_pcm_16(tmp_path):
     mgr, co = _mgr_with_checkout()
     target = mgr.save(co.id, tmp_path / "clip.wav", subtype="PCM_16")
-    assert sf.info(str(target)).subtype == "PCM_16"
+    assert read_wav(target)[1].subtype == "PCM_16"
 
 
 def test_save_rejects_unknown_subtype(tmp_path):
@@ -474,8 +474,8 @@ def test_mark_saved_sets_state():
 
 def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     """WAV saves must route through the Zig encoder when the native
-    library is built (this machine) instead of always calling
-    soundfile.write."""
+    library is built (this machine): the write goes through
+    `fb_wav_write` and nothing else."""
     from flashback_sampler.core import native
 
     if native.load() is None:
@@ -492,11 +492,11 @@ def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     target = mgr.save(co.id, tmp_path / "clip.wav")
 
     assert calls, "WAV save did not route through the native encoder"
-    # The file soundfile reads back must still match the checkout's audio
+    # The file the oracle reads back must still match the checkout's audio
     # -- routing to a different encoder must not change the bytes a
     # consumer (Ableton, this repo's own tests) reads back.
-    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
-    assert sr == co.sample_rate
+    data, info = read_wav(target)
+    assert info.samplerate == co.sample_rate
     assert np.allclose(data, co.trimmed_audio(), atol=1e-7)
 
 

@@ -160,52 +160,26 @@ def test_load_skips_a_candidate_that_exists_but_is_not_a_valid_library(tmp_path,
     assert native.load() is None
 
 
-def test_wav_float32_decode_equals_soundfile(tmp_path):
-    import soundfile as sf
+def test_wav_float32_round_trips_bit_exact(tmp_path):
+    from tests.fixtures.wavread import read_wav
     rng = np.random.default_rng(7)
     audio = rng.uniform(-1, 1, size=(4801, 2)).astype(np.float32)
-    zig_path, sf_path = tmp_path / "zig.wav", tmp_path / "sf.wav"
-    native.wav_write(zig_path, audio, 48_000, "FLOAT")
-    sf.write(str(sf_path), audio, 48_000, format="WAV", subtype="FLOAT")
-    got_z, sr_z = sf.read(str(zig_path), dtype="float32")
-    got_s, sr_s = sf.read(str(sf_path), dtype="float32")
-    assert sr_z == sr_s == 48_000
-    np.testing.assert_array_equal(got_z, got_s)  # bit-identical samples
+    native.wav_write(tmp_path / "zig.wav", audio, 48_000, "FLOAT")
+    got, info = read_wav(tmp_path / "zig.wav")
+    assert (info.samplerate, info.channels, info.frames) == (48_000, 2, 4801)
+    np.testing.assert_array_equal(got, audio)  # FLOAT32 is a memcpy of the f32 bits (wav.zig:84-90)
 
 
-# wav.zig deliberately quantizes with scale 32767 (not 32768) so +1.0
-# stays in range without clamping (see wav.zig's own doc comment); this
-# is the plan's contract, Task 5 golden-tested it, and it keeps +/-
-# full-scale symmetric. libsndfile's own PCM_16 writer uses scale 32768.
-# For x in [-1, 1] the two raw-integer outputs are round(x*32767) and
-# round(x*32768); their difference is bounded by
-#   |round(x*32768) - round(x*32767)| <= |x*32768 - x*32767| + 0.5 + 0.5
-#                                       = |x| + 1 <= 2
-# (the two independent +-0.5 terms come from each encoder's own
-# round-to-nearest; |x| <= 1 is what caps the scale-gap term at 1). So 2
-# raw LSBs is a PROVEN ceiling for this domain, not a fitted number --
-# confirmed against 40 random seeds plus an adversarial 200,001-point
-# sweep of the whole [-1, 1] domain, max integer gap exactly 2 in every
-# case, never more, so a 1-LSB tolerance was genuinely impossible. This
-# bound holds only because `rng.uniform(-1, 1)` below never exceeds
-# full scale: above +-1.0 wav.zig's encoder clamps (see its own doc
-# comment) while libsndfile's non-clipping PCM path can wrap instead, so
-# the [-1, 1] draw is a REQUIRED precondition for this bound, not an
-# incidental choice of test data. PCM_24 gets the same derivation at its
-# own scale (8388607 vs 8388608): |x| + 1 <= 2 raw units too, but its
-# much larger raw range makes that same absolute 2-unit ceiling round
-# down to 1 LSB at 24-bit's finer float32 tolerance in the range checked
-# below -- both bounds are the same formula, expressed in each encoder's
-# own quantum (2/32768 here; 1/8388607 for PCM_24, i.e. effectively
-# 2/8388608 rounded to float32 precision).
-@pytest.mark.parametrize("subtype,tol", [("PCM_24", 1 / 8388607), ("PCM_16", 2 / 32768)])
-def test_wav_pcm_decode_within_documented_quantizer_gap_of_soundfile(tmp_path, subtype, tol):
-    import soundfile as sf
+# wav.zig quantizes with scale 32767 / 8388607 (not 32768 / 8388608) so
+# +1.0 needs no clamp; -1.0 lands one LSB short of the negative rail
+# (wav.zig:91-96). @round is half-away-from-zero, hence the sign/floor form.
+@pytest.mark.parametrize("subtype,scale,denom", [("PCM_16", 32767.0, 32768.0), ("PCM_24", 8388607.0, 8388608.0)])
+def test_wav_pcm_codes_match_the_documented_quantizer(tmp_path, subtype, scale, denom):
+    from tests.fixtures.wavread import read_wav
     rng = np.random.default_rng(11)
     audio = rng.uniform(-1, 1, size=(997, 2)).astype(np.float32)
-    zig_path, sf_path = tmp_path / "zig.wav", tmp_path / "sf.wav"
-    native.wav_write(zig_path, audio, 48_000, subtype)
-    sf.write(str(sf_path), audio, 48_000, format="WAV", subtype=subtype)
-    got_z, _ = sf.read(str(zig_path), dtype="float32")
-    got_s, _ = sf.read(str(sf_path), dtype="float32")
-    assert np.abs(got_z - got_s).max() <= tol  # quantizers differ by <= 2 raw LSB (PCM_16) / 1 raw LSB (PCM_24) -- see the proven bound above
+    native.wav_write(tmp_path / "zig.wav", audio, 48_000, subtype)
+    got, _ = read_wav(tmp_path / "zig.wav")
+    v = (audio * np.float32(scale)).astype(np.float64)  # f32 multiply as in wav.zig, then exact rounding in f64
+    codes = np.sign(v) * np.floor(np.abs(v) + 0.5)     # half away from zero == Zig @round
+    np.testing.assert_array_equal(got, codes.astype(np.float32) / np.float32(denom))
