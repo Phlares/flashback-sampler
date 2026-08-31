@@ -35,6 +35,8 @@ class PreferencesDialog(QDialog):
         on_export_pool_dir_changed: Callable[[str], None] | None = None,
         export_bit_depth: str = "FLOAT",
         on_export_bit_depth_changed: Callable[[str], None] | None = None,
+        scratch_dir: str = "",
+        on_scratch_dir_changed: Callable[[str], None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -110,6 +112,34 @@ class PreferencesDialog(QDialog):
 
         self.export_depth_combo.currentIndexChanged.connect(_depth_changed)
         root.addWidget(self.export_depth_combo)
+
+        root.addSpacing(10)
+        root.addWidget(QLabel("<b>Scratch</b>"))
+        scratch_row = QHBoxLayout()
+        self.scratch_dir_edit = QLineEdit(scratch_dir)
+        self.scratch_dir_edit.setReadOnly(True)
+        self.scratch_dir_btn = QPushButton("Browse…")
+
+        def _pick_scratch_dir() -> None:
+            chosen = QFileDialog.getExistingDirectory(
+                self, "Scratch folder", self.scratch_dir_edit.text()
+            )
+            if not chosen:
+                return
+            self.scratch_dir_edit.setText(chosen)
+            if on_scratch_dir_changed is not None:
+                on_scratch_dir_changed(chosen)
+
+        self.scratch_dir_btn.clicked.connect(_pick_scratch_dir)
+        scratch_row.addWidget(self.scratch_dir_edit, 1)
+        scratch_row.addWidget(self.scratch_dir_btn)
+        root.addLayout(scratch_row)
+        scratch_hint = QLabel(
+            "Checkouts are written here as they are made. Applies at next launch."
+        )
+        scratch_hint.setWordWrap(True)
+        scratch_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
+        root.addWidget(scratch_hint)
 
         root.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
