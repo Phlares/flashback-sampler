@@ -597,7 +597,7 @@ def test_clip_drag_cancel_deletes_file_and_keeps_clip(qapp, state, tmp_path, mon
 
 
 def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
-    import soundfile as sf
+    from tests.fixtures.wavread import read_wav
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -615,7 +615,28 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         win._on_clip_drag_out(0.25, 0.5)
         files = list(tmp_path.glob("*.wav"))
         assert len(files) == 1
-        assert sf.info(str(files[0])).frames == n // 2 - n // 4
+        assert read_wav(files[0])[1].frames == n // 2 - n // 4
+    finally:
+        win.close()
+
+
+def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
+    from flashback_sampler.app import turntable_window as tw
+    win = tw.TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.active_slot.checkout_manager.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        seen = {}
+
+        def fake_dialog(parent, title, default_path, filter_spec):
+            seen.update(default_path=default_path, filter_spec=filter_spec)
+            return "", ""
+
+        monkeypatch.setattr(tw.QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
+        win._save_current_clip()
+        assert seen["filter_spec"] == "WAV audio (*.wav)"
+        assert seen["default_path"].endswith(".wav")
     finally:
         win.close()
 

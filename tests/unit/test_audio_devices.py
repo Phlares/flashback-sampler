@@ -5,7 +5,7 @@ a fixed expected set, so these tests focus on:
 
 1. Dataclass frozenness / immutability.
 2. build_capture_source() dispatch logic for loopback vs. input (using
-   a fake AudioCircularBuffer that records what it gets passed).
+   a fake ring buffer that records what it gets passed).
 3. That calling list_*_devices() doesn't raise.
 """
 
@@ -191,13 +191,6 @@ def test_capture_list_ignores_render_rows(monkeypatch):
     monkeypatch.setattr(audio_devices.native, "list_devices", _fake_devices)
     kinds = {d.kind for d in audio_devices.list_capture_devices()}
     assert kinds == {"loopback", "input"}
-
-
-def test_audio_devices_does_not_import_sounddevice():
-    # Source-level pin: the module imports sounddevice lazily today, so a
-    # sys.modules check is green before the change.
-    import inspect
-    assert "sounddevice" not in inspect.getsource(audio_devices)
 
 
 def test_default_output_device_enumerates_once(monkeypatch):

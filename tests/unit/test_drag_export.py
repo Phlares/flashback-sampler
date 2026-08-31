@@ -5,9 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-import soundfile as sf
-
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.drag_export import (
     drag_filename,
@@ -16,12 +14,13 @@ from flashback_sampler.core.drag_export import (
     sanitize_source_name,
 )
 from tests.fixtures.sine_source import ramp_block
+from tests.fixtures.wavread import read_wav
 
 WHEN = datetime(2026, 7, 15, 13, 5, 9)
 
 
 def _mgr_with_checkout():
-    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 1500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.5)  # 500 samples = 0.5 s
@@ -54,7 +53,7 @@ def test_render_drag_file_writes_wav_without_marking_saved(tmp_path):
     mgr, co = _mgr_with_checkout()
     path = render_drag_file(mgr, co.id, tmp_path, "Deck A", now=WHEN)
     assert path == tmp_path / "deck_a_20260715-130509_0.5s.wav"
-    info = sf.info(str(path))
+    _, info = read_wav(path)
     assert info.subtype == "FLOAT"
     assert info.frames == 500
     assert mgr.get(co.id).state == "pending"
@@ -67,7 +66,7 @@ def test_render_drag_file_respects_trim_and_bit_depth(tmp_path):
     path = render_drag_file(
         mgr, co.id, tmp_path, "Deck A", bit_depth="PCM_24", now=WHEN
     )
-    info = sf.info(str(path))
+    _, info = read_wav(path)
     assert info.frames == 200
     assert info.subtype == "PCM_24"
     assert "_0.2s" in path.name

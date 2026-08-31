@@ -232,8 +232,9 @@ export fn fb_ring_capacity(ring: *const Ring) u64 {
 // Ring.read). A host building a zero-copy numpy view over
 // fb_ring_storage must shape that view with THIS value, and any write
 // position it derives via modulo must wrap at THIS value too — using
-// fb_ring_capacity for either silently corrupts get_peak_bins, which
-// walks the raw buffer directly. fb_ring_capacity is still the right
+// fb_ring_capacity for either silently corrupts any host that walks the
+// raw buffer directly (the Python host no longer does — peaks come from
+// fb_ring_peak_bins). fb_ring_capacity is still the right
 // call for "how much audio can I get back" (get_latest-style clamping):
 // the two exports answer different questions and neither substitutes
 // for the other.
@@ -277,6 +278,22 @@ export fn fb_ring_summary_bins(ring: *Ring, n_bins: usize, n_samples: u64, bin_s
     // desync this guard from what rmsBins actually asserts.
     if (n_bins == 0 or n_bins > Summary.max_bins) return .invalid_arg;
     ring.summary.rmsBins(ring.total_written.load(.acquire), n_samples, bin_span_frames, out_rms[0 .. n_bins * ring.channels]);
+    return .ok;
+}
+
+export fn fb_ring_peak_bins(ring: *Ring, n_frames: u64, n_bins: usize, out: [*]Ring.PeakBin) FbStatus {
+    ring.peakBins(n_frames, n_bins, out[0 .. n_bins * ring.channels]) catch |err| return switch (err) {
+        error.InvalidArgument => .invalid_arg,
+        error.Overwritten => .overwritten,
+    };
+    return .ok;
+}
+
+export fn fb_ring_rms(ring: *Ring, n_frames: u64, out: [*]f32) FbStatus {
+    ring.rmsLatest(n_frames, out[0..ring.channels]) catch |err| return switch (err) {
+        error.Overwritten => .overwritten,
+        error.OutOfRange => .out_of_range,
+    };
     return .ok;
 }
 
@@ -592,4 +609,32 @@ test "fb_capture_create rejects kind 3: render is not a capture kind" {
     const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
     defer fb_ring_destroy(ring);
     try std.testing.expectEqual(@as(?*Capture, null), fb_capture_create(ring, &.{ .kind = 3, .pid = 0, .rate = 48_000, .channels = 2, .device_id = "" }));
+}
+
+test "fb_ring_peak_bins rejects n_bins == 0 and reduces a ramp" {
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    var out: [2]Ring.PeakBin = undefined;
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_ring_peak_bins(ring, 10, 0, &out));
+    var frames: [10]f32 = undefined;
+    for (&frames, 0..) |*f, i| f.* = @floatFromInt(i);
+    fb_ring_write(ring, &frames, 10);
+    try std.testing.expectEqual(FbStatus.ok, fb_ring_peak_bins(ring, 10, 2, &out));
+    try std.testing.expectEqual(@as(f32, 5), out[1].min);
+    try std.testing.expectEqual(@as(f32, 9), out[1].max);
+}
+
+test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(Ring.PeakBin));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(Ring.PeakBin, "max"));
+}
+
+test "fb_ring_rms reports per-channel RMS of the newest window" {
+    const ring = fb_ring_create(16, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    const in = [_]f32{ 3, 4, 0, 0 };
+    fb_ring_write(ring, &in, 4);
+    var out: [1]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.ok, fb_ring_rms(ring, 4, &out));
+    try std.testing.expectEqual(@as(f32, 2.5), out[0]);
 }
