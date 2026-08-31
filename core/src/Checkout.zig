@@ -391,6 +391,27 @@ test "peakBins from RAM equals peakBins from the file" {
     for (flat, from_ram) |a, b| try std.testing.expectEqual(a.max, b.max);
 }
 
+test "load after evict allocates exactly once more (no leak under testing.allocator)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3, 4 };
+    const wav_path = test_util.tmpPath(&pb, &tmp, "e.wav");
+    try wav.writeFile(wav_path, &in, 8_000, 2, .float32);
+    const co = try adopt(std.testing.allocator, wav_path, 0, 2, 8_000, 2);
+    defer co.destroy();
+    try co.load();
+    co.evict();
+    try co.load();
+    try std.testing.expectEqual(@as(u64, 16), co.residentBytes());
+}
+
+test "destroy frees resident frames (leak-checked)" {
+    const co = try adopt(std.testing.allocator, "d.wav", 0, 1, 8_000, 1);
+    co.frames = try std.testing.allocator.alloc(f32, 1);
+    co.destroy();
+}
+
 test "source: resident gives a frames sub-slice, evicted gives a file range at the parent offset" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
