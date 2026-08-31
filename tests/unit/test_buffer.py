@@ -1,6 +1,7 @@
 """The ring buffer's behaviour contract, now served by the Zig core
 alone: NativeAudioCircularBuffer over Ring.zig. The `buffer_cls` fixture
-survives as a name so the 37 contract tests read unchanged."""
+survives as a name so the 38 contract tests (37 collected; one is
+perf-marked) read unchanged."""
 
 from __future__ import annotations
 
@@ -252,11 +253,13 @@ def test_get_rms_levels_sine_is_sqrt_half_amplitude(buffer_cls):
 
 
 def test_get_summary_bins_constant_amplitude_is_exact_rms(buffer_cls):
-    # Frame count is an exact multiple of the summary slot size (4096, both
-    # implementations' default) so every slot involved is fully FROZEN --
-    # no partial-slot edge case to reason about, keeping the analytic
-    # assertion simple: RMS of a constant-amplitude signal is exactly that
-    # amplitude, in every bin, with no approximation needed.
+    # Frame count is an exact multiple of the summary slot size (4096,
+    # Ring.Config.summary_slot_frames's default) so every slot involved
+    # is fully FROZEN -- no partial-slot edge case to reason about,
+    # keeping the analytic assertion simple: RMS of a constant-amplitude
+    # signal is exactly that amplitude, in every bin, with no
+    # approximation needed. This test hardcodes that 4096 -- it and
+    # Ring.Config.summary_slot_frames change together.
     buf = buffer_cls(duration_seconds=2.0, sample_rate=4096, channels=1)
     buf.write(np.full((8192, 1), 0.5, dtype=np.float32))  # == 2 slots exactly
     bins = buf.get_summary_bins(n_bins=2)  # bin_span defaults to 8192/2 == 4096, one slot per bin

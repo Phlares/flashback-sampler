@@ -460,7 +460,11 @@ class NativeAudioCircularBuffer:
         and for a closed handle."""
         out = np.zeros((n_bins, self.channels, 2), dtype=np.float32)
         if self._h is None:
-            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
+            # closed handle: NULL into a *Ring is a process abort, not an
+            # exception. Same transpose as the live return below -- the
+            # shape callers see must not depend on whether the handle
+            # happened to be open.
+            return np.ascontiguousarray(out.transpose(0, 2, 1))
         status = self._lib.fb_ring_peak_bins(
             self._h, max(0, int(seconds * self.sample_rate)), n_bins,
             out.ctypes.data_as(C.POINTER(FbPeakBin)),
@@ -503,17 +507,12 @@ class NativeAudioCircularBuffer:
         return out
 
     def close(self) -> None:
-        """Destroys the Zig-owned ring and frees its storage. Two
-        consequences a caller must respect:
+        """Destroys the Zig-owned ring and frees its storage.
 
-        - Never retain a reference to `self.buffer` across a call to
-          close() -- it is a zero-copy numpy VIEW over storage that
-          fb_ring_destroy frees; a view held past this point points at
-          freed memory.
-        - `self.buffer` itself becomes None (see below), so any method
-          that reads it -- get_peak_bins, for instance -- raises
-          TypeError if called after close(). Never use the buffer after
-          close().
+        Never retain a reference to `self.buffer` across a call to
+        close() -- it is a zero-copy numpy VIEW over storage that
+        fb_ring_destroy frees; a view held past this point points at
+        freed memory. Don't use a buffer after closing it.
         """
         if self._h:
             self.buffer = None
