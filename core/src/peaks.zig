@@ -183,10 +183,10 @@ test "peakBinsFile equals peakBinsFlat on the same audio, across a chunk boundar
     try wav.writeFile(path, &frames, 48_000, 2, .float32);
     var o = try wav.open(path);
     defer o.file.close(wav.io);
-    var from_file: [37 * 2]PeakBin = undefined;
-    var from_flat: [37 * 2]PeakBin = undefined;
-    try peakBinsFile(o.file, o.info, 0, n, 37, &from_file);
-    peakBinsFlat(&frames, 2, 37, &from_flat);
+    var from_file: [300 * 2]PeakBin = undefined;
+    var from_flat: [300 * 2]PeakBin = undefined;
+    try peakBinsFile(o.file, o.info, 0, n, 300, &from_file);
+    peakBinsFlat(&frames, 2, 300, &from_flat);
     for (from_file, from_flat) |a, b| {
         try std.testing.expectEqual(b.min, a.min);
         try std.testing.expectEqual(b.max, a.max);
