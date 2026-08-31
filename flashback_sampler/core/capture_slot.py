@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from flashback_sampler.core.native import NativeAudioCircularBuffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
 from .capture_source import CaptureSource
 from .checkout import CheckoutManager
@@ -113,7 +113,9 @@ class CaptureSlot:
         preset: QualityPreset,
         name: str = "",
         max_active_checkouts: int = 16,
-        max_total_ram_mb: float = 1024.0,
+        *,
+        scratch: NativeScratch,
+        scratch_dir,
     ) -> "CaptureSlot":
         """
         Build a new slot from a QualityPreset. The ring buffer and
@@ -128,8 +130,10 @@ class CaptureSlot:
         )
         mgr = CheckoutManager(
             buffer=buf,
+            scratch=scratch,
+            scratch_dir=scratch_dir,
+            slot_name=name or preset.name,
             max_active_checkouts=max_active_checkouts,
-            max_total_ram_mb=max_total_ram_mb,
         )
         return cls(
             id=uuid.uuid4().hex[:12],
@@ -202,8 +206,8 @@ class CaptureSlot:
 
     def ram_bytes(self) -> int:
         """
-        RAM held by THIS slot's ring buffer (excluding checkouts —
-        those are tracked separately by the CheckoutManager's cap).
+        RAM held by THIS slot's ring buffer (excluding checkouts — the
+        scratch cache accounts for those).
         """
         return compute_ram_bytes(
             self.sample_rate, self.channels, self.buffer_seconds

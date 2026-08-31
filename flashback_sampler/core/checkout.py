@@ -2,9 +2,19 @@
 Checkout workflow — pull immutable snapshots of the live ring buffer.
 
 Mental model (user-provided): a DJ with one turntable still spinning,
-pulling a record off the rack to audition. The ring buffer keeps writing
-throughout. Each Checkout is a frozen, in-RAM copy of a slice of the ring.
-The user can scrub, trim, preview, then save to WAV or discard.
+pulling a record off the rack to audition. The ring keeps writing
+throughout. Each Checkout is a frozen copy of a span of the ring.
+
+Where the audio lives (epic #53): in Zig. `create` copies the span out
+of the ring into a Zig-owned buffer and queues its scratch write; the
+scratch file `<scratch_dir>/<id>.wav` is the checkout from then on, and
+the RAM copy is a cache the engine manages under a byte budget. Python
+never holds samples: this module holds ids, states, trims, per-file
+refcounts and the JSON manifests that adoption reads at launch.
+
+A slice is a reference into its parent's file — `(path, start_frame,
+n_frames)` with `parent_id` set. A file lives while any checkout in
+this manager references it (`_file_refs`); the last discard deletes it.
 """
 
 from __future__ import annotations
@@ -19,68 +29,69 @@ from typing import Literal, Optional
 import numpy as np
 
 from flashback_sampler.core import native
-from flashback_sampler.core.native import NativeAudioCircularBuffer
+from flashback_sampler.core.manifest import (
+    Manifest, audio_path, bins_from_json, bins_to_json, manifest_path, write_manifest,
+)
+from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
 CheckoutFormat = Literal["WAV"]
 CheckoutSubtype = Literal["FLOAT", "PCM_24", "PCM_16"]
 
-# FLOAT keeps the float32 ring bit-perfect on disk (fb_wav_write memcpy).
-_DEFAULT_SUBTYPE: dict[str, str] = {"WAV": "FLOAT"}
+# FLOAT keeps the float32 scratch bit-perfect on disk.
+_DEFAULT_SUBTYPE = "FLOAT"
 _VALID_SUBTYPES: tuple[str, ...] = ("FLOAT", "PCM_24", "PCM_16")
+# The deck draws two bin resolutions per checkout: the radial ring (540)
+# and the clip panel (360). Computed once at create (from the RAM copy)
+# and stored in the manifest so adoption never reads audio for them.
+BIN_COUNTS: tuple[int, ...] = (540, 360)
 
 
 @dataclass
 class Checkout:
-    """
-    A frozen snapshot of a ring-buffer slice.
-
-    `audio` is the in-RAM float32 [N, channels] copy that the UI scrubs
-    and plays back. `abs_sample_start` / `abs_sample_end` are the absolute
-    sample positions (in total_written space) at creation time — metadata
-    that lets the UI display "this clip is T-3:00 → T-0:00" accurately
-    even after the ring has moved on.
-    """
+    """A frozen span of ring audio. `handle` is the Zig `*Checkout`;
+    `path`/`start_frame`/`n_frames` say where the same audio lives on
+    disk. `abs_sample_*` are the ring's absolute sample positions at
+    creation time (display metadata)."""
 
     id: str
+    handle: int
+    path: Path
     created_at: float  # monotonic
     sample_rate: int
     channels: int
-    audio: np.ndarray  # (N, channels) float32
+    n_frames: int
+    start_frame: int
     abs_sample_start: int
     abs_sample_end: int
+    parent_id: Optional[str] = None
     trim_in_samples: int = 0
     trim_out_samples: int = 0
-    temp_path: Optional[Path] = None
     state: CheckoutState = "pending"
+    partial: bool = False
+    bins: dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def duration_seconds(self) -> float:
-        return self.audio.shape[0] / self.sample_rate
+        return self.n_frames / self.sample_rate
 
-    @property
-    def ram_bytes(self) -> int:
-        return int(self.audio.nbytes)
+    def has_trim(self) -> bool:
+        return self.trim_in_samples > 0 or (0 < self.trim_out_samples < self.n_frames)
 
-    def trimmed_audio(self) -> np.ndarray:
-        """Return the portion between trim_in and trim_out (defaults = full)."""
-        n = self.audio.shape[0]
+    def trim_range(self) -> tuple[int, int]:
+        """(start, n) within the checkout: the trim, or the whole clip."""
+        n = self.n_frames
         start = max(0, min(self.trim_in_samples, n))
-        if self.trim_out_samples <= 0:
-            end = n
-        else:
-            end = max(start, min(self.trim_out_samples, n))
-        return self.audio[start:end]
+        end = n if self.trim_out_samples <= 0 else max(start, min(self.trim_out_samples, n))
+        return start, end - start
 
 
 class CheckoutManager:
     """
-    Creates, tracks, saves, and discards Checkouts.
-
-    A single CheckoutManager instance is held by the app's AppState and
-    shared across the UI controllers. Core operations (`create`, `save`,
-    `discard`, `list`) are thread-safe.
+    Creates, tracks, saves and discards Checkouts for one slot. A single
+    CheckoutManager per CaptureSlot; all share one NativeScratch (the
+    process-wide writer + cache). Public operations are thread-safe.
     """
 
     _VALID_FORMATS: tuple[str, ...] = ("WAV",)
@@ -88,173 +99,140 @@ class CheckoutManager:
     def __init__(
         self,
         buffer: NativeAudioCircularBuffer,
+        scratch: NativeScratch,
+        scratch_dir: Path | str,
+        slot_name: str = "",
         max_active_checkouts: int = 16,
-        max_total_ram_mb: float = 1024.0,
     ):
         self._buffer = buffer
+        self._scratch = scratch
+        self._scratch_dir = Path(scratch_dir)
+        self._slot_name = slot_name
         self._max_active = int(max_active_checkouts)
-        self._max_ram_bytes = int(max_total_ram_mb * 1024 * 1024)
         self._lock = threading.Lock()
         self._checkouts: dict[str, Checkout] = {}
+        self._file_refs: dict[Path, int] = {}
+        self._pinned_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Creation
     # ------------------------------------------------------------------
 
-    def create(
-        self,
-        duration_s: float,
-        anchor: str = "latest",
-        anchor_offset_s: float = 0.0,
-    ) -> Checkout:
-        """
-        Create a new Checkout by snapshotting `duration_s` seconds of audio
-        from the buffer.
-
-        `anchor="latest"` is the only supported anchor today.
-        `anchor_offset_s` shifts the trailing edge of the slice earlier in
-        time. 0.0 (default) ends the clip at "now"; 60.0 ends it 60 s ago.
-        This is how the rotary knob moves a checkout back in time through
-        the ring buffer.
-        """
+    def create(self, duration_s: float, anchor: str = "latest", anchor_offset_s: float = 0.0) -> Checkout:
+        """Snapshot `duration_s` seconds ending `anchor_offset_s` ago
+        (0 = now). Both clamp to what the ring holds: the offset to
+        `buffered - 1 sample`, the start to the readable window."""
         if anchor != "latest":
             raise NotImplementedError(f"anchor={anchor!r} not yet supported")
         if duration_s <= 0:
             raise ValueError("duration_s must be positive")
         if anchor_offset_s < 0:
             raise ValueError("anchor_offset_s must be non-negative")
-
-        # Defensive clamp: the rotary UI can be dragged to anchor offsets
-        # up to the buffer's capacity, but early in capture only a few
-        # seconds of audio actually exist. We clamp the effective offset
-        # to leave at least a tiny span of audio for get_segment to
-        # return — concretely, offset_max = max(0, buffered_s - 1 sample)
-        # so the window always contains at least one sample when
-        # buffered_s > 0. get_segment then internally clamps the older
-        # boundary to what's actually available, so the returned clip is
-        # everything the ring has from the anchor going backward.
-        buffered_s = self._buffer.buffered_seconds
-        one_sample = 1.0 / float(self._buffer.sample_rate)
-        effective_offset_s = min(
-            float(anchor_offset_s),
-            max(0.0, buffered_s - one_sample),
-        )
-
-        if effective_offset_s <= 0:
-            # Fast path — unchanged from before
-            audio = self._buffer.get_latest(duration_s)
-        else:
-            # Resolve to a segment ending `effective_offset_s` seconds ago.
-            # get_segment clamps start_ago to avail_secs, so a duration
-            # request larger than what remains before the offset yields
-            # everything up to the offset point.
-            audio = self._buffer.get_segment(
-                start_ago=effective_offset_s + duration_s,
-                end_ago=effective_offset_s,
-            )
-        # total_written is one atomic read through the ABI.
-        total = self._buffer.total_written
-        abs_end = total - int(effective_offset_s * self._buffer.sample_rate)
-        abs_start = abs_end - audio.shape[0]
-
-        # Check caps atomically with insertion
-        with self._lock:
-            if len(self._checkouts) >= self._max_active:
-                raise RuntimeError(
-                    f"Maximum active checkouts reached ({self._max_active})"
-                )
-            prospective_bytes = (
-                sum(c.ram_bytes for c in self._checkouts.values()) + audio.nbytes
-            )
-            if prospective_bytes > self._max_ram_bytes:
-                raise RuntimeError(
-                    f"Checkout RAM cap exceeded: "
-                    f"{prospective_bytes / 1024 / 1024:.1f} MB > "
-                    f"{self._max_ram_bytes / 1024 / 1024:.1f} MB"
-                )
-
-            co = Checkout(
-                id=uuid.uuid4().hex[:12],
-                created_at=time.monotonic(),
-                sample_rate=self._buffer.sample_rate,
-                channels=self._buffer.channels,
-                audio=audio,
-                abs_sample_start=int(abs_start),
-                abs_sample_end=int(abs_end),
-                state="pending",
-            )
-            self._checkouts[co.id] = co
-        return co
-
-    def create_from_abs_range(
-        self,
-        abs_start: int,
-        abs_end: int,
-    ) -> Checkout:
-        """
-        Create a Checkout from an absolute sample range in
-        `total_written` space. Used by the drag-select UI — the user
-        picks a range on the live waveform (which the BufferTrack pins
-        to absolute samples so the selection stays anchored to real
-        audio even as the ring scrolls), then right-clicks → Check Out
-        Segment to commit those exact samples.
-
-        Raises RuntimeError if the requested range has already scrolled
-        out of the ring, or has not yet been written, or if capacity
-        caps would be exceeded.
-        """
+        buf = self._buffer
+        sr = buf.sample_rate
+        buffered_s = buf.buffered_seconds
+        effective_offset_s = min(float(anchor_offset_s), max(0.0, buffered_s - 1.0 / sr))
+        total = buf.total_written
+        abs_end = total - int(effective_offset_s * sr)
+        oldest = max(0, total - buf.buffer_size)
+        abs_start = max(oldest, abs_end - int(duration_s * sr))
         if abs_end <= abs_start:
-            raise ValueError(
-                f"abs_end must be greater than abs_start ({abs_end} <= {abs_start})"
-            )
+            raise RuntimeError("nothing buffered yet")
+        return self.create_from_abs_range(abs_start, abs_end)
 
-        # Check the range is still available in the ring. total_written is
-        # one atomic read through the ABI — no lock needed here.
+    def create_from_abs_range(self, abs_start: int, abs_end: int) -> Checkout:
+        """Commit the exact absolute span `[abs_start, abs_end)` (the
+        drag-select path). Raises RuntimeError when the span is past the
+        head, already overwritten, or the count cap is hit."""
+        if abs_end <= abs_start:
+            raise ValueError(f"abs_end must be greater than abs_start ({abs_end} <= {abs_start})")
         buf = self._buffer
         total = buf.total_written
         if abs_end > total:
-            raise RuntimeError(
-                f"requested range extends past current head "
-                f"(abs_end={abs_end}, total_written={total})"
-            )
+            raise RuntimeError(f"requested range extends past current head (abs_end={abs_end}, total_written={total})")
         if total - abs_start > buf.buffer_size:
-            raise RuntimeError(
-                "requested range has already been overwritten"
-            )
-
-        audio = buf.copy_abs_range(abs_start, abs_end)
-        if audio.shape[0] == 0:
-            raise RuntimeError(
-                "could not read requested range; the writer may have "
-                "lapped the slice during the copy"
-            )
-
+            raise RuntimeError("requested range has already been overwritten")
         with self._lock:
             if len(self._checkouts) >= self._max_active:
-                raise RuntimeError(
-                    f"Maximum active checkouts reached ({self._max_active})"
-                )
-            prospective_bytes = (
-                sum(c.ram_bytes for c in self._checkouts.values()) + audio.nbytes
-            )
-            if prospective_bytes > self._max_ram_bytes:
-                raise RuntimeError(
-                    f"Checkout RAM cap exceeded: "
-                    f"{prospective_bytes / 1024 / 1024:.1f} MB > "
-                    f"{self._max_ram_bytes / 1024 / 1024:.1f} MB"
-                )
-
+                raise RuntimeError(f"Maximum active checkouts reached ({self._max_active})")
+            cid = uuid.uuid4().hex[:12]
+            path = audio_path(self._scratch_dir, cid)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                handle = self._scratch.checkout_create(buf, int(abs_start), int(abs_end), path)
+            except (RuntimeError, OSError) as e:
+                # overwritten / out_of_range / io_error from the engine:
+                # an unwritable scratch dir surfaces the same as any other
+                # engine rejection here (R-h8c) -- the UI handler widens
+                # this further in h10.
+                raise RuntimeError(f"could not read requested range; {e}") from e
             co = Checkout(
-                id=uuid.uuid4().hex[:12],
-                created_at=time.monotonic(),
-                sample_rate=buf.sample_rate,
-                channels=buf.channels,
-                audio=audio,
-                abs_sample_start=int(abs_start),
-                abs_sample_end=int(abs_end),
-                state="pending",
+                id=cid, handle=handle, path=path, created_at=time.monotonic(),
+                sample_rate=buf.sample_rate, channels=buf.channels,
+                n_frames=int(abs_end - abs_start), start_frame=0,
+                abs_sample_start=int(abs_start), abs_sample_end=int(abs_end),
             )
-            self._checkouts[co.id] = co
+            co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+            self._register(co)
+        return co
+
+    def _register(self, co: Checkout) -> None:
+        """Lock held. Track the checkout, count its file, write its manifest."""
+        self._checkouts[co.id] = co
+        self._file_refs[co.path] = self._file_refs.get(co.path, 0) + 1
+        self._write_manifest(co)
+
+    def _write_manifest(self, co: Checkout) -> None:
+        write_manifest(self._scratch_dir, Manifest(
+            id=co.id, slot=self._slot_name, rate=co.sample_rate, channels=co.channels,
+            abs_start=co.abs_sample_start, abs_end=co.abs_sample_end, created_at=time.time(),
+            parent=co.parent_id, start_frame=co.start_frame, n_frames=co.n_frames,
+            trim_in=co.trim_in_samples, trim_out=co.trim_out_samples, state=co.state,
+            partial=co.partial, bins=bins_to_json(co.bins) if co.bins else None,
+        ))
+
+    # ------------------------------------------------------------------
+    # Adoption (launch)
+    # ------------------------------------------------------------------
+
+    def adopt_root(self, m: Manifest, audio: Path, partial: bool) -> Checkout:
+        """A root whose file already exists. Frame count comes from the
+        file (a partial file reports its true prefix); bins from the
+        manifest when present, else computed once from the file."""
+        handle = self._scratch.checkout_open(audio, 0, max(1, int(m.n_frames)))
+        info = self._scratch.checkout_info(handle)
+        co = Checkout(
+            id=m.id, handle=handle, path=Path(audio), created_at=time.monotonic(),
+            sample_rate=int(info.rate), channels=int(info.channels),
+            n_frames=int(info.n_frames), start_frame=0,
+            abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
+            trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
+            state=m.state if m.state in ("pending", "ready", "saved") else "pending",
+            partial=bool(partial or m.partial),
+        )
+        co.bins = bins_from_json(m.bins, co.channels)
+        if set(co.bins) != {str(n) for n in BIN_COUNTS}:
+            co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+        with self._lock:
+            self._register(co)
+        return co
+
+    def adopt_slice(self, m: Manifest, parent: Checkout) -> Checkout:
+        """A slice of an adopted parent in THIS manager."""
+        handle = self._scratch.checkout_slice(parent.handle, int(m.start_frame), int(m.n_frames))
+        co = Checkout(
+            id=m.id, handle=handle, path=parent.path, created_at=time.monotonic(),
+            sample_rate=parent.sample_rate, channels=parent.channels,
+            n_frames=int(m.n_frames), start_frame=int(m.start_frame),
+            abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
+            parent_id=parent.id, trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
+            state=m.state if m.state in ("pending", "ready", "saved") else "saved",
+        )
+        co.bins = bins_from_json(m.bins, co.channels)
+        if set(co.bins) != {str(n) for n in BIN_COUNTS}:
+            co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+        with self._lock:
+            self._register(co)
         return co
 
     # ------------------------------------------------------------------
@@ -271,9 +249,59 @@ class CheckoutManager:
                 raise KeyError(checkout_id)
             return self._checkouts[checkout_id]
 
+    def write_state(self, checkout_id: str) -> str:
+        return native.WRITE_STATES[self._scratch.checkout_info(self.get(checkout_id).handle).write_state]
+
+    def resident_bytes(self, checkout_id: str) -> int:
+        return int(self._scratch.checkout_info(self.get(checkout_id).handle).resident_bytes)
+
+    def peak_bins(self, checkout_id: str, n_bins: int) -> np.ndarray:
+        return self._scratch.checkout_peak_bins(self.get(checkout_id).handle, n_bins)
+
+    def file_refcount(self, path: Path | str) -> int:
+        with self._lock:
+            return self._file_refs.get(Path(path), 0)
+
+    # ------------------------------------------------------------------
+    # UI state
+    # ------------------------------------------------------------------
+
+    def set_trim(self, checkout_id: str, trim_in: int, trim_out: int) -> None:
+        co = self.get(checkout_id)
+        with self._lock:
+            co.trim_in_samples = max(0, int(trim_in))
+            co.trim_out_samples = max(co.trim_in_samples, int(trim_out)) if trim_out > 0 else 0
+            self._write_manifest(co)
+
+    def pin(self, checkout_id: Optional[str]) -> None:
+        """The selected clip: pinned (never evicted) and preloaded. One
+        at a time per manager; None unpins."""
+        with self._lock:
+            prev = self._pinned_id
+            self._pinned_id = checkout_id
+        if prev and prev != checkout_id:
+            try:
+                self._scratch.checkout_pin(self.get(prev).handle, False)
+            except KeyError:
+                pass
+        if checkout_id is not None:
+            self._scratch.checkout_pin(self.get(checkout_id).handle, True)
+
     # ------------------------------------------------------------------
     # Save / discard
     # ------------------------------------------------------------------
+
+    def export_range(self, checkout_id: str, target_path: Path | str, start: int, n: int, subtype: str = _DEFAULT_SUBTYPE) -> Path:
+        """Materialise `[start, start + n)` of the checkout into a WAV.
+        Zig reads the scratch file (or the RAM copy while the write is
+        still in flight) — no audio crosses into Python."""
+        if subtype not in _VALID_SUBTYPES:
+            raise ValueError(f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}")
+        co = self.get(checkout_id)
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._scratch.checkout_export(co.handle, target, int(start), int(n), subtype)
+        return target
 
     def save(
         self,
@@ -284,62 +312,52 @@ class CheckoutManager:
         subtype: CheckoutSubtype | None = None,
         mark_saved: bool = True,
     ) -> Path:
-        """
-        Write the checkout's audio to `target_path` in the requested
-        format. When `trimmed` is True (default) the file contains just
-        the region between trim_in_samples / trim_out_samples; when False,
-        the full untrimmed snapshot is written regardless of trim state.
-
-        `subtype` controls the bit depth; None resolves to FLOAT.
-        `mark_saved` controls whether the checkout state is flipped to
-        'saved' (default True); when False, the caller can write without
-        affecting checkout state (used by drag-out flow).
-        """
         fmt = fmt.upper()  # type: ignore[assignment]
         if fmt not in self._VALID_FORMATS:
-            raise ValueError(
-                f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}"
-            )
-
-        if subtype is None:
-            subtype = _DEFAULT_SUBTYPE[fmt]  # type: ignore[assignment]
-        if subtype not in _VALID_SUBTYPES:
-            raise ValueError(
-                f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}"
-            )
-
-        with self._lock:
-            if checkout_id not in self._checkouts:
-                raise KeyError(checkout_id)
-            co = self._checkouts[checkout_id]
-            audio = co.trimmed_audio() if trimmed else co.audio
-            sr = co.sample_rate
-
-        target = Path(target_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # The Zig encoder is the only write path; native.wav_write raises
-        # RuntimeError when the library is missing.
-        native.wav_write(target, np.ascontiguousarray(audio, dtype=np.float32), sr, subtype)
-
+            raise ValueError(f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}")
+        co = self.get(checkout_id)
+        start, n = co.trim_range() if trimmed else (0, co.n_frames)
+        target = self.export_range(checkout_id, target_path, start, n, subtype or _DEFAULT_SUBTYPE)
         if mark_saved:
-            with self._lock:
-                co.state = "saved"
+            self.mark_saved(checkout_id)
         return target
 
     def mark_saved(self, checkout_id: str) -> None:
-        """Flip a checkout to `saved` without writing anything — used by
-        the drag-out flow, which renders first and only commits the state
-        once the drop target has accepted the file."""
+        co = self.get(checkout_id)
         with self._lock:
-            if checkout_id not in self._checkouts:
-                raise KeyError(checkout_id)
-            self._checkouts[checkout_id].state = "saved"
+            co.state = "saved"
+            self._write_manifest(co)
 
     def discard(self, checkout_id: str) -> None:
+        """Destroy the handle, delete the manifest, delete the WAV when
+        no other checkout references it."""
         with self._lock:
             if checkout_id not in self._checkouts:
                 raise KeyError(checkout_id)
             co = self._checkouts.pop(checkout_id)
             co.state = "discarded"
-            # Drop the big ndarray so RAM is reclaimed promptly
-            co.audio = np.zeros((0, co.channels), dtype=np.float32)
+            if self._pinned_id == checkout_id:
+                self._pinned_id = None
+            self._scratch.checkout_destroy(co.handle)  # waits for any job on it
+            manifest_path(self._scratch_dir, co.id).unlink(missing_ok=True)
+            refs = self._file_refs.get(co.path, 0) - 1
+            if refs <= 0:
+                self._file_refs.pop(co.path, None)
+                co.path.unlink(missing_ok=True)
+                Path(f"{co.path}.part").unlink(missing_ok=True)
+            else:
+                self._file_refs[co.path] = refs
+
+    def discard_all(self) -> None:
+        for co in self.list():
+            self.discard(co.id)
+
+    def close(self) -> None:
+        """Release every handle and keep every file: the next launch
+        adopts them. Shutdown path."""
+        with self._lock:
+            for co in self._checkouts.values():
+                self._scratch.checkout_destroy(co.handle)
+            self._checkouts.clear()
+            self._file_refs.clear()
+            self._pinned_id = None
