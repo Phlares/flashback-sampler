@@ -74,6 +74,17 @@ FbStatus fb_ring_rms(FbRing *, uint64_t n_frames, float *out);
 FbStatus fb_wav_write(const char *path, const float *frames, size_t n_frames,
                       uint32_t rate, uint16_t channels, FbSubtype subtype);
 
+typedef struct FbWavInfo { uint32_t rate; uint16_t channels; uint8_t subtype; uint64_t frames; } FbWavInfo;
+/* Reader side of wav.zig. FB_INVALID_ARG: not RIFF/WAVE, no fmt/data, or
+ * an unsupported format (PCM32, float64, ...). FB_OUT_OF_RANGE: the span
+ * runs past the frames the FILE holds (a crash-truncated file reports its
+ * true prefix, not the header's claim). FB_IO_ERROR: OS errors. */
+FbStatus fb_wav_info(const char *path, FbWavInfo *out);
+/* out holds n_frames * channels floats (channels from fb_wav_info). */
+FbStatus fb_wav_read(const char *path, uint64_t start_frame, size_t n_frames, float *out);
+/* out holds n_bins * channels FbPeakBin, out[bin * channels + ch]. */
+FbStatus fb_wav_peak_bins(const char *path, uint64_t start_frame, uint64_t n_frames, size_t n_bins, FbPeakBin *out);
+
 size_t     fb_devices_list(FbDevice *out, size_t max);        /* 0 on non-Windows */
 FbCapture *fb_capture_create(FbRing *, const FbCaptureSpec *);/* NULL on non-Windows or bad spec */
 FbStatus   fb_capture_start(FbCapture *);                      /* FB_INVALID_ARG if already running, FB_IO_ERROR if spawn failed */

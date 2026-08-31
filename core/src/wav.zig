@@ -169,12 +169,16 @@ pub const ReadError = error{OutOfRange} || std.Io.File.ReadPositionalError;
 
 /// Fill `out` (interleaved, `out.len / info.channels` frames) from
 /// `start_frame`. Whole-span or nothing: a span past `info.frames`
-/// returns OutOfRange before any read.
+/// returns OutOfRange before any read. Precondition: `out.len` must be
+/// a multiple of `info.channels` (checked by the assert below).
 pub fn readFrames(file: std.Io.File, info: Info, start_frame: u64, out: []f32) ReadError!void {
     const chans: u64 = info.channels;
     std.debug.assert(out.len % chans == 0);
     const n_frames: u64 = out.len / chans;
-    if (start_frame + n_frames > info.frames) return error.OutOfRange;
+    // Subtraction form, not `start_frame + n_frames > info.frames`: the
+    // addition can overflow-trap in ReleaseSafe on a hostile
+    // start_frame, where this form cannot.
+    if (start_frame > info.frames or n_frames > info.frames - start_frame) return error.OutOfRange;
     const block = info.blockAlign();
     const frames_per_chunk: u64 = read_chunk_bytes / block;
     var buf: [read_chunk_bytes]u8 = undefined;
@@ -198,7 +202,8 @@ pub fn readFrames(file: std.Io.File, info: Info, start_frame: u64, out: []f32) R
 /// The inverse of `encodeSamples`. PCM codes divide by 2^(bits-1) — the
 /// libsndfile convention `tests/fixtures/wavread.py` pins (32767 reads
 /// as 32767/32768) — so encode→decode is exact at the codes, not at the
-/// original floats. FLOAT32 is a memcpy of the bits.
+/// original floats. FLOAT32 is a memcpy of the bits. Precondition:
+/// `bytes.len` must be at least `out.len * bytesPerSample(st)`.
 pub fn decodeSamples(st: Subtype, bytes: []const u8, out: []f32) void {
     switch (st) {
         .float32 => @memcpy(std.mem.sliceAsBytes(out), bytes[0 .. out.len * 4]),

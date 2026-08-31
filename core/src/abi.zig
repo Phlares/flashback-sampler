@@ -7,6 +7,7 @@ const std = @import("std");
 const Ring = @import("Ring.zig");
 const Summary = @import("Summary.zig");
 const wav = @import("wav.zig");
+const peaks = @import("peaks.zig");
 const Capture = @import("Capture.zig");
 const Backend = @import("Backend.zig");
 const Mixer = @import("Mixer.zig");
@@ -314,6 +315,88 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
         else => .io_error,
     };
     return .ok;
+}
+
+/// Mirrors FbWavInfo in flashback_core.h. `subtype` is the FbSubtype
+/// wire value (0/1/2), the same one fb_wav_write takes.
+pub const FbWavInfo = extern struct { rate: u32, channels: u16, subtype: u8, frames: u64 };
+
+fn wavStatus(e: anyerror) FbStatus {
+    return switch (e) {
+        error.NotWave, error.MissingFmt, error.MissingData, error.Unsupported => .invalid_arg,
+        error.OutOfRange => .out_of_range,
+        else => .io_error,
+    };
+}
+
+export fn fb_wav_info(path: [*:0]const u8, out: *FbWavInfo) FbStatus {
+    var o = wav.open(std.mem.span(path)) catch |e| return wavStatus(e);
+    defer o.file.close(wav.io);
+    out.* = .{ .rate = o.info.rate, .channels = o.info.channels, .subtype = @intFromEnum(o.info.subtype), .frames = o.info.frames };
+    return .ok;
+}
+
+/// `out` holds n_frames * channels floats; channels come from the file
+/// (the host reads them with fb_wav_info first). n_frames * channels is
+/// computed with a checked multiply so a hostile huge n_frames is a
+/// status, not a ReleaseSafe overflow trap.
+export fn fb_wav_read(path: [*:0]const u8, start_frame: u64, n_frames: usize, out: [*]f32) FbStatus {
+    var o = wav.open(std.mem.span(path)) catch |e| return wavStatus(e);
+    defer o.file.close(wav.io);
+    const len = std.math.mul(usize, n_frames, o.info.channels) catch return .invalid_arg;
+    wav.readFrames(o.file, o.info, start_frame, out[0..len]) catch |e| return wavStatus(e);
+    return .ok;
+}
+
+/// `out` holds n_bins * channels FbPeakBin, out[bin * channels + ch] —
+/// the same layout as fb_ring_peak_bins. n_bins * channels is computed
+/// with a checked multiply for the same reason as fb_wav_read.
+export fn fb_wav_peak_bins(path: [*:0]const u8, start_frame: u64, n_frames: u64, n_bins: usize, out: [*]peaks.PeakBin) FbStatus {
+    if (n_bins == 0) return .invalid_arg;
+    var o = wav.open(std.mem.span(path)) catch |e| return wavStatus(e);
+    defer o.file.close(wav.io);
+    const len = std.math.mul(usize, n_bins, o.info.channels) catch return .invalid_arg;
+    peaks.peakBinsFile(o.file, o.info, start_frame, n_frames, n_bins, out[0..len]) catch |e| return wavStatus(e);
+    return .ok;
+}
+
+test "fb_wav_info / fb_wav_read round-trip through the exports" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/abi.wav", .{tmp.sub_path}) catch unreachable;
+    const in = [_]f32{ 0.1, -0.1, 0.2, -0.2 };
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_write(path, &in, 2, 48_000, 2, 0));
+    var info: FbWavInfo = undefined;
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_info(path, &info));
+    try std.testing.expectEqual(@as(u64, 2), info.frames);
+    try std.testing.expectEqual(@as(u16, 2), info.channels);
+    var out: [4]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_read(path, 0, 2, &out));
+    try std.testing.expectEqualSlices(f32, &in, &out);
+    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, 1, 2, &out));
+}
+
+test "fb_wav_info maps a missing file to io_error and junk to invalid_arg" {
+    var info: FbWavInfo = undefined;
+    try std.testing.expectEqual(FbStatus.io_error, fb_wav_info(".zig-cache/tmp/nope.wav", &info));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "junk.wav", .data = "not a wave file at all" });
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/junk.wav", .{tmp.sub_path}) catch unreachable;
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_info(path, &info));
+}
+
+test "fb_wav_read: a huge n_frames returns invalid_arg instead of an overflow trap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/huge.wav", .{tmp.sub_path}) catch unreachable;
+    const in = [_]f32{ 0.1, -0.1 };
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_write(path, &in, 1, 48_000, 2, 0));
+    var out: [4]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_read(path, 0, std.math.maxInt(usize), &out));
 }
 
 pub const FbCaptureSpec = extern struct { kind: u8, pid: u32, rate: u32, channels: u16, device_id: [*:0]const u8 };
