@@ -15,7 +15,7 @@ comptime {
 
 test "golden 44-byte header: 48k stereo float32, 4 frames" {
     var h: [44]u8 = undefined;
-    writeHeader(&h, 48_000, 2, .float32, 4);
+    try writeHeader(&h, 48_000, 2, .float32, 4);
     try std.testing.expectEqualSlices(u8, "RIFF", h[0..4]);
     try std.testing.expectEqual(@as(u32, 68), std.mem.readInt(u32, h[4..8], .little)); // 36 + data(32)
     try std.testing.expectEqualSlices(u8, "WAVE", h[8..12]);
@@ -29,6 +29,15 @@ test "golden 44-byte header: 48k stereo float32, 4 frames" {
     try std.testing.expectEqual(@as(u16, 32), std.mem.readInt(u16, h[34..36], .little)); // bits
     try std.testing.expectEqualSlices(u8, "data", h[36..40]);
     try std.testing.expectEqual(@as(u32, 32), std.mem.readInt(u32, h[40..44], .little));
+}
+
+test "writeHeader rejects n_frames whose data size overflows the u32 RIFF size, instead of trapping" {
+    // block_align = 8 (stereo float32); n_frames chosen so
+    // n_frames * block_align alone already exceeds maxInt(u32) - 36 by a
+    // wide margin, well past the point `@intCast` would trap in
+    // ReleaseSafe on the raw product.
+    var h: [44]u8 = undefined;
+    try std.testing.expectError(error.TooLong, writeHeader(&h, 48_000, 2, .float32, 600_000_000));
 }
 
 /// The sample formats this module supports (writer and reader). Backed
@@ -252,10 +261,20 @@ pub fn decodeSamples(st: Subtype, bytes: []const u8, out: []f32) void {
 /// `channels`-channel audio at `rate` Hz in subtype `st`. A "frame" is
 /// one sample per channel, so the data chunk size is
 /// `n_frames * channels * bytesPerSample`.
-pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, n_frames: u64) void {
+///
+/// `n_frames` arrives raw from callers (some, eventually, straight off a
+/// ctypes boundary) — a huge value must fail with `error.TooLong`, not
+/// trap. Two overflow points guard against that: the `n_frames *
+/// block_align` product itself (checked with `std.math.mul`, since a
+/// plain `*` would be illegal behavior — a ReleaseSafe trap — on
+/// overflow), and the RIFF chunk size field, which stores `36 + data_len`
+/// in a u32 and so needs `data_len <= maxInt(u32) - 36`.
+pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, n_frames: u64) error{TooLong}!void {
     const bps: u32 = st.bytesPerSample();
     const block_align: u16 = @intCast(bps * channels);
-    const data_len: u32 = @intCast(n_frames * block_align);
+    const data_len_wide: u64 = std.math.mul(u64, n_frames, block_align) catch return error.TooLong;
+    if (data_len_wide > std.math.maxInt(u32) - 36) return error.TooLong;
+    const data_len: u32 = @intCast(data_len_wide);
     @memcpy(out[0..4], "RIFF");
     std.mem.writeInt(u32, out[4..8], 36 + data_len, .little);
     @memcpy(out[8..12], "WAVE");
@@ -346,7 +365,7 @@ pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{});
     defer out.close(io);
     var header: [header_len]u8 = undefined;
-    writeHeader(&header, o.info.rate, o.info.channels, st, n_frames);
+    try writeHeader(&header, o.info.rate, o.info.channels, st, n_frames);
     try out.writeStreamingAll(io, &header);
     const frames_per_chunk: u64 = read_chunk_bytes / (4 * chans);
     var samples: [read_chunk_bytes / 4]f32 = undefined;
@@ -396,7 +415,7 @@ pub fn writeFile(path: []const u8, samples: []const f32, rate: u32, channels: u1
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     var header: [header_len]u8 = undefined;
-    writeHeader(&header, rate, channels, st, samples.len / channels);
+    try writeHeader(&header, rate, channels, st, samples.len / channels);
     try file.writeStreamingAll(io, &header);
     var buf: [read_chunk_bytes]u8 = undefined;
     var remaining = samples;
