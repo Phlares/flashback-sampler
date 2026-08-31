@@ -290,6 +290,14 @@ already does. `out` layout `[bin][channel]{min,max}`.
 
 ### Deletions
 
+Deviation (PR f plan): `get_rms_levels` was numpy maths; it now calls
+`fb_ring_rms` (`Ring.rmsLatest`). Two behaviour differences, both
+fail-safe: `peakBins`' seqlock verify is stricter than numpy's
+one-clause check (a flush during the scan retries instead of being
+accepted), and `rmsLatest` does not retry a torn window (numpy's
+`get_latest` retried three times) — both surface as zeros, which the
+meter and the waveform already draw as silence.
+
 - `AudioCircularBuffer`, `_peak_bins_impl`, `RingDerivedOps`,
   `make_ring_buffer` (`core/buffer.py` is deleted). `native.py` keeps
   ctypes declarations and `NativeAudioCircularBuffer`, whose methods
