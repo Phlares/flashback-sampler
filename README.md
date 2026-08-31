@@ -13,7 +13,7 @@ The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt i
 pip install -e ".[dev]"
 ```
 
-Installs the package plus test deps. **All capture (loopback, mic / line-in, per-process) is Windows-only**, via WASAPI through the Zig core (`flashback_sampler/core/native_capture.py`). `soundcard` and `sounddevice` no longer do any capture; they remain only for output-device listing and preview playback, until phase 2 PR e moves that to the Zig core too. The test suite runs anywhere via fake audio sources.
+Installs the package plus test deps (numpy, PySide6, platformdirs; no audio pip packages). **Capture, mixing, and preview playback are Windows-only in this phase** — WASAPI through the Zig core; the core cross-compiles, but `WasapiBackend.zig` is the only `Backend` so far. The test suite needs the built core library (`zig build --build-file core/build.zig -Doptimize=ReleaseSafe`).
 
 ## Run
 
@@ -47,7 +47,7 @@ Checkouts survive after you stop capture — you can pull a clip from buffered a
 
 ```
 flashback_sampler/
-  core/                  # pure Python + numpy — no Qt / soundcard / sounddevice
+  core/                  # ctypes shell over the Zig core — no Qt
     buffer.py            # AudioCircularBuffer — seqlock non-blocking reads
     checkout.py          # Checkout + CheckoutManager (+ WAV save through `fb_wav_write`)
     scrub_player.py      # ScrubPlayer — callback-driven preview engine
