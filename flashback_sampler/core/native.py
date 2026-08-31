@@ -326,15 +326,12 @@ class NativeAudioCircularBuffer:
     """The app's ring buffer: a handle on a Zig `Ring`."""
 
     def __init__(self, duration_seconds: float = 900.0, sample_rate: int = 48_000, channels: int = 2):
-        lib = load()
-        if lib is None:
-            raise RuntimeError("flashback_core library not available")
-        self._lib = lib
+        self._lib = _require_lib()
         self.sample_rate = sample_rate
         self.channels = channels
         self.duration = duration_seconds
         status = C.c_int(_OK)
-        self._h = lib.fb_ring_create(sample_rate, channels, duration_seconds, C.byref(status))
+        self._h = self._lib.fb_ring_create(sample_rate, channels, duration_seconds, C.byref(status))
         if not self._h:
             if status.value == _OUT_OF_MEMORY:
                 # The readable window's payload; the guard band and the
@@ -350,17 +347,17 @@ class NativeAudioCircularBuffer:
         # capacity == the READABLE window -- every clamp of "how much audio
         # can I get back" (buffered_seconds, is_full, status, get_latest /
         # get_segment availability) uses THIS.
-        self.buffer_size = int(lib.fb_ring_capacity(self._h))
+        self.buffer_size = int(self._lib.fb_ring_capacity(self._h))
         # storage_frames == the PHYSICAL frame count -- shapes the
         # zero-copy view and is what write_pos actually wraps at. Larger
         # than buffer_size by the guard band; see the module docstring.
-        storage_frames = int(lib.fb_ring_storage_frames(self._h))
+        storage_frames = int(self._lib.fb_ring_storage_frames(self._h))
         self._storage_frames = storage_frames
         # Zero-copy view of Zig-owned storage. Read-only by convention;
         # valid until close(). No production reader -- tests pin flush
         # zeroing and the physical layout through it. Shaped with
         # storage_frames, NOT buffer_size -- see the module docstring.
-        storage = lib.fb_ring_storage(self._h)
+        storage = self._lib.fb_ring_storage(self._h)
         self.buffer = np.ctypeslib.as_array(storage, shape=(storage_frames, channels))
 
     # -- primitives -----------------------------------------------------

@@ -114,7 +114,6 @@ fn scan(file: std.Io.File) OpenError!Info {
             fmt = try parseFmt(fb[0..want]);
         } else if (std.mem.eql(u8, ch[0..4], "data")) {
             const f = fmt orelse return error.MissingFmt;
-            if (body > len) return error.MissingData;
             const avail = @min(size, len - body);
             return .{
                 .rate = f.rate,
@@ -153,7 +152,7 @@ fn parseFmt(fb: []const u8) ParseError!Fmt {
         },
         else => return error.Unsupported,
     };
-    if (channels == 0 or rate == 0) return error.Unsupported;
+    if (channels == 0 or rate == 0 or channels > max_channels) return error.Unsupported;
     // channels (u16) * bytesPerSample (u8) peer-types to u16 and overflows
     // above 16383 float32 channels — widen to u32 first so a malformed
     // header returns Unsupported instead of an integer-overflow trap.
@@ -164,6 +163,13 @@ fn parseFmt(fb: []const u8) ParseError!Fmt {
 /// Read and write share one chunk size: 64 KiB on the stack, never the
 /// heap. 16384 float32 mono samples, 8192 stereo frames per iteration.
 pub const read_chunk_bytes = 16384 * 4;
+
+/// Cap on channels: every chunk loop (`copyRange`, `peaks.peakBinsFile`)
+/// sizes its f32 buffer as `read_chunk_bytes / 4` samples and divides by
+/// `channels` to get frames-per-chunk; above this cap that quotient is 0
+/// and the loop would never advance. Enforced at the two entry points
+/// (parseFmt, fb_wav_write) instead of in every loop.
+pub const max_channels: u16 = read_chunk_bytes / 4;
 
 pub const ReadError = error{OutOfRange} || std.Io.File.ReadPositionalError;
 
@@ -863,6 +869,21 @@ test "copyRange: past the source end is OutOfRange and creates no file" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "never.wav", .{}));
 }
 
+test "copyRange: a hostile start_frame is OutOfRange, not an unsigned-subtraction trap" {
+    // The subtraction form (`n_frames > o.info.frames - start_frame`)
+    // needs `start_frame > o.info.frames` to short-circuit first — this
+    // pins that maxInt(u64) never reaches the subtraction.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3 };
+    const src = tmpWritePath(&pa, &tmp, "s2.wav");
+    try writeFile(src, &in, 8_000, 1, .float32);
+    try std.testing.expectError(error.OutOfRange, copyRange(src, tmpWritePath(&pd, &tmp, "never2.wav"), std.math.maxInt(u64), 1, .float32));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "never2.wav", .{}));
+}
+
 test "open: a huge channel count is Unsupported, not an integer-overflow trap" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -885,4 +906,21 @@ test "open: a huge channel count is Unsupported, not an integer-overflow trap" {
     try writeTmp(&tmp, "hugechan.wav", bytes);
     var pb: [64]u8 = undefined;
     try std.testing.expectError(error.Unsupported, open(tmpWritePath(&pb, &tmp, "hugechan.wav")));
+}
+
+test "open: a channel count above max_channels is Unsupported, not a chunk loop that never advances" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 20000 channels, pcm16: block_align = 20000 * 2 = 40000, which fits
+    // a u16 and equals channels * bytesPerSample, so the existing
+    // block_align cross-check in parseFmt does NOT reject this header —
+    // only the max_channels cap does. 0 frames (empty data chunk) keeps
+    // the image small; a real frame's worth of data at this channel
+    // count would not fit on the stack.
+    const fmt_body = fmtPlain(1, 20000, 8_000, 16);
+    var img: [64]u8 = undefined;
+    const bytes = wavImage(&img, &fmt_body, &.{}, &.{});
+    try writeTmp(&tmp, "widechan.wav", bytes);
+    var pb: [64]u8 = undefined;
+    try std.testing.expectError(error.Unsupported, open(tmpWritePath(&pb, &tmp, "widechan.wav")));
 }
