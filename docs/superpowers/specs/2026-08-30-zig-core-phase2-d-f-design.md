@@ -310,6 +310,11 @@ meter and the waveform already draw as silence.
 - Deleted modules move to `_ToRemove/` for one approval at the end of
   the PR.
 
+Deviation (PR f plan): `test_native_smoke.py`'s fallback test is not
+deleted but re-pointed — a bundled-but-broken library still makes
+`load()` return None and the constructor raise `RuntimeError`; the
+fallback assertion is gone.
+
 ### Dependencies
 
 `sounddevice`, `soundcard`, `soundfile` out of `pyproject.toml`,

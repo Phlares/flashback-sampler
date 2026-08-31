@@ -24,7 +24,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .buffer import RingDerivedOps, make_ring_buffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
+
 from .capture_source import CaptureSource
 from .checkout import CheckoutManager
 from .quality_presets import (
@@ -41,8 +42,7 @@ class CaptureSlot:
       - a named identity (id, user-given label)
       - the resolved audio shape (sample_rate, channels, buffer_seconds,
         quality_preset name)
-      - its own ring buffer (AudioCircularBuffer or NativeAudioCircularBuffer,
-        whichever make_ring_buffer's factory returns) + CheckoutManager
+      - its own ring buffer (NativeAudioCircularBuffer) + CheckoutManager
       - an optional live CaptureSource (None until start_capture is
         called by the app layer)
       - per-slot transport state so each slot remembers its own anchor
@@ -62,7 +62,7 @@ class CaptureSlot:
     channels: int
     buffer_seconds: float
     quality_preset: str  # name of the QualityPreset used (for display / presets)
-    buffer: RingDerivedOps
+    buffer: NativeAudioCircularBuffer
     checkout_manager: CheckoutManager
     capture_source: Optional[CaptureSource] = None
     # Per-slot capture routing. `capture_specs` is the canonical list:
@@ -121,7 +121,7 @@ class CaptureSlot:
         source is left None (the app layer attaches one when the user
         picks a device).
         """
-        buf = make_ring_buffer(
+        buf = NativeAudioCircularBuffer(
             duration_seconds=preset.buffer_seconds,
             sample_rate=preset.sample_rate,
             channels=preset.channels,

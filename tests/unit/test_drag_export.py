@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.drag_export import (
     drag_filename,
@@ -20,7 +20,7 @@ WHEN = datetime(2026, 7, 15, 13, 5, 9)
 
 
 def _mgr_with_checkout():
-    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 1500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.5)  # 500 samples = 0.5 s

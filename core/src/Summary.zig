@@ -89,7 +89,7 @@ pub fn poison(self: *Summary) void {
 /// this one if the scratch-array bound ever changed.
 pub const max_bins: usize = 4096;
 
-/// Mirror of buffer.py _update_summary_locked. `interleaved` is the
+/// Folds one written chunk into the frozen slots. `interleaved` is the
 /// PRE-gain input; gain is re-applied here (a block is ~1k frames — the
 /// extra multiply is nothing, and it keeps write()'s fast path free of
 /// a second pass). Runs on the audio thread: no locks, no allocation.
@@ -162,9 +162,8 @@ fn seqRead(gen: *const std.atomic.Value(u64), ctx: anytype) void {
 /// bin_span_frames = 0 → derived from window (n_samples / n_bins).
 /// Slots whose generation tag falls inside [abs_start, abs_start+n)
 /// scatter-add ss and count into their bin; out = sqrt(ss/count).
-/// Mirror of buffer.py get_summary_bins (buffer.py:421); n_avail clamps
-/// against `capacity_frames` (the RING's readable window), matching
-/// Python's clamp to `buffer_size` exactly.
+/// Aggregates frozen slots into display bins; n_avail clamps against
+/// `capacity_frames` (the ring's readable window).
 ///
 /// THREADING: called from a control/UI thread (Task 6 exposes this as
 /// `fb_ring_summary_bins`, polled at ~30 Hz), reading `Summary` fields
