@@ -646,6 +646,32 @@ def test_adoption_survives_add_slot_refusing_a_foreign_rate(tmp_path, monkeypatc
     st2.shutdown()
 
 
+def test_adoption_survives_a_range_corrupt_manifest_and_still_adopts_others(tmp_path):
+    """Review round 1, item 1: a parseable manifest with rate=0 reaches
+    add_slot -> NativeAudioCircularBuffer -> ValueError, which escapes a
+    narrow `except RuntimeError`. No on-disk artefact may abort a launch:
+    adopt_scratch must skip it (leaving its files in place) and keep
+    adopting everything else."""
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.5)
+    _written(st, co)
+    st.shutdown()
+
+    (tmp_path / "badrate.wav").write_bytes(b"\x00" * 64)  # just needs to exist
+    write_manifest(tmp_path, Manifest(id="badrate", slot="Ghost", rate=0, channels=1, abs_start=0, abs_end=1,
+                                      created_at=5.0, parent=None, start_frame=0, n_frames=1, trim_in=0, trim_out=0,
+                                      state="pending", partial=False, bins=None))
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)  # must not raise
+    ids = [c.id for c in st2.slots[0].checkout_manager.list()]
+    assert ids == [co.id]  # the real checkout still adopted
+    assert len(st2.slots) == 1  # no slot was left half-built for the bad manifest
+    assert (tmp_path / "badrate.json").exists() and (tmp_path / "badrate.wav").exists()  # left in place
+    st2.shutdown()
+
+
 def test_adoption_takes_a_part_file_as_partial_and_skips_junk(tmp_path):
     from flashback_sampler.core.manifest import Manifest, write_manifest
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
