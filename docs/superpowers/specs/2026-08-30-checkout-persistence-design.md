@@ -52,7 +52,8 @@ Zig test count must rise per PR, every new file re-exported in
 | Writer | A Zig writer thread (`Scratch.zig`), one per process, intrusive FIFO of `*Checkout` jobs, `std.Io.Condition` wake, zero CPU idle. | Owner ruling 2026-08-30: no Python thread, no doubled buffer, lowest resource cost even at more surface. |
 | RAM copy | Taken from the ring at create by `Ring.read` into a Zig allocation. The writer streams from it. | The ring can lap before a lazy write lands; the copy is the guarantee. Same copy Python made today, now Zig-owned. Direct ring→disk was rejected for the lap risk. |
 | Cache | Global byte budget, LRU, in `Scratch.zig`. Pinned: the selected checkout (Python says which) and any checkout whose write is not `written`. Budget 0 = drop after write. | Counts are meaningless across rates (5 s at 48 kHz vs 15 min at 192 kHz). One cache across slots protects total RAM. |
-| Cache budget default | Set by the PR h measurement (reload + play latency of the largest clip at 192 kHz from the scratch disk), recorded on #53. | Ruling 3: numbers from measurement. |
+| Cache budget default | Set by the PR h measurement (select→playable time of the largest clip at 192 kHz from the scratch disk), recorded on #53. | Ruling 3: numbers from measurement. |
+| Preload on select | Selecting a clip pins it and enqueues an async `load` job on the writer thread (same queue, second job kind). `bind` from file remains only as the fallback when PLAY lands before the preload finished. | A from-file read inside `bind` runs on the UI thread; the preload keeps that read off the UI thread in the normal path. |
 | Scratch dir | `platformdirs.user_cache_dir("flashback-sampler", appauthor=False)/scratch`; Preferences override (`scratch_dir`). | App-owned temp, separate from the user-facing exports pool. A second SSD is one click away. |
 | Adoption | At launch every manifest in the scratch dir is adopted: into a slot with matching rate and channels, else into a new unarmed slot named from the manifest. A `.part` file is adopted with the frames it holds, flagged `partial`. | The crash case is the point. Quit and crash take the same path: one mechanism. |
 | Scratch lifetime | Files survive quit and crash. Discard deletes the manifest at once and the WAV when its refcount reaches zero. Slot removal discards the slot's checkouts. | "The app cleans it" (ruling 1) means discard, not quit. |
@@ -94,6 +95,7 @@ const Checkout = @This();
     rate: u32,
     channels: u16,
     write_state: std.atomic.Value(WriteState),
+    job: enum(u8) { none, write, load },   // what the queue link means while queued
     pinned: std.atomic.Value(bool),
     // Scratch bookkeeping: intrusive links, last-use tick.
     queue_next: ?*Checkout, lru_prev: ?*Checkout, lru_next: ?*Checkout,
@@ -241,7 +243,8 @@ pub const Scratch = struct {
     thread: ?std.Thread, stop_flag: std.atomic.Value(bool),
     pub fn start(self: *Scratch) !void;   // spawn; same control-thread ownership as Capture
     pub fn stop(self: *Scratch) void;     // stop_flag, signal, join; the loop drains the queue first
-    pub fn submit(self: *Scratch, co: *Checkout) void;   // lock, append, signal
+    pub fn submit(self: *Scratch, co: *Checkout, job: Job) void;   // lock, set co.job, append, signal
+    pub fn preload(self: *Scratch, co: *Checkout) void;  // pin + submit(.load) when not resident
     pub fn touch(self: *Scratch, co: *Checkout) void;    // move to LRU head; evict tail while over budget
     pub fn setBudget(self: *Scratch, bytes: u64) void;
     pub fn pin(self: *Scratch, co: *Checkout, on: bool) void;
@@ -250,10 +253,13 @@ pub const Scratch = struct {
 ```
 
 - Writer loop: lock; while queue empty and not stopping →
-  `cond.waitUncancelable(io, &mutex)`; pop head; unlock; `write_state =
-  writing`; `wav.writeFile(path + ".part", frames, …)`; on success
-  `Dir.rename` to `path`, `write_state = written`; on error
-  `write_state = failed` (the checkout stays pinned by state). Loop.
+  `cond.waitUncancelable(io, &mutex)`; pop head; unlock; dispatch on
+  `co.job`. `.write`: `write_state = writing`; `wav.writeFile(path +
+  ".part", frames, …)`; on success `Dir.rename` to `path`,
+  `write_state = written`; on error `write_state = failed` (the
+  checkout stays pinned by state). `.load`: `co.load()` (a fresh
+  allocation + `readFrames`), then `touch`. A `load` for a checkout
+  that became resident meanwhile is a no-op. Loop.
   `stop()` sets the flag and signals; the loop finishes the queue
   before exiting, so quitting mid-write never leaves a `.part` behind
   unless the process dies.
@@ -279,7 +285,9 @@ The handshake with `fill()` and the `reopen` logic are unchanged. The
 `frames` arm is today's body (`dupe`). The `file` arm allocates
 `n * channels` and calls `wav.readFrames` into it. `fb_playback_bind`
 keeps its signature (wraps `.frames`); `fb_playback_bind_checkout(pb,
-co)` passes `co.source()` and touches the cache.
+co)` passes `co.source()` and touches the cache; when a `load` job for
+`co` is still queued or running it waits for it under the mutex/cond
+rather than reading the file a second time.
 
 ### ABI
 
@@ -295,7 +303,7 @@ FbCheckout *fb_checkout_slice(FbScratch *, const FbCheckout *parent, uint64_t st
 FbCheckout *fb_checkout_open(FbScratch *, const char *path, uint64_t start, uint64_t n, FbStatus *status);   // adoption
 void        fb_checkout_info(const FbCheckout *, FbCheckoutInfo *out);
 FbStatus    fb_checkout_peak_bins(FbScratch *, FbCheckout *, size_t n_bins, FbPeakBin *out);
-void        fb_checkout_pin(FbScratch *, FbCheckout *, uint8_t on);
+void        fb_checkout_pin(FbScratch *, FbCheckout *, uint8_t on);       /* on = pin + preload */
 FbStatus    fb_checkout_export(FbScratch *, FbCheckout *, const char *dst, uint64_t start, uint64_t n, FbSubtype, const FbMarkers *);   // PR h passes NULL markers
 void        fb_checkout_destroy(FbScratch *, FbCheckout *);
 FbStatus    fb_playback_bind_checkout(FbPlayback *, FbScratch *, FbCheckout *);
@@ -347,13 +355,27 @@ that uses audio calls `Scratch.touch`.
 
 ### Measurement task (ruling 3)
 
+What is measured: **select→playable** — the wall time from
+`fb_checkout_pin(on)` on an evicted clip to `frames != null`, i.e. the
+disk read of the scratch file into the Zig copy on the writer thread.
+This is not audio-engine latency: the render thread does not run until
+`bind` completes, so no xrun or glitch is possible; the cost is a wait
+before PLAY can start (and, only in the fallback path, a frozen UI).
+It is recorded, not asserted; a timing test would be `perf`-marked and
+outside the gates.
+
 On the box, before the budget default is committed: create the
 largest clip the ring allows at 192 kHz stereo (900 s = 1,382 MB),
-wait for `written`, evict, then time (a) `load` and (b) `bind` from
-file to first audio; repeat at 48 kHz. Record on #53. Set
-`DEFAULT_CHECKOUT_CACHE_MB` so a re-selected 3 min clip at 48 kHz
-stereo binds inside 100 ms (the owner may restate both numbers at
-measurement time). If from-file bind is within tolerance at
+wait for `written`, evict, then time (a) the preload and (b) the
+fallback `bind` from file; repeat with a 3 min clip at 48 kHz stereo
+(69 MB). Record both on #53 with the scratch disk named.
+
+The number decides the policy shape: if the 3 min / 48 kHz preload is
+under the owner's "feels instant" bound (proposed 100 ms; the owner
+sets it at measurement time), `DEFAULT_CHECKOUT_CACHE_MB = 0` and RAM
+holds only pinned and in-flight clips. Otherwise the default budget is
+the smallest value that keeps the last two selected clips of that
+size resident. If from-file bind is within tolerance at
 every size, the default is 0 and RAM holds only in-flight clips.
 
 ### Tests (PR h)
