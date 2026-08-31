@@ -31,10 +31,7 @@ from flashback_sampler.core.buffer import RingDerivedOps, _peak_bins_impl
 
 _OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG, _OUT_OF_MEMORY = range(6)
 # Public: mirrors flashback_core.h's FbSubtype and checkout.py's
-# CheckoutSubtype strings. checkout.py's save() routes a WAV write here
-# only when the requested subtype is a key of this dict AND the native
-# library is loaded; any subtype absent from this dict (or a non-WAV
-# format, or no native library) falls back to soundfile.
+# CheckoutSubtype strings.
 SUBTYPE_INTS = {"FLOAT": 0, "PCM_24": 1, "PCM_16": 2}
 
 _lib: C.CDLL | None = None

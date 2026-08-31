@@ -3,7 +3,7 @@
 [![test](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml)
 [![release](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml)
 
-A standalone desktop applet that continuously captures the past several minutes of system audio into a circular ring buffer. Pull a slice of it out as a "checkout" — like lifting a record off a turntable while another keeps spinning — preview it, trim it, and decide whether to save it to WAV/FLAC or discard it.
+A standalone desktop applet that continuously captures the past several minutes of system audio into a circular ring buffer. Pull a slice of it out as a "checkout" — like lifting a record off a turntable while another keeps spinning — preview it, trim it, and decide whether to save it as a 32-bit-float WAV or discard it.
 
 The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt imports) so it can later be embedded in a DAW (VST) or OBS dock; the UI is PySide6 native rather than a webview for the same reason.
 
@@ -36,7 +36,7 @@ The window is a pair of turntables. The **left deck** is the live ring buffer (y
 3. **Set the slice.** The duration presets (0:15 → 15:00) and the buffer **− / +** controls set how much audio a checkout grabs; **◀ / ▶** scrub the anchor back through the buffer. **FREEZE** pins the buffer display so you can line up a grab while capture keeps rolling.
 4. **OUT →** checks out the current selection as a frozen in-RAM clip onto the right deck. The ring buffer keeps recording throughout.
 5. **Preview & trim.** Select a clip, then **PLAY** (or the spacebar) auditions it. The clip **− / + / ◀ / ▶** controls trim the in/out points; **LOOP** repeats the trimmed range.
-6. **SAVE** opens a file dialog (WAV or FLAC); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
+6. **SAVE** opens a file dialog (WAV, 32-bit float by default); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
 7. **Drag it into your DAW.** Grab the inside of a selection band on either deck and drag it out of the window — the slice lands as a 32-bit-float WAV on whatever accepts file drops (an Ableton track, Explorer, a sampler). Ctrl+drag on the clip deck exports the whole untrimmed clip. Exports live in the pool folder (Preferences → Export; default `Documents/flashback-sampler/exports`) and the dragged clip stays on the right deck as your sample bank — never move pool files a DAW project still references.
 
 > Set your **preview output to a different device than your capture source** (e.g. headphones while capturing speakers) so the preview doesn't feed back into the ring.
@@ -49,7 +49,7 @@ Checkouts survive after you stop capture — you can pull a clip from buffered a
 flashback_sampler/
   core/                  # pure Python + numpy — no Qt / soundcard / sounddevice
     buffer.py            # AudioCircularBuffer — seqlock non-blocking reads
-    checkout.py          # Checkout + CheckoutManager (+ WAV/FLAC save)
+    checkout.py          # Checkout + CheckoutManager (+ WAV save through `fb_wav_write`)
     scrub_player.py      # ScrubPlayer — callback-driven preview engine
     native.py            # ctypes bindings for the Zig core
     native_capture.py    # NativeCaptureSource (Zig/WASAPI — loopback + mic / line-in) + NativeMixedSource (Zig mixer handle)

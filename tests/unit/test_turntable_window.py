@@ -620,6 +620,27 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         win.close()
 
 
+def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
+    from flashback_sampler.app import turntable_window as tw
+    win = tw.TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.active_slot.checkout_manager.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        seen = {}
+
+        def fake_dialog(parent, title, default_path, filter_spec):
+            seen.update(default_path=default_path, filter_spec=filter_spec)
+            return "", ""
+
+        monkeypatch.setattr(tw.QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
+        win._save_current_clip()
+        assert seen["filter_spec"] == "WAV audio (*.wav)"
+        assert seen["default_path"].endswith(".wav")
+    finally:
+        win.close()
+
+
 def test_buffer_drag_out_persists_saved_checkout_on_accept(qapp, state, tmp_path, monkeypatch):
     win = TurntableWindow(state)
     try:
