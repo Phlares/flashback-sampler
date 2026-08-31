@@ -16,9 +16,9 @@ A checkout survives an app crash and does not exhaust RAM. After PR i:
   global byte budget with LRU eviction. Python never holds audio.
 - A slice is a reference `(parent file, start_frame, n_frames)`; it
   is materialised only on drag-out or save.
-- A drag-out exports the parent span around the slice (up to a size
-  cap) with WAV markers at the slice, so the DAW user can pull more of
-  the clip than they sliced.
+- A drag-out exports the whole slice plus up to a budget of parent
+  audio before and after it, with WAV markers at the slice, so the DAW
+  user can pull more of the clip than they sliced.
 - The scratch dir is adopted whole at launch: files from a crash or a
   previous session come back as checkouts.
 
@@ -61,7 +61,7 @@ Zig test count must rise per PR, every new file re-exported in
 | Playback source | `Playback.bind(ClipSource)` with `union(enum){ frames, file_range }`. From RAM it dupes as today; from a file it reads straight into the clip buffer. | One bind, one copy either way. |
 | Export | `wav.copyRange(src, dst, start, n, subtype, markers)` file→file streaming. Save, drag and slice export all go through it once the scratch is `written`; before that, `wav.writeFile` from the RAM copy. | Reading the scratch file needs no reload of an evicted clip. |
 | Slices | Trim stays the gesture. Dragging or saving a trimmed range mints a slice checkout in `saved` state (ruling 5) before the export. | The user can come back for more of it, in the app and in the DAW. |
-| Handles | Export span = the slice expanded symmetrically inside the parent up to `drag_max_mb` (default 200 MB). Markers (`cue ` + `smpl`) mark the slice. | One formula: cap ∞ = whole parent, cap = slice size = slice only. Owner ruling: "whole parent up to size cap; the markers recover the audio". |
+| Handles | Export = the whole slice PLUS up to `drag_handle_mb` (default 200 MB) of parent audio, split evenly before and after, clamped to the parent. The slice is never truncated. Markers (`cue ` + `smpl`) mark the slice. A user-tunable preference (on by default; 0 = slice only for constrained systems — the handles also size the buffer-deck root's RAM copy). | One formula: budget ∞ = whole parent, budget 0 = slice only. Owner ruling 2026-08-31: the cap bounds the extra audio, not the dragged clip. |
 | DAW clip bounds | Markers are portable and harmless; no DAW documented turns them into clip start/end. PR i Task 0 spikes an Ableton `.alc` sidecar on the box; a preference ships only if the spike passes. | Only the box can answer it (arc lesson: measure, never assume). Other DAWs get a documented table, every row marked untested. |
 | Count cap | `max_active_checkouts = 16` per slot stays. `max_total_ram_mb` per slot and the window's `_evict_oldest_saved_checkout` are deleted. | The deck draws one ring per checkout; the byte cache replaces the MB cap. |
 | PR split | g `feat/zig-wav-read` (engine only), h `feat/zig-scratch` (the model change), i `feat/slices-handles`. Three PRs → `dev`. | g is testable without the app; h is the big seam; i needs the spike. |
@@ -422,18 +422,21 @@ documented as untested, never assumed.
 ### Export span
 
 ```
-half   = (cap_frames - n_slice) / 2          cap_frames = drag_max_mb * 2^20 / (channels * bytes_per_sample)
+half   = handle_frames / 2          handle_frames = drag_handle_mb * 2^20 / (channels * bytes_per_sample)
 lo     = max(0, slice_start - half)
 hi     = min(parent_frames, slice_end + half)
 ```
+
+The slice is always exported whole; the budget is the EXTRA audio. A
+clamp at one edge does not move the other.
 
 Markers: `cue ` point 1 at `slice_start - lo`, point 2 at
 `slice_end - lo`; `smpl` loop 1 `[slice_start - lo, slice_end - lo -
 1]`; `LIST/adtl` labels "slice start" / "slice end". `Markers` is a
 small struct `wav.copyRange` serialises after the `data` chunk; the
-RIFF size covers it. `drag_max_mb` default 200 (2.2 min at 192 kHz
-stereo float32, 17 min at 48 kHz). Cap below the slice size is clamped
-to the slice.
+RIFF size covers it. `drag_handle_mb` default 200 (2.2 min of extra audio at 192 kHz
+stereo float32, 17 min at 48 kHz), i.e. up to 1.1 min before and after
+at 192 kHz.
 
 ### Chunk layouts (RIFF/WAVE, verified against the spec in the plan)
 
@@ -461,7 +464,7 @@ to the slice.
 
 ### Preferences
 
-`drag_max_mb` (spin box, 0 = slice only). `drag_alc_sidecar` only if
+`drag_handle_mb` (spin box, 0 = slice only; on by default at 200, labelled as a tunable for constrained systems). `drag_alc_sidecar` only if
 the spike passes.
 
 ### Tests (PR i)
@@ -471,8 +474,9 @@ the spike passes.
   `wav.open` on that file still reports the right `frames`
   (unknown-chunk skip covers it); `slice` shares the parent's path
   and never writes.
-- Python: export span formula table (cap ∞, cap = slice, cap
-  smaller than slice, slice at the parent's edge — asymmetric clamp),
+- Python: export span formula table (budget ∞, budget 0, budget
+  smaller than the slice still adds handles, slice at the parent's
+  edge — asymmetric clamp),
   a slice mints a `saved` checkout with `parent_id`, parent discard
   keeps the file, the last reference deletes it, buffer drag pulls
   `selection ± half`.

@@ -51,7 +51,7 @@ All constraints of `docs/superpowers/plans/2026-08-30-zig-core-phase2-d-f.md` "G
 | `flashback_sampler/core/checkout.py` | `Checkout` over a handle; `CheckoutManager` with refcounts, manifests, `adopt_manifest`, `slice` | h, i |
 | `flashback_sampler/core/scrub_player.py` | `bind_checkout(handle, scratch, start, n)` | h |
 | `flashback_sampler/core/drag_export.py` | `export_span`, `render_drag_file` over spans + markers | i |
-| `flashback_sampler/app/config.py` | `scratch_dir`, `checkout_cache_mb`, `drag_max_mb` prefs | h, i |
+| `flashback_sampler/app/config.py` | `scratch_dir`, `checkout_cache_mb`, `drag_handle_mb` prefs | h, i |
 | `flashback_sampler/app/state.py` | owns `NativeScratch`; adoption; RAM accounting | h |
 | `flashback_sampler/app/preferences_dialog.py` | scratch dir row; drag cap row | h, i |
 | `flashback_sampler/app/turntable_window.py` | bins from the handle, pin on select, bind_checkout, slice on drag, buffer drag ± half | h, i |
@@ -71,7 +71,7 @@ All constraints of `docs/superpowers/plans/2026-08-30-zig-core-phase2-d-f.md` "G
 | P6 | `Scratch.write_fn` is a function-pointer field defaulting to the real writer; tests inject a slow or failing writer. | A `comptime` parameter would make `Scratch` generic and the ABI handle type awkward. One field, one seam. |
 | P7 | LRU is an intrusive doubly-linked list with move-to-head; no `last_use` tick. | The spec's `last_use` field is redundant with the list order. |
 | P8 | Slice checkouts are created from the parent's **handle** (`fb_checkout_slice`) and the manager holds one refcount per file path. Zig never deletes files. | Python owns lifetime decisions (a Python exception must not leak a file), Zig owns bytes. |
-| P9 | The export span formula (`export_span`) is a pure Python function. | It chooses *what* to export (policy), like `drag_filename`; the copy is Zig. |
+| P9 | The export span formula (`export_span`) is a pure Python function. The budget is EXTRA audio around the slice; the slice is never truncated (owner ruling 2026-08-31). | It chooses *what* to export (policy), like `drag_filename`; the copy is Zig. |
 | P10 | `Checkout.peakBins` from RAM uses `peaks.peakBinsFlat`; from the file, `peaks.peakBinsFile` with the checkout's `(start, n)`. Both give identical bins for identical audio (Task g4's parity test). | One reducer, two sources. |
 | P11 | Manifest bins are stored as flat lists `[n_bins * 2 * channels]` in the numpy layout `(n_bins, 2, channels)`. | The window's `_clip_bins_cache` already holds that layout. |
 | P12 | PR h's window changes replace `co.audio.shape[0]` with `co.n_frames` at every site (`turntable_window.py:606, 817, 954, 970, 985, 1703, 1710`). | Mechanical; listed so none is missed. |
@@ -4853,7 +4853,7 @@ git commit -m "chore: select→playable measurement + DEFAULT_CHECKOUT_CACHE_MB 
 
 | Gesture | Checkout minted | File exported | Markers |
 |---|---|---|---|
-| Clip deck, trimmed band dragged | a **slice** `(parent file, trim_in, n)`, state `saved` | parent span around the slice, up to `drag_max_mb` | at the slice |
+| Clip deck, trimmed band dragged | a **slice** `(parent file, trim_in, n)`, state `saved` | the whole slice plus up to `drag_handle_mb` of parent audio before/after | at the slice |
 | Clip deck, full clip dragged | none (parent marked `saved` on accept, as today) | the whole checkout | none |
 | Buffer deck, selection dragged | a **root** = selection ± half (clamped to the ring), trim = selection, `saved` on accept | the whole root | at the trim |
 
@@ -5157,11 +5157,11 @@ if __name__ == "__main__":
 **Files:**
 - Modify: `flashback_sampler/core/checkout.py` (`slice`)
 - Modify: `flashback_sampler/core/drag_export.py`
-- Modify: `flashback_sampler/app/config.py` (`drag_max_mb`)
+- Modify: `flashback_sampler/app/config.py` (`drag_handle_mb`)
 - Modify: `tests/unit/test_checkout.py`, `tests/unit/test_drag_export.py`, `tests/unit/test_config.py`
 
 **Interfaces:**
-- Produces: `CheckoutManager.slice(parent_id, start, n) -> Checkout` (state `saved`, `parent_id`, bins from the handle, manifest, refcount +1; waits for the parent's file, P13); `drag_export.export_span(parent_frames, slice_start, slice_end, channels, bytes_per_sample, cap_mb) -> tuple[int, int]`; `drag_export.BYTES_PER_SAMPLE = {"FLOAT": 4, "PCM_24": 3, "PCM_16": 2}`; `drag_export.DragRender(path: Path, checkout_id: str, minted: bool)`; `drag_export.render_slice_drag(manager, checkout_id, pool_dir, source_name, *, bit_depth="FLOAT", cap_mb=0.0, now=None) -> DragRender`; `drag_export.render_root_drag(manager, checkout_id, pool_dir, source_name, *, bit_depth="FLOAT", markers_at_trim=False, now=None) -> DragRender`. `render_drag_file` is deleted (its two callers move to the new pair). `config.DEFAULT_DRAG_MAX_MB = 200.0`, `load_drag_max_mb()`, `save_drag_max_mb(mb)`.
+- Produces: `CheckoutManager.slice(parent_id, start, n) -> Checkout` (state `saved`, `parent_id`, bins from the handle, manifest, refcount +1; waits for the parent's file, P13); `drag_export.export_span(parent_frames, slice_start, slice_end, channels, bytes_per_sample, cap_mb) -> tuple[int, int]`; `drag_export.BYTES_PER_SAMPLE = {"FLOAT": 4, "PCM_24": 3, "PCM_16": 2}`; `drag_export.DragRender(path: Path, checkout_id: str, minted: bool)`; `drag_export.render_slice_drag(manager, checkout_id, pool_dir, source_name, *, bit_depth="FLOAT", cap_mb=0.0, now=None) -> DragRender`; `drag_export.render_root_drag(manager, checkout_id, pool_dir, source_name, *, bit_depth="FLOAT", markers_at_trim=False, now=None) -> DragRender`. `render_drag_file` is deleted (its two callers move to the new pair). `config.DEFAULT_DRAG_HANDLE_MB = 200.0`, `load_drag_handle_mb()`, `save_drag_handle_mb(mb)`.
 
 - [ ] **Step 1: Failing tests**
 
@@ -5205,15 +5205,17 @@ from flashback_sampler.core.drag_export import (
 )
 
 
-@pytest.mark.parametrize("parent,s,e,cap_mb,expect", [
-    (1000, 400, 500, 0.0, (400, 500)),          # cap 0 = slice only
-    (1000, 400, 500, 1e9, (0, 1000)),           # cap ∞ = whole parent
-    (1000, 400, 500, 300 * 4 / 2**20, (300, 600)),   # 300 frames mono float: half = 100 each side
-    (1000, 50, 150, 300 * 4 / 2**20, (0, 250)),      # clamped at the start; the unused half is not moved
-    (1000, 400, 500, 50 * 4 / 2**20, (400, 500)),    # cap below the slice = slice
+@pytest.mark.parametrize("parent,s,e,handle_mb,expect", [
+    (1000, 400, 500, 0.0, (400, 500)),          # budget 0 = slice only
+    (1000, 400, 500, 1e9, (0, 1000)),           # budget ∞ = whole parent
+    (1000, 400, 500, 300 * 4 / 2**20, (250, 650)),   # 300 extra mono float frames: 150 each side
+    (1000, 50, 150, 300 * 4 / 2**20, (0, 300)),      # clamped at the start; the unused half is not moved
+    (1000, 900, 950, 300 * 4 / 2**20, (750, 1000)),  # clamped at the end
+    (1000, 400, 500, 50 * 4 / 2**20, (375, 525)),    # a budget smaller than the slice still adds handles; the slice is whole
+    (1000, 0, 1000, 10 * 4 / 2**20, (0, 1000)),      # a slice that IS the parent is never truncated
 ])
-def test_export_span(parent, s, e, cap_mb, expect):
-    assert export_span(parent, s, e, 1, 4, cap_mb) == expect
+def test_export_span(parent, s, e, handle_mb, expect):
+    assert export_span(parent, s, e, 1, 4, handle_mb) == expect
 
 
 def test_render_root_drag_exports_the_whole_clip_with_markers_at_the_trim(scratch, tmp_path):
@@ -5238,14 +5240,14 @@ def test_render_root_drag_without_markers_has_no_cue(scratch, tmp_path):
 def test_render_slice_drag_mints_a_saved_slice_and_exports_the_span(scratch, tmp_path):
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
     mgr.set_trim(co.id, 200, 300)
-    cap = 200 * 4 / 2**20  # 200 mono float frames: half = 50 each side
-    r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", cap_mb=cap, now=WHEN)
+    handles = 100 * 4 / 2**20  # 100 extra mono float frames: 50 each side
+    r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", handle_mb=handles, now=WHEN)
     assert r.minted and r.checkout_id != co.id
     s = mgr.get(r.checkout_id)
     assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (co.id, 200, 100, "saved")
     assert r.path.name == "deck_a_20260715-130509_0.1s.wav"  # named for the slice, not the span
     audio, info = read_wav(r.path)
-    assert info.frames == 200 and audio[0, 0] == pytest.approx(1150.0)  # span 150..350
+    assert info.frames == 200 and audio[0, 0] == pytest.approx(1150.0)  # span 150..350 = slice 200..300 + 50 each side
     assert b"cue " in r.path.read_bytes()
 
 
@@ -5266,14 +5268,14 @@ def test_render_creates_pool_dir(scratch, tmp_path):
 Append to `tests/unit/test_config.py`:
 
 ```python
-def test_drag_max_mb_defaults_200_and_floors_at_zero(tmp_path):
+def test_drag_handle_mb_defaults_200_and_floors_at_zero(tmp_path):
     from flashback_sampler.app import config
     p = tmp_path / "c.json"
-    assert config.load_drag_max_mb(p) == 200.0
-    config.save_drag_max_mb(0, p)
-    assert config.load_drag_max_mb(p) == 0.0
-    config.save_drag_max_mb(-1, p)
-    assert config.load_drag_max_mb(p) == 0.0
+    assert config.load_drag_handle_mb(p) == 200.0  # on by default (best out-of-the-box UX); a tunable for constrained systems
+    config.save_drag_handle_mb(0, p)
+    assert config.load_drag_handle_mb(p) == 0.0
+    config.save_drag_handle_mb(-1, p)
+    assert config.load_drag_handle_mb(p) == 0.0
 ```
 
 - [ ] **Step 2: Run to see them fail** — `AttributeError: slice`, `ImportError: export_span`.
@@ -5331,18 +5333,15 @@ class DragRender:
     minted: bool      # True when the render created a slice checkout
 
 
-def export_span(parent_frames: int, slice_start: int, slice_end: int, channels: int, bytes_per_sample: int, cap_mb: float) -> tuple[int, int]:
-    """The parent span to export around a slice: the slice grown
-    symmetrically until the file would reach `cap_mb`, clamped to the
-    parent. cap 0 = the slice alone; cap ∞ = the whole parent. A clamp
-    at one edge does not move the other (the file just gets smaller)."""
-    n_slice = slice_end - slice_start
-    if cap_mb <= 0:
+def export_span(parent_frames: int, slice_start: int, slice_end: int, channels: int, bytes_per_sample: int, handle_mb: float) -> tuple[int, int]:
+    """The parent span to export around a slice: the WHOLE slice plus up
+    to `handle_mb` of extra parent audio, half before and half after,
+    clamped to the parent. The slice is never truncated. 0 = the slice
+    alone; ∞ = the whole parent. A clamp at one edge does not move the
+    other (the file just gets smaller)."""
+    if handle_mb <= 0:
         return slice_start, slice_end
-    cap_frames = int(cap_mb * 2**20) // (channels * bytes_per_sample)
-    if cap_frames <= n_slice:
-        return slice_start, slice_end
-    half = (cap_frames - n_slice) // 2
+    half = (int(handle_mb * 2**20) // (channels * bytes_per_sample)) // 2
     return max(0, slice_start - half), min(parent_frames, slice_end + half)
 
 
@@ -5365,28 +5364,29 @@ def render_root_drag(manager, checkout_id: str, pool_dir, source_name: str, *, b
     return DragRender(target, checkout_id, False)
 
 
-def render_slice_drag(manager, checkout_id: str, pool_dir, source_name: str, *, bit_depth: CheckoutSubtype = "FLOAT", cap_mb: float = 0.0, now: datetime | None = None) -> DragRender:
+def render_slice_drag(manager, checkout_id: str, pool_dir, source_name: str, *, bit_depth: CheckoutSubtype = "FLOAT", handle_mb: float = 0.0, now: datetime | None = None) -> DragRender:
     """The clip-deck drag of a trimmed band: mint a saved slice, export
-    the parent span around it (up to cap_mb) with markers at the slice.
-    An untrimmed clip has no slice to mint: the whole clip goes."""
+    the whole slice plus up to handle_mb of parent audio around it, with
+    markers at the slice. An untrimmed clip has no slice to mint: the
+    whole clip goes."""
     co = manager.get(checkout_id)
     if not co.has_trim():
         return render_root_drag(manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, now=now)
     start, n = co.trim_range()
     s = manager.slice(checkout_id, start, n)
-    lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], cap_mb)
+    lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
     target = _target(pool_dir, source_name, n / co.sample_rate, now)
     manager.export_range(checkout_id, target, lo, hi - lo, bit_depth, markers=(start - lo, start + n - lo))
     return DragRender(target, s.id, True)
 ```
 
-`config.py`: `DRAG_MAX_MB_KEY = "drag_max_mb"`, `DEFAULT_DRAG_MAX_MB = 200.0`, `load_drag_max_mb(path=None) -> float` (floor 0, default on garbage, same shape as `load_checkout_cache_mb`), `save_drag_max_mb(mb, path=None)`.
+`config.py`: `DRAG_HANDLE_MB_KEY = "drag_handle_mb"`, `DEFAULT_DRAG_HANDLE_MB = 200.0`, `load_drag_handle_mb(path=None) -> float` (floor 0, default on garbage, same shape as `load_checkout_cache_mb`), `save_drag_handle_mb(mb, path=None)`.
 
 - [ ] **Step 4: Run** — the three files green; then `grep -rn "render_drag_file" flashback_sampler tests` → only `turntable_window.py` (fixed in Task i4).
 
-- [ ] **Step 5: Mutation checks** — (a) in `export_span` drop the `min(parent_frames, …)` clamp → the "clamped at the start" case still passes (clamp is at 0) … use the (1000, 900, 950, cap 300 frames) case: add it to the parametrize with expect `(800, 1000)`; without the clamp it reads `(800, 1050)` → reddens. (b) in `render_slice_drag` pass markers `(start, start + n)` un-rebased → the slice-drag test's raw-bytes assertion cannot see it; add `assert struct.unpack_from("<I", raw, raw.index(b"cue ") + 8 + 4 + 20)[0] == 50` (slice start − lo = 200 − 150). Reddens under the mutation. Revert.
+- [ ] **Step 5: Mutation checks** — (a) in `export_span` drop the `min(parent_frames, …)` clamp → the "clamped at the end" case reddens (`(750, 1100)`). (b) in `render_slice_drag` pass markers `(start, start + n)` un-rebased → the slice-drag test's raw-bytes assertion cannot see it; add `assert struct.unpack_from("<I", raw, raw.index(b"cue ") + 8 + 4 + 20)[0] == 50` (slice start − lo = 200 − 150). Reddens under the mutation. Revert.
 
-- [ ] **Step 6:** commit `feat: slices as references (CheckoutManager.slice), export_span, root/slice drag renderers, drag_max_mb`.
+- [ ] **Step 6:** commit `feat: slices as references (CheckoutManager.slice), export_span, root/slice drag renderers, drag_handle_mb`.
 
 ### Task i4: Window — slice drag, buffer drag ± half, preference row
 
@@ -5407,7 +5407,7 @@ def test_clip_drag_of_a_trimmed_band_mints_a_slice_and_keeps_it_on_cancel_only_i
         win._refresh_clip_side(auto_select_newest=True)
         mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
         win._export_pool_dir = tmp_path
-        win._drag_max_mb = 0.0
+        win._drag_handle_mb = 0.0
         monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: False)
         win._on_clip_drag_out(0.25, 0.5)
         assert [c.id for c in mgr.list()] == [co.id]  # cancelled: the slice is gone
@@ -5428,15 +5428,15 @@ def test_buffer_drag_pulls_the_selection_plus_handles_and_marks_the_trim(qapp, s
         _write_one_second(state)
         sr = state.buffer.sample_rate
         win._export_pool_dir = tmp_path
-        win._drag_max_mb = (sr // 2) * state.channels * 4 / 2**20  # cap = 0.5 s of frames
+        win._drag_handle_mb = (sr // 2) * state.channels * 4 / 2**20  # handles = 0.5 s of frames in total
         monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
         win.buffer_panel.waveform.manualSelectionChanged.emit(0.4, 0.6)  # 0.2 s selected in the middle
         win._update_selection_display()
         win._on_buffer_drag_out(0.4, 0.6)
         co = state.checkout_manager.list()[0]
-        # root = selection ± 0.15 s (half of the 0.3 s of spare cap), trim = the selection
-        assert abs(co.n_frames - int(0.5 * sr)) <= 2
-        assert abs(co.trim_in_samples - int(0.15 * sr)) <= 2 and abs((co.trim_out_samples - co.trim_in_samples) - int(0.2 * sr)) <= 2
+        # root = selection ± 0.25 s (half the handle budget each side), trim = the selection
+        assert abs(co.n_frames - int(0.7 * sr)) <= 2
+        assert abs(co.trim_in_samples - int(0.25 * sr)) <= 2 and abs((co.trim_out_samples - co.trim_in_samples) - int(0.2 * sr)) <= 2
         assert co.state == "saved"
         raw = next(tmp_path.glob("*.wav")).read_bytes()
         assert b"cue " in raw
@@ -5444,13 +5444,13 @@ def test_buffer_drag_pulls_the_selection_plus_handles_and_marks_the_trim(qapp, s
         win.close()
 ```
 
-`tests/unit/test_preferences_dialog.py`: a `drag_max_mb` row test mirroring the export bit-depth test: `PreferencesDialog(..., drag_max_mb=200.0, on_drag_max_mb_changed=seen.append)`, `dlg.drag_cap_spin.setValue(50)`, `assert seen == [50.0]`.
+`tests/unit/test_preferences_dialog.py`: a `drag_handle_mb` row test mirroring the export bit-depth test: `PreferencesDialog(..., drag_handle_mb=200.0, on_drag_handle_mb_changed=seen.append)`, `dlg.drag_cap_spin.setValue(50)`, `assert seen == [50.0]`.
 
-- [ ] **Step 2: Run to see them fail** — `_drag_max_mb` missing; `render_drag_file` import error.
+- [ ] **Step 2: Run to see them fail** — `_drag_handle_mb` missing; `render_drag_file` import error.
 
 - [ ] **Step 3: Window edits**
 
-Imports: replace `render_drag_file` with `render_root_drag, render_slice_drag`; add `load_drag_max_mb, save_drag_max_mb` to the config import. In `__init__` next to `_export_bit_depth`: `self._drag_max_mb: float = load_drag_max_mb()`.
+Imports: replace `render_drag_file` with `render_root_drag, render_slice_drag`; add `load_drag_handle_mb, save_drag_handle_mb` to the config import. In `__init__` next to `_export_bit_depth`: `self._drag_handle_mb: float = load_drag_handle_mb()`.
 
 Replace `_render_for_drag`:
 
@@ -5462,7 +5462,7 @@ Replace `_render_for_drag`:
         try:
             if trimmed:
                 return render_slice_drag(slot.checkout_manager, co.id, self._export_pool_dir, slot.name,
-                                         bit_depth=self._export_bit_depth, cap_mb=self._drag_max_mb)
+                                         bit_depth=self._export_bit_depth, handle_mb=self._drag_handle_mb)
             return render_root_drag(slot.checkout_manager, co.id, self._export_pool_dir, slot.name,
                                     bit_depth=self._export_bit_depth, markers_at_trim=markers_at_trim)
         except Exception as e:
@@ -5484,23 +5484,23 @@ Replace `_render_for_drag`:
         total = buf.total_written
         oldest = max(0, total - buf.buffer_size)
         lo, hi = export_span(total - oldest, sel_start - oldest, sel_end - oldest, buf.channels,
-                             BYTES_PER_SAMPLE[self._export_bit_depth], self._drag_max_mb)
+                             BYTES_PER_SAMPLE[self._export_bit_depth], self._drag_handle_mb)
         lo, hi = lo + oldest, hi + oldest
 ```
 
 then the existing create loop uses `create_from_abs_range(lo, hi)`; after it succeeds: `slot.checkout_manager.set_trim(co.id, sel_start - lo, sel_end - lo)`; render with `self._render_for_drag(slot, co, trimmed=False, markers_at_trim=True)`; `_complete_drag(slot, r, self.buffer_panel.waveform, discard_on_cancel=True, auto_select_newest=True)`. Import `export_span, BYTES_PER_SAMPLE` from `drag_export`. Update the method's docstring: "the root pulls selection ± handles (Preferences → Drag-out handles); the selection becomes its trim, marked in the exported file".
 
-Preferences: `PreferencesDialog(drag_max_mb: float = 200.0, on_drag_max_mb_changed=None)`: under Export add `QLabel("Drag-out handles: export up to")`, `self.drag_cap_spin = QSpinBox()` range 0–100000, suffix " MB", value `int(drag_max_mb)`, `valueChanged` → `on_drag_max_mb_changed(float(v))`, hint "of the parent clip around a dragged slice, with markers at the slice. 0 = the slice only." Window: pass `drag_max_mb=self._drag_max_mb, on_drag_max_mb_changed=self._set_drag_max_mb` and
+Preferences: `PreferencesDialog(drag_handle_mb: float = 200.0, on_drag_handle_mb_changed=None)`: under Export add `QLabel("Drag-out handles (tunable): add up to")`, `self.drag_cap_spin = QSpinBox()` range 0–100000, suffix " MB", value `int(drag_handle_mb)`, `valueChanged` → `on_drag_handle_mb_changed(float(v))`, hint "of extra parent audio before and after a dragged slice, with markers at the slice, so the DAW can recover more than you sliced. The slice itself is always exported whole. 0 = slice only — use it on constrained systems: the handles also size the buffer-deck root's RAM copy." Window: pass `drag_handle_mb=self._drag_handle_mb, on_drag_handle_mb_changed=self._set_drag_handle_mb` and
 
 ```python
-    def _set_drag_max_mb(self, mb: float) -> None:
-        self._drag_max_mb = float(mb)
-        save_drag_max_mb(mb)
+    def _set_drag_handle_mb(self, mb: float) -> None:
+        self._drag_handle_mb = float(mb)
+        save_drag_handle_mb(mb)
 ```
 
 - [ ] **Step 4: Run the full suite** — green. Then the app smoke: trim a clip, drag the band into Explorer (file appears, deck shows the slice), drag from the buffer deck (one entry, trim = selection), cancel a drag (nothing left behind).
 
-- [ ] **Step 5:** commit `feat(app): trimmed clip drag mints a slice, buffer drag pulls handles, drag_max_mb preference`.
+- [ ] **Step 5:** commit `feat(app): trimmed clip drag mints a slice, buffer drag pulls handles, drag_handle_mb preference`.
 
 ### Task i5 (conditional — only if Task i2 answered Q4 and Q5 yes): `.alc` sidecar
 
