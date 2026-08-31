@@ -112,6 +112,10 @@ class FbPeakBin(C.Structure):
     _fields_ = [("min", C.c_float), ("max", C.c_float)]
 
 
+class FbWavInfo(C.Structure):
+    _fields_ = [("rate", C.c_uint32), ("channels", C.c_uint16), ("subtype", C.c_uint8), ("frames", C.c_uint64)]
+
+
 def _declare(lib: C.CDLL) -> None:
     """Argument/return types mirroring core/include/flashback_core.h,
     export by export. A mismatch here is silent memory corruption, not
@@ -166,6 +170,13 @@ def _declare(lib: C.CDLL) -> None:
 
     lib.fb_wav_write.argtypes = [C.c_char_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16, C.c_int]
     lib.fb_wav_write.restype = C.c_int
+
+    lib.fb_wav_info.argtypes = [C.c_char_p, C.POINTER(FbWavInfo)]
+    lib.fb_wav_info.restype = C.c_int
+    lib.fb_wav_read.argtypes = [C.c_char_p, C.c_uint64, C.c_size_t, f32p]
+    lib.fb_wav_read.restype = C.c_int
+    lib.fb_wav_peak_bins.argtypes = [C.c_char_p, C.c_uint64, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin)]
+    lib.fb_wav_peak_bins.restype = C.c_int
 
     lib.fb_devices_list.argtypes = [C.POINTER(FbDevice), C.c_size_t]
     lib.fb_devices_list.restype = C.c_size_t
@@ -252,9 +263,7 @@ def _frames2d(a: np.ndarray) -> np.ndarray:
 
 def wav_write(path, audio: np.ndarray, sample_rate: int, subtype: str) -> None:
     """Write `audio` [N, channels] float32 via the Zig encoder."""
-    lib = load()
-    if lib is None:
-        raise RuntimeError("flashback_core library not available")
+    lib = _require_lib()
     audio = _frames2d(audio)
     n_frames, channels = audio.shape
     status = lib.fb_wav_write(
@@ -265,19 +274,64 @@ def wav_write(path, audio: np.ndarray, sample_rate: int, subtype: str) -> None:
         raise RuntimeError(f"fb_wav_write failed with status {status}")
 
 
+def _wav_raise(status: int, path) -> None:
+    """One status → exception rule for the three readers."""
+    if status == _OK:
+        return
+    if status == _IO_ERROR:
+        raise FileNotFoundError(f"cannot open {path}")
+    if status == _INVALID_ARG:
+        raise ValueError(f"not a supported WAV file: {path}")
+    if status == _OUT_OF_RANGE:
+        raise ValueError(f"span runs past the end of {path}")
+    raise RuntimeError(f"wav reader failed with status {status} on {path}")
+
+
+def _require_lib() -> C.CDLL:
+    lib = load()
+    if lib is None:
+        raise RuntimeError("flashback_core library not available")
+    return lib
+
+
+def wav_info(path) -> FbWavInfo:
+    lib = _require_lib()
+    info = FbWavInfo()
+    _wav_raise(lib.fb_wav_info(str(path).encode("utf-8"), C.byref(info)), path)
+    return info
+
+
+def wav_read(path, start_frame: int, n_frames: int) -> np.ndarray:
+    """(n_frames, channels) float32 decoded by the Zig reader."""
+    lib = _require_lib()
+    info = wav_info(path)
+    out = np.zeros((int(n_frames), int(info.channels)), dtype=np.float32)
+    _wav_raise(lib.fb_wav_read(str(path).encode("utf-8"), int(start_frame), int(n_frames), _as_f32p(out)), path)
+    return out
+
+
+def wav_peak_bins(path, start_frame: int, n_frames: int, n_bins: int) -> np.ndarray:
+    """(n_bins, 2, channels) float32 — the get_peak_bins layout, from a file."""
+    lib = _require_lib()
+    info = wav_info(path)
+    out = np.zeros((int(n_bins), int(info.channels), 2), dtype=np.float32)
+    _wav_raise(lib.fb_wav_peak_bins(
+        str(path).encode("utf-8"), int(start_frame), int(n_frames), int(n_bins),
+        out.ctypes.data_as(C.POINTER(FbPeakBin)),
+    ), path)
+    return np.ascontiguousarray(out.transpose(0, 2, 1))
+
+
 class NativeAudioCircularBuffer:
     """The app's ring buffer: a handle on a Zig `Ring`."""
 
     def __init__(self, duration_seconds: float = 900.0, sample_rate: int = 48_000, channels: int = 2):
-        lib = load()
-        if lib is None:
-            raise RuntimeError("flashback_core library not available")
-        self._lib = lib
+        self._lib = _require_lib()
         self.sample_rate = sample_rate
         self.channels = channels
         self.duration = duration_seconds
         status = C.c_int(_OK)
-        self._h = lib.fb_ring_create(sample_rate, channels, duration_seconds, C.byref(status))
+        self._h = self._lib.fb_ring_create(sample_rate, channels, duration_seconds, C.byref(status))
         if not self._h:
             if status.value == _OUT_OF_MEMORY:
                 # The readable window's payload; the guard band and the
@@ -293,17 +347,17 @@ class NativeAudioCircularBuffer:
         # capacity == the READABLE window -- every clamp of "how much audio
         # can I get back" (buffered_seconds, is_full, status, get_latest /
         # get_segment availability) uses THIS.
-        self.buffer_size = int(lib.fb_ring_capacity(self._h))
+        self.buffer_size = int(self._lib.fb_ring_capacity(self._h))
         # storage_frames == the PHYSICAL frame count -- shapes the
         # zero-copy view and is what write_pos actually wraps at. Larger
         # than buffer_size by the guard band; see the module docstring.
-        storage_frames = int(lib.fb_ring_storage_frames(self._h))
+        storage_frames = int(self._lib.fb_ring_storage_frames(self._h))
         self._storage_frames = storage_frames
         # Zero-copy view of Zig-owned storage. Read-only by convention;
         # valid until close(). No production reader -- tests pin flush
         # zeroing and the physical layout through it. Shaped with
         # storage_frames, NOT buffer_size -- see the module docstring.
-        storage = lib.fb_ring_storage(self._h)
+        storage = self._lib.fb_ring_storage(self._h)
         self.buffer = np.ctypeslib.as_array(storage, shape=(storage_frames, channels))
 
     # -- primitives -----------------------------------------------------

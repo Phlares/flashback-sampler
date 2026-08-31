@@ -8,6 +8,7 @@ pub const Ring = @import("Ring.zig");
 pub const Summary = @import("Summary.zig");
 pub const wav = @import("wav.zig");
 pub const convert = @import("convert.zig");
+pub const peaks = @import("peaks.zig");
 pub const abi = @import("abi.zig");
 pub const Backend = @import("Backend.zig");
 pub const FakeBackend = @import("FakeBackend.zig");
