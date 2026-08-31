@@ -172,6 +172,11 @@ test "fb_wav_write rejects a channel count above max_channels instead of trappin
     const path = std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/never2.wav", .{tmp.sub_path}) catch unreachable;
     const in = [_]f32{0.1};
     try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 20000, 0));
+    // The boundary case: 16384 channels still overflows for float32
+    // (4 * 16384 = 65536 > u16 max 65535) even though it is exactly
+    // read_chunk_bytes / 4 — the OFF-BY-ONE a naive cap would miss.
+    // wav.max_channels must be 16383, not 16384, to reject this.
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 16384, 0));
 }
 
 test "fb_wav_write round-trips a real file" {
@@ -315,7 +320,10 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
     if (rate == 0 or channels == 0) return .invalid_arg;
     // Also closes writeHeader's `@intCast(bps * channels)` u16 trap: a
     // hostile channel count can overflow that cast before this guard
-    // existed (see the report's captured panic).
+    // existed (see the report's captured panic). wav.max_channels is
+    // sized for the WIDEST subtype (float32, 4 bytes/sample), so this
+    // holds for every subtype fb_wav_write accepts, not just the one a
+    // caller happens to pass.
     if (channels > wav.max_channels) return .invalid_arg;
     if (subtype < 0 or subtype > 2) return .invalid_arg;
     const st: wav.Subtype = @enumFromInt(@as(u8, @intCast(subtype)));
@@ -440,8 +448,15 @@ test "fb_wav_peak_bins rejects a channel count above max_channels instead of han
     var pb: [64]u8 = undefined;
     const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/widechan.wav", .{tmp.sub_path}) catch unreachable;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "widechan.wav", .data = img[0..w] });
-    var out: [1]peaks.PeakBin = undefined;
-    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_peak_bins(path, 0, 0, 1, &out));
+    // Sized for the 20000 channels the file CLAIMS, not the 1 n_bins
+    // this call requests: if the parseFmt cap were ever mutated out and
+    // open() actually succeeded, the export would slice
+    // out[0 .. n_bins * channels] = out[0..20000] — a 1-element stack
+    // array would be an out-of-bounds slice (a stack smash outside
+    // Debug/ReleaseSafe's bounds checks), not just a wrong assertion.
+    const out = try std.testing.allocator.alloc(peaks.PeakBin, 20000);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_peak_bins(path, 0, 0, 1, out.ptr));
 }
 
 test "fb_wav_info maps a missing file to io_error and junk to invalid_arg" {
