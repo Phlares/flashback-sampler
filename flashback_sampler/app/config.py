@@ -124,3 +124,40 @@ def save_export_bit_depth(depth: str, path: Path | None = None) -> None:
             f"must be one of {VALID_EXPORT_BIT_DEPTHS}"
         )
     set_pref(EXPORT_BIT_DEPTH_KEY, depth, path)
+
+
+SCRATCH_DIR_KEY = "scratch_dir"
+CHECKOUT_CACHE_MB_KEY = "checkout_cache_mb"
+# Provisional until plan Task h11 records the select→playable measurement
+# on #53 and replaces this number (0 = only pinned and in-flight clips
+# stay resident; every written root drops to disk).
+DEFAULT_CHECKOUT_CACHE_MB = 0.0
+
+
+def default_scratch_dir() -> Path:
+    """App-owned temp for scratch WAVs + manifests. Separate from the
+    user-facing export pool: the app deletes here (on discard), never
+    there."""
+    import platformdirs
+
+    return Path(platformdirs.user_cache_dir("flashback-sampler", appauthor=False)) / "scratch"
+
+
+def load_scratch_dir(path: Path | None = None) -> Path:
+    raw = get_pref(SCRATCH_DIR_KEY, "", path)
+    return Path(raw) if raw else default_scratch_dir()
+
+
+def save_scratch_dir(scratch_dir: Path | str, path: Path | None = None) -> None:
+    set_pref(SCRATCH_DIR_KEY, str(scratch_dir), path)
+
+
+def load_checkout_cache_mb(path: Path | None = None) -> float:
+    try:
+        return max(0.0, float(get_pref(CHECKOUT_CACHE_MB_KEY, DEFAULT_CHECKOUT_CACHE_MB, path)))
+    except (TypeError, ValueError):
+        return DEFAULT_CHECKOUT_CACHE_MB
+
+
+def save_checkout_cache_mb(mb: float, path: Path | None = None) -> None:
+    set_pref(CHECKOUT_CACHE_MB_KEY, max(0.0, float(mb)), path)

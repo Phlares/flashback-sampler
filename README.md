@@ -38,7 +38,7 @@ The window is a pair of turntables. The **left deck** is the live ring buffer (y
 1. **Pick a source.** Right-click the left deck → **Select Source Input(s)** to choose Default (system output), a specific capture device, a process, or to mux several inputs into one slot.
 2. **START / STOP** (center) begins and ends capture. Watch the buffer deck fill.
 3. **Set the slice.** The duration presets (0:15 → 15:00) and the buffer **− / +** controls set how much audio a checkout grabs; **◀ / ▶** scrub the anchor back through the buffer. **FREEZE** pins the buffer display so you can line up a grab while capture keeps rolling.
-4. **OUT →** checks out the current selection as a frozen in-RAM clip onto the right deck. The ring buffer keeps recording throughout.
+4. **OUT →** checks out the current selection as a frozen clip onto the right deck. The ring buffer keeps recording throughout.
 5. **Preview & trim.** Select a clip, then **PLAY** (or the spacebar) auditions it. The clip **− / + / ◀ / ▶** controls trim the in/out points; **LOOP** repeats the trimmed range.
 6. **SAVE** opens a file dialog (WAV, 32-bit float by default); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
 7. **Drag it into your DAW.** Grab the inside of a selection band on either deck and drag it out of the window — the slice lands as a 32-bit-float WAV on whatever accepts file drops (an Ableton track, Explorer, a sampler). Ctrl+drag on the clip deck exports the whole untrimmed clip. Exports live in the pool folder (Preferences → Export; default `Documents/flashback-sampler/exports`) and the dragged clip stays on the right deck as your sample bank — never move pool files a DAW project still references.
@@ -46,6 +46,8 @@ The window is a pair of turntables. The **left deck** is the live ring buffer (y
 > Set your **preview output to a different device than your capture source** (e.g. headphones while capturing speakers) so the preview doesn't feed back into the ring.
 
 Checkouts survive after you stop capture — you can pull a clip from buffered audio without an active stream.
+
+Checkouts scratch to `%LOCALAPPDATA%\flashback-sampler\Cache\scratch` (Preferences → Scratch) as float32 WAV at the capture rate; the app adopts that folder at launch, so a crash or quit keeps every checkout. Discard deletes the file.
 
 ## Architecture
 

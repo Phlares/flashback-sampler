@@ -60,6 +60,21 @@ class NativeScrubPlayer:
         self.sample_rate = int(sample_rate)
         self.channels = int(channels)
 
+    def bind_checkout(self, scratch, h: int, start: int, n: int, sample_rate: int, channels: int) -> None:
+        """Bind `[start, start + n)` of a checkout handle: Zig copies from
+        the checkout's RAM copy or reads its file — no numpy round trip."""
+        if not self._handle():
+            return
+        status = self._lib.fb_playback_bind_checkout(self._h, scratch.handle, h, int(start), int(n))
+        if status == native._INVALID_ARG:
+            raise ValueError(f"fb_playback_bind_checkout rejected span {start}+{n}")
+        if status == native._OUT_OF_MEMORY:
+            raise MemoryError("fb_playback_bind_checkout: could not allocate the clip")
+        if status != native._OK:
+            raise RuntimeError(f"fb_playback_bind_checkout failed with status {status}")
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
+
     def play(self) -> None:
         if not self._handle():
             return

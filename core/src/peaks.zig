@@ -6,6 +6,7 @@
 //! differently by one frame on some (n, n_bins) pairs (case G below).
 const std = @import("std");
 const wav = @import("wav.zig");
+const test_util = @import("test_util.zig");
 
 /// Layout is C's: [bin][channel] of {min, max}. The Python host maps
 /// this as float32[n_bins][channels][2].
@@ -88,9 +89,10 @@ pub fn reduceFrame(frame: []const f32, out_bin: []PeakBin, first: *bool) void {
     }
 }
 
-/// Bins over a flat interleaved buffer — the numpy `_peak_bins_from_audio`
-/// semantics: zeroed output, an empty bin (b <= a) copies the previous
-/// bin, bin 0 stays zero when empty. `out.len == n_bins * channels`.
+/// Bins over a flat interleaved buffer — matches the numpy-era reference
+/// rule this ported from: zeroed output, an empty bin (b <= a) copies
+/// the previous bin, bin 0 stays zero when empty. `out.len == n_bins *
+/// channels`.
 pub fn peakBinsFlat(frames: []const f32, channels: u16, n_bins: usize, out: []PeakBin) void {
     const chans: usize = channels;
     std.debug.assert(out.len == n_bins * chans);
@@ -163,10 +165,6 @@ pub fn peakBinsFile(file: std.Io.File, info: wav.Info, start_frame: u64, n_frame
     }
 }
 
-fn tmpPath(buf: []u8, tmp: *const std.testing.TmpDir, name: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name }) catch unreachable;
-}
-
 test "peakBinsFile equals peakBinsFlat on the same audio, across a chunk boundary" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -179,7 +177,7 @@ test "peakBinsFile equals peakBinsFlat on the same audio, across a chunk boundar
         x = x *% 1664525 +% 1013904223; // LCG, deterministic noise
         s.* = @as(f32, @floatFromInt(x >> 8)) / 16777216.0 * 2.0 - 1.0;
     }
-    const path = tmpPath(&pb, &tmp, "peaks.wav");
+    const path = test_util.tmpPath(&pb, &tmp, "peaks.wav");
     try wav.writeFile(path, &frames, 48_000, 2, .float32);
     var o = try wav.open(path);
     defer o.file.close(wav.io);
@@ -199,7 +197,7 @@ test "peakBinsFile on a sub-range equals peakBinsFlat on the slice" {
     var pb: [64]u8 = undefined;
     var frames: [50]f32 = undefined; // mono, 50 frames
     for (&frames, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i % 7)) - 3.0;
-    const path = tmpPath(&pb, &tmp, "sub.wav");
+    const path = test_util.tmpPath(&pb, &tmp, "sub.wav");
     try wav.writeFile(path, &frames, 8_000, 1, .float32);
     var o = try wav.open(path);
     defer o.file.close(wav.io);
