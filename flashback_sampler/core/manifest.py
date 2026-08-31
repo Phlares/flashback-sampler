@@ -12,16 +12,19 @@ convert.
 `created_at` here is a wall-clock stamp set once at manifest creation
 and preserved by every later rewrite (trim, mark_saved, ...) — it is
 NOT `Checkout.created_at` (a `time.monotonic()` value scoped to one
-process run, used for in-memory LRU ordering only). `write_manifest`
-never stamps this field itself; a caller that wants the "written once,
-preserved on rewrite" contract gets it for free by round-tripping the
-value it read, not by regenerating it.
+process run, used for in-memory LRU ordering only). The preservation is
+mechanical, in `write_manifest` itself: it reads whatever manifest
+already sits at the target path and keeps THAT file's `created_at`,
+using the incoming value only when nothing is there yet. A caller is
+free to re-stamp `created_at` on the `Manifest` it passes in (h8's
+`_write_manifest` does, on every trim/mark_saved) — `write_manifest`
+overrides it right back to the on-disk value.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Optional
 
@@ -68,10 +71,16 @@ def write_manifest(scratch_dir: Path | str, m: Manifest) -> Path:
     is safe here, but a future reader that keeps a handle open would
     break this.
 
-    Serializes `m` as given — it does not touch `m.created_at`, so a
-    caller that reads-modifies-writes (h8's trim/mark_saved) preserves
-    creation order across rewrites automatically."""
+    `created_at` is written once and preserved on every rewrite — NOT
+    by caller convention, but mechanically: if a manifest already
+    exists at this id's path, its `created_at` wins over whatever `m`
+    carries. A caller may pass a freshly re-stamped `created_at` (h8's
+    trim/mark_saved does) without breaking this; only a genuinely new
+    id keeps the incoming value."""
     p = manifest_path(scratch_dir, m.id)
+    existing = read_manifest(p)
+    if existing is not None:
+        m = replace(m, created_at=existing.created_at)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -87,23 +96,35 @@ def read_manifest(path: Path | str) -> Optional[Manifest]:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or set(data) != _FIELDS:
+    # Subset check, not equality: a future Manifest field with a
+    # default (`= something`) would keep `Manifest(**data)` below from
+    # raising for an OLD on-disk file that lacks it, so the TypeError
+    # catch alone would silently start accepting those files without
+    # actually validating them. This guard is what still enforces "all
+    # of TODAY's required fields are present" once that happens — keep
+    # it even though it looks redundant with the catch right now; a
+    # later /simplify pass should not delete it as dead code.
+    if not isinstance(data, dict) or not (_FIELDS <= set(data)):
         return None
     try:
-        return Manifest(**data)
+        return Manifest(**{k: data[k] for k in _FIELDS})
     except TypeError:
         return None
 
 
 def scan(scratch_dir: Path | str) -> list[Manifest]:
     """Every readable manifest, roots first (a slice needs its parent
-    adopted already), then by creation time. Because `write_manifest`
-    never touches `created_at`, this order is stable across rewrites."""
+    adopted already), then by creation time, then by id. The id
+    tiebreak matters: `write_manifest` preserves `created_at` across
+    rewrites (see its docstring), but `time.time()` resolution on
+    Windows is ~15.6 ms, so two manifests created in the same tick
+    would otherwise adopt in whatever order `glob` happens to enumerate
+    them — this makes that order deterministic instead of incidental."""
     d = Path(scratch_dir)
     if not d.is_dir():
         return []
     found = [m for m in (read_manifest(p) for p in d.glob("*.json")) if m is not None]
-    found.sort(key=lambda m: (m.parent is not None, m.created_at))
+    found.sort(key=lambda m: (m.parent is not None, m.created_at, m.id))
     return found
 
 
@@ -127,11 +148,20 @@ def bins_to_json(bins: dict[str, np.ndarray]) -> dict:
 
 
 def bins_from_json(d: Optional[dict], channels: int) -> dict[str, np.ndarray]:
+    """Same skip-don't-crash contract as `read_manifest`: a corrupt key
+    (not an int string), a non-dict `bins`, or non-numeric contents are
+    dropped rather than raised — adoption drops one bin size, not the
+    whole checkout."""
     out: dict[str, np.ndarray] = {}
-    for k, flat in (d or {}).items():
-        n_bins = int(k)
-        arr = np.asarray(flat, dtype=np.float32)
-        if arr.size != n_bins * 2 * channels:
+    if not isinstance(d, dict):
+        return out
+    for k, flat in d.items():
+        try:
+            n_bins = int(k)
+            arr = np.asarray(flat, dtype=np.float32)
+            if arr.size != n_bins * 2 * channels:
+                continue
+            out[k] = arr.reshape(n_bins, 2, channels)
+        except (ValueError, TypeError):
             continue
-        out[k] = arr.reshape(n_bins, 2, channels)
     return out
