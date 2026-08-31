@@ -58,7 +58,7 @@ pub const Subtype = enum(u8) {
 pub const header_len = 44;
 
 /// The one `std.Io` every wav call uses — the synchronous singleton
-/// `writeFile` already reaches for (see its doc comment). Public so
+/// `writeFile` also reaches for (see its doc comment for why). Public so
 /// callers that hold a `File` from `open` can close it with the same Io.
 pub const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -154,7 +154,10 @@ fn parseFmt(fb: []const u8) ParseError!Fmt {
         else => return error.Unsupported,
     };
     if (channels == 0 or rate == 0) return error.Unsupported;
-    if (block_align != channels * subtype.bytesPerSample()) return error.Unsupported;
+    // channels (u16) * bytesPerSample (u8) peer-types to u16 and overflows
+    // above 16383 float32 channels — widen to u32 first so a malformed
+    // header returns Unsupported instead of an integer-overflow trap.
+    if (block_align != @as(u32, channels) * subtype.bytesPerSample()) return error.Unsupported;
     return .{ .channels = channels, .rate = rate, .block_align = block_align, .subtype = subtype };
 }
 
@@ -579,4 +582,28 @@ test "open: pcm32 and float64 are Unsupported" {
 
 test "open: a missing file surfaces the OS error" {
     try std.testing.expectError(error.FileNotFound, open(".zig-cache/tmp/does-not-exist.wav"));
+}
+
+test "open: a huge channel count is Unsupported, not an integer-overflow trap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Hand-built fmt body (not fmtPlain, which would itself overflow its
+    // own u16 block-align intermediate at this channel count): tag 3
+    // (float), channels 20000, bits 32. channels(u16) * bytesPerSample
+    // (u8) = 20000 * 4 = 80000, which overflows u16 (max 65535) if
+    // multiplied without widening first — this pins that the malformed
+    // header is rejected, not a crash.
+    var fmt_body: [16]u8 = undefined;
+    std.mem.writeInt(u16, fmt_body[0..2], 3, .little); // tag: IEEE float
+    std.mem.writeInt(u16, fmt_body[2..4], 20000, .little); // channels
+    std.mem.writeInt(u32, fmt_body[4..8], 8_000, .little); // rate
+    std.mem.writeInt(u32, fmt_body[8..12], 0, .little); // byte rate, unchecked
+    std.mem.writeInt(u16, fmt_body[12..14], 4, .little); // block_align
+    std.mem.writeInt(u16, fmt_body[14..16], 32, .little); // bits
+    var img: [128]u8 = undefined;
+    const data = [_]u8{0} ** 8;
+    const bytes = wavImage(&img, &fmt_body, &.{}, &data);
+    try writeTmp(&tmp, "hugechan.wav", bytes);
+    var pb: [64]u8 = undefined;
+    try std.testing.expectError(error.Unsupported, open(tmpWritePath(&pb, &tmp, "hugechan.wav")));
 }
