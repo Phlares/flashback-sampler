@@ -55,7 +55,7 @@ def _build_state(args: argparse.Namespace) -> AppState | None:
             sample_rate=args.sample_rate,
             channels=args.channels,
         )
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         QMessageBox.critical(
             None,
             "Flashback",

@@ -16,6 +16,9 @@ pub const ErrorSlot = @import("ErrorSlot.zig");
 pub const Capture = @import("Capture.zig");
 pub const Playback = @import("Playback.zig");
 pub const Mixer = @import("Mixer.zig");
+pub const Checkout = @import("Checkout.zig");
+pub const Scratch = @import("Scratch.zig");
+pub const test_util = @import("test_util.zig");
 
 // OS-gated: these two files only compile for Windows targets. On other
 // targets `wasapi`/`WasapiBackend` are empty structs and abi.zig's

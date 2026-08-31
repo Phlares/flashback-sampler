@@ -12,6 +12,8 @@ const Capture = @import("Capture.zig");
 const Backend = @import("Backend.zig");
 const Mixer = @import("Mixer.zig");
 const Playback = @import("Playback.zig");
+const Checkout = @import("Checkout.zig");
+const Scratch = @import("Scratch.zig");
 const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
@@ -31,35 +33,7 @@ pub const FbStatus = enum(c_int) {
     out_of_memory = 5,
 };
 
-// Serializes fb_wav_write. writeFile uses
-// std.Io.Threaded.global_single_threaded, which std documents
-// (std/Io/Threaded.zig) as not supporting concurrency, but that doc
-// comment is written against Io.async/Io.concurrent/task groups that
-// writeFile never uses — it has NOT been exhaustively traced against
-// every syscall wrapper writeFile calls (createFile,
-// writeStreamingAll, close) for other shared mutable state in the
-// singleton. Rather than leave "is concurrent writeFile safe?" as an
-// open question on a published C interface, this mutex makes the
-// question moot: fb_wav_write is an offline file-write path (never the
-// RT audio thread), so a lock held for the call's duration costs
-// nothing that matters. Ring.write's RT-safety (no locks, no
-// allocation, no error path) is completely untouched by this — the
-// mutex only ever guards wav.writeFile.
-//
-// Zig 0.16 moved blocking primitives (Mutex included) under std.Io —
-// there is no bare std.Thread.Mutex anymore. std.Io.Mutex needs an `Io`
-// implementation to block/wake on, so it reuses the SAME
-// global_single_threaded singleton wav.writeFile itself already reaches
-// for (see wav.zig's doc comment on writeFile for why that singleton is
-// the right "hardcode a synchronous Io" choice here). Despite the name,
-// its futex wait/wake underneath is a real OS primitive (WaitOnAddress
-// / futex), so this is genuine cross-OS-thread mutual exclusion, not a
-// same-thread-only stub. `lockUncancelable`/`unlock` (as opposed to the
-// cancelable `lock`) are used because this Io singleton has no
-// cancelation source to ever trigger — there is no error path to plumb
-// through an `export fn`.
-const wav_write_io = std.Io.Threaded.global_single_threaded.io();
-var wav_write_mutex: std.Io.Mutex = .init;
+// fb_wav_write serialises through wav.write_mutex — see wav.zig.
 
 test "abi round-trip: create, write, read, destroy" {
     const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
@@ -330,11 +304,11 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
     // [*:0] is a SENTINEL pointer: length is found by scanning for the
     // 0 terminator — exactly C's char*. std.mem.span turns it into a slice.
     //
-    // Locked for the call's duration — see the doc comment on
-    // wav_write_mutex above for why. This is the ONLY lock anywhere in
-    // this file; Ring.write and the rest of the ring path stay lock-free.
-    wav_write_mutex.lockUncancelable(wav_write_io);
-    defer wav_write_mutex.unlock(wav_write_io);
+    // Locked for the call's duration — see wav.write_mutex in wav.zig.
+    // This is the ONLY lock anywhere in this file; Ring.write and the
+    // rest of the ring path stay lock-free.
+    wav.write_mutex.lockUncancelable(wav.io);
+    defer wav.write_mutex.unlock(wav.io);
     wav.writeFile(std.mem.span(path), frames[0 .. n_frames * channels], rate, channels, st) catch |e| return switch (e) {
         error.TooLong => .invalid_arg,
         else => .io_error,
@@ -364,23 +338,31 @@ export fn fb_wav_info(path: [*:0]const u8, out: *FbWavInfo) FbStatus {
 /// `out` holds n_frames * channels floats; channels come from the file
 /// (the host reads them with fb_wav_info first). n_frames * channels is
 /// computed with a checked multiply so a hostile huge n_frames is a
-/// status, not a ReleaseSafe overflow trap.
-export fn fb_wav_read(path: [*:0]const u8, start_frame: u64, n_frames: usize, out: [*]f32) FbStatus {
+/// status, not a ReleaseSafe overflow trap. `out_len` is the CALLER's
+/// own count of that buffer (R-h6a, closes issue #57's carry comment):
+/// this callee re-derives its own `len` from the file and rejects a
+/// mismatch, rather than trusting a length the host computed from a
+/// second, possibly-stale open of the same path.
+export fn fb_wav_read(path: [*:0]const u8, start_frame: u64, n_frames: usize, out: [*]f32, out_len: usize) FbStatus {
     var o = wav.open(std.mem.span(path)) catch |e| return wavStatus(e);
     defer o.file.close(wav.io);
     const len = std.math.mul(usize, n_frames, o.info.channels) catch return .invalid_arg;
+    if (len != out_len) return .invalid_arg;
     wav.readFrames(o.file, o.info, start_frame, out[0..len]) catch |e| return wavStatus(e);
     return .ok;
 }
 
 /// `out` holds n_bins * channels FbPeakBin, out[bin * channels + ch] —
 /// the same layout as fb_ring_peak_bins. n_bins * channels is computed
-/// with a checked multiply for the same reason as fb_wav_read.
-export fn fb_wav_peak_bins(path: [*:0]const u8, start_frame: u64, n_frames: u64, n_bins: usize, out: [*]peaks.PeakBin) FbStatus {
+/// with a checked multiply for the same reason as fb_wav_read. `out_len`
+/// is the caller's own FbPeakBin count of that buffer — same R-h6a rule
+/// as fb_wav_read, counted in FbPeakBin elements, not floats.
+export fn fb_wav_peak_bins(path: [*:0]const u8, start_frame: u64, n_frames: u64, n_bins: usize, out: [*]peaks.PeakBin, out_len: usize) FbStatus {
     if (n_bins == 0) return .invalid_arg;
     var o = wav.open(std.mem.span(path)) catch |e| return wavStatus(e);
     defer o.file.close(wav.io);
     const len = std.math.mul(usize, n_bins, o.info.channels) catch return .invalid_arg;
+    if (len != out_len) return .invalid_arg;
     peaks.peakBinsFile(o.file, o.info, start_frame, n_frames, n_bins, out[0..len]) catch |e| return wavStatus(e);
     return .ok;
 }
@@ -397,16 +379,42 @@ test "fb_wav_info / fb_wav_read round-trip through the exports" {
     try std.testing.expectEqual(@as(u64, 2), info.frames);
     try std.testing.expectEqual(@as(u16, 2), info.channels);
     var out: [4]f32 = undefined;
-    try std.testing.expectEqual(FbStatus.ok, fb_wav_read(path, 0, 2, &out));
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_read(path, 0, 2, &out, 4));
     try std.testing.expectEqualSlices(f32, &in, &out);
-    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, 1, 2, &out));
+    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, 1, 2, &out, 4));
     // Subtraction-form guards (readFrames, peakBinsFile): `start_frame >
     // info.frames` must short-circuit before `n_frames > info.frames -
     // start_frame` ever subtracts — maxInt(u64) - frames does not trap
     // here only because the `or` never evaluates the right side.
-    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, std.math.maxInt(u64), 1, &out));
+    // out_len here is 1 frame * 2 channels = 2, not out.len (4) — the
+    // guard compares against what THIS call's n_frames actually derives.
+    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, std.math.maxInt(u64), 1, &out, 2));
     var bins: [2]peaks.PeakBin = undefined; // stereo file: n_bins(1) * channels(2)
-    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_peak_bins(path, std.math.maxInt(u64), 1, 1, &bins));
+    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_peak_bins(path, std.math.maxInt(u64), 1, 1, &bins, 2));
+}
+
+test "fb_wav_read rejects a mismatched out_len instead of trusting a caller-derived size (R-h6a)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/outlen.wav", .{tmp.sub_path}) catch unreachable;
+    const in = [_]f32{ 0.1, -0.1, 0.2, -0.2 }; // 2 stereo frames
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_write(path, &in, 2, 48_000, 2, 0));
+    var out: [4]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_read(path, 0, 2, &out, 3)); // real len is 4
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_read(path, 0, 2, &out, 4));
+}
+
+test "fb_wav_peak_bins rejects a mismatched out_len instead of trusting a caller-derived size (R-h6a)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/outlen2.wav", .{tmp.sub_path}) catch unreachable;
+    const in = [_]f32{ 0.1, -0.1, 0.2, -0.2 }; // 2 stereo frames
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_write(path, &in, 2, 48_000, 2, 0));
+    var bins: [2]peaks.PeakBin = undefined; // n_bins(1) * channels(2) == 2
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_peak_bins(path, 0, 2, 1, &bins, 1)); // real len is 2
+    try std.testing.expectEqual(FbStatus.ok, fb_wav_peak_bins(path, 0, 2, 1, &bins, 2));
 }
 
 test "fb_wav_peak_bins rejects a channel count above max_channels instead of hanging its chunk loop" {
@@ -456,7 +464,9 @@ test "fb_wav_peak_bins rejects a channel count above max_channels instead of han
     // Debug/ReleaseSafe's bounds checks), not just a wrong assertion.
     const out = try std.testing.allocator.alloc(peaks.PeakBin, 20000);
     defer std.testing.allocator.free(out);
-    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_peak_bins(path, 0, 0, 1, out.ptr));
+    // open() itself rejects this file (max_channels), before the out_len
+    // check ever runs — out_len's exact value doesn't matter here.
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_peak_bins(path, 0, 0, 1, out.ptr, out.len));
 }
 
 test "fb_wav_info maps a missing file to io_error and junk to invalid_arg" {
@@ -478,7 +488,9 @@ test "fb_wav_read: a huge n_frames returns invalid_arg instead of an overflow tr
     const in = [_]f32{ 0.1, -0.1 };
     try std.testing.expectEqual(FbStatus.ok, fb_wav_write(path, &in, 1, 48_000, 2, 0));
     var out: [4]f32 = undefined;
-    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_read(path, 0, std.math.maxInt(usize), &out));
+    // mul(usize, maxInt(usize), 2) overflows and returns invalid_arg
+    // before out_len is ever compared — its value here doesn't matter.
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_read(path, 0, std.math.maxInt(usize), &out, out.len));
 }
 
 pub const FbCaptureSpec = extern struct { kind: u8, pid: u32, rate: u32, channels: u16, device_id: [*:0]const u8 };
@@ -647,9 +659,11 @@ export fn fb_playback_create(device_id: [*:0]const u8, rate: u32, channels: u16)
 
 export fn fb_playback_bind(pb: *Playback, frames: [*]const f32, n_frames: usize, rate: u32, channels: u16) FbStatus {
     if (channels == 0) return .invalid_arg;
-    pb.bind(frames[0 .. n_frames * channels], rate, channels) catch |e| return switch (e) {
+    const len = std.math.mul(usize, n_frames, channels) catch return .invalid_arg;
+    pb.bind(.{ .frames = frames[0..len] }, rate, channels) catch |e| return switch (e) {
         error.InvalidArgument => .invalid_arg,
         error.OutOfMemory => .out_of_memory,
+        else => .io_error,
     };
     return .ok;
 }
@@ -682,6 +696,462 @@ export fn fb_playback_last_error(pb: *const Playback) [*:0]const u8 {
 export fn fb_playback_destroy(pb: *Playback) void {
     pb.deinit();
     allocator.destroy(pb);
+}
+
+// ---- Checkout persistence (epic #53, PR h) ----
+
+/// Mirrors FbCheckoutInfo in flashback_core.h and native.py's
+/// FbCheckoutInfo ctypes struct. write_state is the FbCheckoutInfo wire
+/// value — see Checkout.WriteState's own doc comment: backed by u8 so
+/// it is stable across Zig versions.
+pub const FbCheckoutInfo = extern struct { rate: u32, channels: u16, write_state: u8, n_frames: u64, start_frame: u64, resident_bytes: u64 };
+
+fn checkoutStatus(e: anyerror) FbStatus {
+    return switch (e) {
+        error.InvalidArgument, error.PathTooLong, error.NotWave, error.MissingFmt, error.MissingData, error.Unsupported => .invalid_arg,
+        error.OutOfMemory => .out_of_memory,
+        error.Overwritten => .overwritten,
+        error.OutOfRange => .out_of_range,
+        else => .io_error,
+    };
+}
+
+export fn fb_scratch_create(budget_bytes: u64, status: ?*FbStatus) ?*Scratch {
+    const s = allocator.create(Scratch) catch {
+        if (status) |st| st.* = .out_of_memory;
+        return null;
+    };
+    s.* = Scratch.init(budget_bytes);
+    if (status) |st| st.* = .ok;
+    return s;
+}
+
+export fn fb_scratch_start(s: *Scratch) FbStatus {
+    s.start() catch return .io_error;
+    return .ok;
+}
+
+export fn fb_scratch_stop(s: *Scratch) void {
+    s.stop();
+}
+
+/// Stops (drains) first. Every checkout must already be destroyed; the
+/// Python host destroys them before the scratch (AppState.shutdown).
+export fn fb_scratch_destroy(s: *Scratch) void {
+    s.stop();
+    allocator.destroy(s);
+}
+
+export fn fb_scratch_set_budget(s: *Scratch, bytes: u64) void {
+    s.setBudget(bytes);
+}
+
+export fn fb_scratch_resident_bytes(s: *Scratch) u64 {
+    return s.residentBytes();
+}
+
+/// Copy the span out of the ring (a root) and queue its write.
+export fn fb_checkout_create(s: *Scratch, ring: *Ring, abs_start: u64, abs_end: u64, path: [*:0]const u8, status: ?*FbStatus) ?*Checkout {
+    const co = Checkout.createFromRing(allocator, ring, abs_start, abs_end, std.mem.span(path)) catch |e| {
+        if (status) |st| st.* = checkoutStatus(e);
+        return null;
+    };
+    s.submit(co, .write);
+    if (status) |st| st.* = .ok;
+    return co;
+}
+
+/// `s` is reserved: the LRU link for a slice is made on its first load,
+/// not at creation — a slice never owns frames of its own to link now.
+export fn fb_checkout_slice(s: *Scratch, parent: *const Checkout, start: u64, n: u64, status: ?*FbStatus) ?*Checkout {
+    _ = s;
+    const co = Checkout.slice(allocator, parent, start, n) catch |e| {
+        if (status) |st| st.* = checkoutStatus(e);
+        return null;
+    };
+    if (status) |st| st.* = .ok;
+    return co;
+}
+
+/// Adoption: rate/channels come from the file; `n_frames` is clamped to
+/// what the file holds past `start_frame` (a `.part` reports its true
+/// prefix). A start at or past the end is invalid_arg. `s` is reserved:
+/// same as fb_checkout_slice, the LRU link is made on first load.
+export fn fb_checkout_open(s: *Scratch, path: [*:0]const u8, start_frame: u64, n_frames: u64, status: ?*FbStatus) ?*Checkout {
+    _ = s;
+    const p = std.mem.span(path);
+    var o = wav.open(p) catch |e| {
+        if (status) |st| st.* = checkoutStatus(e);
+        return null;
+    };
+    o.file.close(wav.io);
+    if (start_frame >= o.info.frames or n_frames == 0) {
+        if (status) |st| st.* = .invalid_arg;
+        return null;
+    }
+    const n = @min(n_frames, o.info.frames - start_frame);
+    const co = Checkout.adopt(allocator, p, start_frame, n, o.info.rate, o.info.channels) catch |e| {
+        if (status) |st| st.* = checkoutStatus(e);
+        return null;
+    };
+    if (status) |st| st.* = .ok;
+    return co;
+}
+
+/// `resident_bytes` reads `co.frames`, a two-word optional slice that is
+/// not itself atomic — closing every race on it needs BOTH of the
+/// following, neither sufficient alone:
+///   - `waitLoad(co)` first: `Checkout.load` assigns `co.frames` OUTSIDE
+///     Scratch.mutex (see doLoad's own doc), so a mutex alone would not
+///     see that write ordered correctly against a load still in flight
+///     — waitLoad is the only thing that blocks until a `.load` job has
+///     fully finished.
+///   - `s.mutex` around the read itself: an EVICT (not a load) runs
+///     entirely under `s.mutex` (`evictOverBudgetLocked` calls
+///     `co.evict()` while still holding it), and can free `co.frames`
+///     from the WORKER thread for an unrelated job's post-completion
+///     budget check, at any moment `waitLoad` alone does not cover.
+///     Taking `s.mutex` here makes that a mutual-exclusion boundary
+///     against this exact read.
+/// Together these close both races; the worker never holds `s.mutex`
+/// during file I/O (only for the bookkeeping around a job), so taking
+/// it here never blocks on a write or load actually happening.
+export fn fb_checkout_info(s: *Scratch, co: *Checkout, out: *FbCheckoutInfo) void {
+    s.waitLoad(co);
+    s.mutex.lockUncancelable(wav.io);
+    defer s.mutex.unlock(wav.io);
+    out.* = .{
+        .rate = co.rate,
+        .channels = co.channels,
+        .write_state = @intFromEnum(co.write_state.load(.acquire)),
+        .n_frames = co.n_frames,
+        .start_frame = co.start_frame,
+        .resident_bytes = co.residentBytes(),
+    };
+}
+
+/// R-h6c: `out` holds n_bins * channels FbPeakBin, sized the same
+/// checked-multiply way as fb_wav_peak_bins. `out_len` is the caller's
+/// own count of that buffer (R-h6a) — never trusted without a match.
+/// R-h1d: `hold`/`release` bracket the read so a job finishing between
+/// this call starting and `co.peakBins` running cannot free `frames`
+/// out from under it (the eviction walk skips `hold > 0`). `touch`
+/// records this as a real use, moving `co` to the LRU head — without
+/// it every read here would be invisible to the cache, and eviction
+/// would fall back to pure load order instead of least-recently-used.
+export fn fb_checkout_peak_bins(s: *Scratch, co: *Checkout, n_bins: usize, out: [*]peaks.PeakBin, out_len: usize) FbStatus {
+    if (n_bins == 0) return .invalid_arg;
+    const len = std.math.mul(usize, n_bins, co.channels) catch return .invalid_arg;
+    if (len != out_len) return .invalid_arg;
+    s.hold(co);
+    defer s.release(co);
+    s.touch(co);
+    co.peakBins(n_bins, out[0..len]) catch |e| return checkoutStatus(e);
+    return .ok;
+}
+
+export fn fb_checkout_pin(s: *Scratch, co: *Checkout, on: u8) void {
+    s.pin(co, on != 0);
+}
+
+/// Materialise `[start, start + n)` of the checkout into `dst`. From the
+/// file once the audio is safe on disk (written/adopted — no reload of
+/// an evicted clip), from the RAM copy before that. R-h1b: the range
+/// guard uses the subtraction form so a hostile `start` cannot overflow
+/// the addition `start + n` under ReleaseSafe. R-h1d: `hold`/`release`
+/// bracket the whole read (both branches) for the same reason as
+/// fb_checkout_peak_bins, and `touch` marks the LRU use the same way.
+/// R-h6g: no trailing `FbMarkers *` yet — PR i adds region-aware export
+/// on top of this signature.
+export fn fb_checkout_export(s: *Scratch, co: *Checkout, dst: [*:0]const u8, start: u64, n: u64, subtype: c_int) FbStatus {
+    if (subtype < 0 or subtype > 2) return .invalid_arg;
+    if (n == 0 or start > co.n_frames or n > co.n_frames - start) return .invalid_arg;
+    const st: wav.Subtype = @enumFromInt(@as(u8, @intCast(subtype)));
+    s.hold(co);
+    defer s.release(co);
+    s.touch(co);
+    wav.write_mutex.lockUncancelable(wav.io);
+    defer wav.write_mutex.unlock(wav.io);
+    const ws = co.write_state.load(.acquire);
+    if (ws == .written or ws == .adopted) {
+        wav.copyRange(co.path(), std.mem.span(dst), co.start_frame + start, n, st) catch |e| return checkoutStatus(e);
+        return .ok;
+    }
+    const frames = co.frames orelse return .io_error;
+    const chans: u64 = co.channels;
+    const a: usize = @intCast(start * chans);
+    const b: usize = @intCast((start + n) * chans);
+    wav.writeFile(std.mem.span(dst), frames[a..b], co.rate, co.channels, st) catch |e| return checkoutStatus(e);
+    return .ok;
+}
+
+/// R-h4b: routes through `forget` (dequeue-by-hand when no worker is
+/// running, wait-then-unlink when one is) before freeing `co`, so a
+/// checkout created and destroyed on an unstarted or already-stopped
+/// scratch cannot dangle a stale FIFO/LRU pointer.
+export fn fb_checkout_destroy(s: *Scratch, co: *Checkout) void {
+    s.forget(co);
+    co.destroy();
+}
+
+/// R-h1b: subtraction-form range guard, same reason as fb_checkout_export.
+/// R-h1d: `hold`/`release` bracket `Checkout.source` (which returns a
+/// `frames` sub-slice or a file range — either way a reference into
+/// state that must not be evicted mid-bind) and `Playback.bind`'s copy;
+/// `touch` marks the LRU use, same as the other two wrapped exports.
+export fn fb_playback_bind_checkout(pb: *Playback, s: *Scratch, co: *Checkout, start: u64, n: u64) FbStatus {
+    if (n == 0 or start > co.n_frames or n > co.n_frames - start) return .invalid_arg;
+    s.hold(co);
+    defer s.release(co);
+    s.touch(co);
+    pb.bind(co.source(start, n), co.rate, co.channels) catch |e| return checkoutStatus(e);
+    return .ok;
+}
+
+test "WriteState wire values are stable across Zig versions (native.py's WRITE_STATES mirrors these ints)" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Checkout.WriteState.queued));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Checkout.WriteState.writing));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(Checkout.WriteState.written));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(Checkout.WriteState.failed));
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(Checkout.WriteState.adopted));
+}
+
+test "fb_scratch / fb_checkout: create, written, info, destroy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/abi-co.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, 2, 3, 4 }, 4);
+    var st: FbStatus = .io_error;
+    const s = fb_scratch_create(1 << 20, &st) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s);
+    try std.testing.expectEqual(FbStatus.ok, fb_scratch_start(s));
+    const co = fb_checkout_create(s, ring, 1, 3, path, &st) orelse return error.CreateFailed;
+    try std.testing.expectEqual(FbStatus.ok, st);
+    s.waitJob(co);
+    var info: FbCheckoutInfo = undefined;
+    fb_checkout_info(s, co, &info);
+    try std.testing.expectEqual(@as(u8, 2), info.write_state); // written
+    try std.testing.expectEqual(@as(u64, 2), info.n_frames);
+    try std.testing.expectEqual(@as(u64, 8), info.resident_bytes);
+    fb_checkout_destroy(s, co);
+    try std.testing.expectEqual(@as(u64, 0), fb_scratch_resident_bytes(s));
+}
+
+test "fb_checkout_create reports overwritten/out_of_range/invalid_arg distinctly (R-h6e: overwritten is a real lapped-span case)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/x.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, 2, 3 }, 3);
+    const s = fb_scratch_create(0, null) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s);
+    var st: FbStatus = .ok;
+    try std.testing.expectEqual(@as(?*Checkout, null), fb_checkout_create(s, ring, 1, 9, path, &st));
+    try std.testing.expectEqual(FbStatus.out_of_range, st);
+    try std.testing.expectEqual(@as(?*Checkout, null), fb_checkout_create(s, ring, 2, 2, path, &st));
+    try std.testing.expectEqual(FbStatus.invalid_arg, st);
+
+    // R-h6e: a genuine overwritten span — a ring whose capacity has
+    // already been lapped by later writes, so the requested span's
+    // bytes no longer exist anywhere. Capacity 4: writing 10 frames
+    // laps everything before frame 6 (total_written(10) - capacity(4)).
+    var pb2: [64]u8 = undefined;
+    const lapped_path = std.fmt.bufPrintZ(&pb2, ".zig-cache/tmp/{s}/lapped.wav", .{tmp.sub_path}) catch unreachable;
+    const small = fb_ring_create(4, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(small);
+    var ramp: [10]f32 = undefined;
+    for (&ramp, 0..) |*f, i| f.* = @floatFromInt(i);
+    fb_ring_write(small, &ramp, 10);
+    try std.testing.expectEqual(@as(?*Checkout, null), fb_checkout_create(s, small, 0, 4, lapped_path, &st));
+    try std.testing.expectEqual(FbStatus.overwritten, st);
+}
+
+test "fb_checkout_export rejects a span past the checkout (R-h4b: destroy on an unstarted scratch does not hang)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const co_path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/never.wav", .{tmp.sub_path}) catch unreachable;
+    var pb2: [64]u8 = undefined;
+    const out_path = std.fmt.bufPrintZ(&pb2, ".zig-cache/tmp/{s}/out.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, 2, 3 }, 3);
+    const s = fb_scratch_create(1 << 20, null) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s); // never started: fb_checkout_destroy below must route through forget's dequeue branch
+    const co = fb_checkout_create(s, ring, 0, 3, co_path, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, co);
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_checkout_export(s, co, out_path, 2, 2, 0));
+}
+
+test "fb_checkout_peak_bins rejects a mismatched out_len instead of trusting a caller-derived size (R-h6a/R-h6c)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/peaks.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 2, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, -1, 2, -2, 3, -3, 4, -4 }, 4);
+    const s = fb_scratch_create(1 << 20, null) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s);
+    const co = fb_checkout_create(s, ring, 0, 4, path, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, co);
+    var bins: [4]peaks.PeakBin = undefined; // n_bins(2) * channels(2) == 4
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_checkout_peak_bins(s, co, 2, &bins, 3)); // real len is 4
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_peak_bins(s, co, 2, &bins, 4));
+}
+
+test "fb_checkout_peak_bins touches the checkout: reading A then adding B over budget evicts the UNTOUCHED one, not A" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pbp: [64]u8 = undefined;
+    const path_a = std.fmt.bufPrintZ(&pa, ".zig-cache/tmp/{s}/touch-a.wav", .{tmp.sub_path}) catch unreachable;
+    const path_b = std.fmt.bufPrintZ(&pbp, ".zig-cache/tmp/{s}/touch-b.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 2, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    var in: [16]f32 = undefined; // 8 stereo frames
+    for (&in, 0..) |*f, i| f.* = @floatFromInt(i);
+    fb_ring_write(ring, &in, 8);
+    const s = fb_scratch_create(1 << 30, null) orelse return error.CreateFailed; // generous: both writes land uncontended
+    defer fb_scratch_destroy(s);
+    try std.testing.expectEqual(FbStatus.ok, fb_scratch_start(s));
+
+    // Both 4 stereo frames: residentBytes = 4 * 2 * 4 = 32 each.
+    const a = fb_checkout_create(s, ring, 0, 4, path_a, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, a);
+    s.waitJob(a);
+    const b = fb_checkout_create(s, ring, 4, 8, path_b, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, b);
+    s.waitJob(b);
+    // Submit order alone would put b at the LRU head and a at the tail
+    // (submitLocked inserts each new .write at the head) — so without a
+    // touch, a lowered budget would evict `a` next, not `b`.
+
+    var bins: [2]peaks.PeakBin = undefined; // n_bins(1) * channels(2)
+    // Read A: this must call Scratch.touch, moving A to the LRU head —
+    // otherwise this whole test is exercising nothing but write order.
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_peak_bins(s, a, 1, &bins, 2));
+
+    fb_scratch_set_budget(s, 32); // room for exactly one of the two 32-byte entries
+    var info_a: FbCheckoutInfo = undefined;
+    var info_b: FbCheckoutInfo = undefined;
+    fb_checkout_info(s, a, &info_a);
+    fb_checkout_info(s, b, &info_b);
+    try std.testing.expectEqual(@as(u64, 32), info_a.resident_bytes); // touched: survives
+    try std.testing.expectEqual(@as(u64, 0), info_b.resident_bytes); // untouched: evicted
+}
+
+/// R-h6d: the Python racy "RAM vs file agree" test cannot be made
+/// deterministic (the write finishing is a race with the test's own
+/// timing), so the RAM branch is pinned here instead — in-process Zig,
+/// using the same write_fn parking seam Scratch.zig's own tests use
+/// (Recorder), reimplemented locally since Recorder is private to that
+/// file. Parking the writer keeps write_state at `.queued`/`.writing`
+/// (never `.written`) while this test exports from RAM; unparking,
+/// waiting for the job, and evicting exercises the file branch on the
+/// exact same bytes for comparison.
+const ParkedWrite = struct {
+    var park: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    fn reset() void {
+        park.store(false, .monotonic);
+    }
+    fn write(path: []const u8, frames: []const f32, rate: u32, channels: u16) anyerror!void {
+        while (park.load(.acquire)) std.Thread.yield() catch {};
+        try wav.writeFile(path, frames, rate, channels, .float32);
+    }
+};
+
+test "fb_checkout_export: the RAM branch (pre-write) and the file branch (post-write, evicted) agree byte-for-byte" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var in: [40]f32 = undefined; // 20 stereo frames
+    for (&in, 0..) |*f, i| f.* = @as(f32, @floatFromInt(i)) / 10.0;
+    ring.write(&in);
+    var pco: [64]u8 = undefined;
+    const co_path = std.fmt.bufPrintZ(&pco, ".zig-cache/tmp/{s}/co.wav", .{tmp.sub_path}) catch unreachable;
+
+    var s = Scratch.init(1 << 20);
+    s.write_fn = &ParkedWrite.write;
+    ParkedWrite.reset(); // defensive: a prior failed run in this binary must not leave park stuck true
+    ParkedWrite.park.store(true, .release); // the write never lands until unparked below
+    try s.start();
+    defer s.stop(); // registered before the unpark defer below: see its comment for why that matters
+
+    var st: FbStatus = .io_error;
+    const co = fb_checkout_create(&s, &ring, 0, 20, co_path, &st) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(&s, co); // also registered before the unpark defer, same reason
+    // Registered LAST, after every defer above that can itself block on
+    // the parked worker: `fb_checkout_destroy` -> `forget`'s
+    // worker-running branch waits for co's `.write` job to finish, and
+    // `s.stop()` joins the worker thread — both would hang forever
+    // against a still-parked write. Zig defers unwind LIFO (most
+    // recently registered runs first), so THIS being the last one
+    // registered is what guarantees it runs before both of those on
+    // every exit path (the `try`s and `expectEqual`s all the way to the
+    // bottom of this test included), not just the happy path. Putting
+    // it in the same combined defer as `s.stop()` — tried first, and
+    // wrong — does not help: `fb_checkout_destroy`'s defer, registered
+    // between the two, would still unwind before it (reproduced: the
+    // suite hung for real on a deliberately forced failure here).
+    defer ParkedWrite.park.store(false, .release);
+    try std.testing.expectEqual(FbStatus.ok, st);
+    // Not written/adopted yet (parked): fb_checkout_export must take the
+    // RAM (frames) branch here, not the file branch.
+    try std.testing.expect(co.write_state.load(.acquire) != .written);
+
+    var pram: [64]u8 = undefined;
+    const ram_dst = std.fmt.bufPrintZ(&pram, ".zig-cache/tmp/{s}/ram.wav", .{tmp.sub_path}) catch unreachable;
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(&s, co, ram_dst, 2, 10, 0)); // FLOAT32
+
+    ParkedWrite.park.store(false, .release); // let the parked write finish
+    s.waitJob(co);
+    try std.testing.expectEqual(Checkout.WriteState.written, co.write_state.load(.acquire));
+
+    s.setBudget(0); // no pin, no hold, job none, ws written: evicts
+    try std.testing.expectEqual(@as(?[]f32, null), co.frames);
+
+    var pfile: [64]u8 = undefined;
+    const file_dst = std.fmt.bufPrintZ(&pfile, ".zig-cache/tmp/{s}/file.wav", .{tmp.sub_path}) catch unreachable;
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(&s, co, file_dst, 2, 10, 0)); // file branch now
+
+    var oram = try wav.open(ram_dst);
+    defer oram.file.close(wav.io);
+    var ofile = try wav.open(file_dst);
+    defer ofile.file.close(wav.io);
+    try std.testing.expectEqual(@as(u64, 10), oram.info.frames);
+    try std.testing.expectEqual(@as(u64, 10), ofile.info.frames);
+    var ram_samples: [20]f32 = undefined; // 10 frames * 2 channels
+    var file_samples: [20]f32 = undefined;
+    try wav.readFrames(oram.file, oram.info, 0, &ram_samples);
+    try wav.readFrames(ofile.file, ofile.info, 0, &file_samples);
+    try std.testing.expectEqualSlices(f32, &ram_samples, &file_samples);
+    try std.testing.expectEqualSlices(f32, in[4..24], &ram_samples); // both equal the source ramp too
+}
+
+test "fb_playback_bind_checkout rejects a span past the checkout (R-h1b subtraction guard)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/bind.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, 2, 3 }, 3);
+    const s = fb_scratch_create(1 << 20, null) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s);
+    const co = fb_checkout_create(s, ring, 0, 3, path, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, co);
+    if (builtin.os.tag != .windows) return error.SkipZigTest; // fb_playback_create needs a backend
+    const pb = fb_playback_create("", 48_000, 1) orelse return error.CreateFailed;
+    defer fb_playback_destroy(pb);
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_playback_bind_checkout(pb, s, co, 2, 2)); // start(2) + n(2) > n_frames(3)
+    try std.testing.expectEqual(FbStatus.ok, fb_playback_bind_checkout(pb, s, co, 1, 2));
 }
 
 test "fb_ring_create: status is ok on success and invalid_arg on a rejected config" {
@@ -748,6 +1218,13 @@ test "fb_playback_create rejects rate 0 and channels 3" {
     try std.testing.expectEqual(@as(?*Playback, null), fb_playback_create("", 48_000, 3));
 }
 
+test "fb_playback_bind rejects an n_frames * channels product that overflows usize" {
+    const pb = fb_playback_create("", 48_000, 2) orelse return error.CreateFailed;
+    defer fb_playback_destroy(pb);
+    const frames = [_]f32{0.0};
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_playback_bind(pb, &frames, std.math.maxInt(usize), 48_000, 2));
+}
+
 test "fb_playback bind/state/last_error on a never-played handle (Windows only)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const pb = fb_playback_create("", 48_000, 2) orelse return error.CreateFailed;
@@ -797,6 +1274,23 @@ test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
 test "FbWavInfo layout matches native.py's FbWavInfo ctypes struct" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(FbWavInfo));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbWavInfo, "frames"));
+}
+
+test "FbCheckoutInfo layout matches native.py's FbCheckoutInfo ctypes struct" {
+    // The trickiest padding of the three mirrored structs: rate(u32) +
+    // channels(u16) + write_state(u8) leaves 7 bytes before the first
+    // u64 field, which needs 8-byte alignment — 1 padding byte pushes
+    // n_frames to offset 8. A Zig-only drift here (a reordered field, a
+    // changed field type) would still pass `zig build test` on its own;
+    // this is what pins it against native.py's FbCheckoutInfo ctypes
+    // Structure actually agreeing, byte for byte.
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(FbCheckoutInfo));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(FbCheckoutInfo, "rate"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(FbCheckoutInfo, "channels"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(FbCheckoutInfo, "write_state"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbCheckoutInfo, "n_frames"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(FbCheckoutInfo, "start_frame"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(FbCheckoutInfo, "resident_bytes"));
 }
 
 test "fb_ring_rms reports per-channel RMS of the newest window" {

@@ -38,6 +38,13 @@ Arming a slot reserves its whole ring up front (`seconds × rate ×
 channels × 4` bytes, committed at `fb_ring_create`), so a RAM shortfall
 surfaces at arm time, not mid-take.
 
+Checkouts scratch to disk through `platformdirs.user_cache_dir`, the
+same cross-platform seam `config_dir` uses for settings — on Windows,
+`%LOCALAPPDATA%\flashback-sampler\Cache\scratch` (Preferences →
+Scratch overrides it). Files are float32 WAV at the capture rate; the
+app adopts the folder at launch, so a crash or quit keeps every
+checkout. Discard deletes the file.
+
 ## The seams (where platform code lives)
 
 Everything OS-dependent is reachable from these files — see

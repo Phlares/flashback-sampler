@@ -86,3 +86,14 @@ def test_export_dir_browse_cancel_changes_nothing(qapp):
     dlg.export_dir_btn.click()
     assert got == []
     assert dlg.export_dir_edit.text() == "D:/pool"
+
+
+def test_scratch_dir_row_reports_a_pick(qapp, monkeypatch):
+    seen = []
+    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
+                            scratch_dir="C:/old", on_scratch_dir_changed=seen.append)
+    assert dlg.scratch_dir_edit.text() == "C:/old"
+    monkeypatch.setattr("flashback_sampler.app.preferences_dialog.QFileDialog.getExistingDirectory",
+                        staticmethod(lambda *a, **k: "C:/new"))
+    dlg.scratch_dir_btn.click()
+    assert seen == ["C:/new"] and dlg.scratch_dir_edit.text() == "C:/new"

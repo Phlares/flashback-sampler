@@ -226,7 +226,7 @@ def test_apply_checkout_caps_scoped_to_active_slot():
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.add_slot(preset_by_name("SCRATCH"))
 
-    st.apply_checkout_caps(max_active=3, max_ram_mb=64)
+    st.apply_checkout_caps(max_active=3)
     # Active slot (0) updated
     assert st.slots[0].checkout_manager._max_active == 3
     # Slot 1 left at the default 16
@@ -253,7 +253,10 @@ def test_total_project_ram_bytes_counts_every_slot():
 
 
 def test_total_project_ram_includes_checkouts():
-    st = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1)
+    # R-h9a: a 0 MB budget (the unit default) makes resident_bytes racy --
+    # the writer can evict the instant the write lands. A budget big
+    # enough to hold the whole clip makes the number deterministic.
+    st = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1, checkout_cache_mb=1.0)
     buf_bytes = st.slots[0].buffer.capacity_bytes
     assert st.total_project_ram_bytes() == buf_bytes
     # Write some audio and create a checkout
@@ -261,8 +264,9 @@ def test_total_project_ram_includes_checkouts():
         np.zeros((1000, 1), dtype=np.float32)  # 1 s
     )
     co = st.slots[0].checkout_manager.create(duration_s=0.5)
-    # Total now includes the checkout's ndarray
-    assert st.total_project_ram_bytes() == buf_bytes + co.ram_bytes
+    # The checkout's RAM copy lives in the scratch cache, counted once per process.
+    assert st.total_project_ram_bytes() == buf_bytes + st.scratch.resident_bytes
+    assert st.scratch.resident_bytes == 500 * 4
 
 
 def test_add_slot_rejects_when_over_budget():
@@ -405,7 +409,7 @@ def test_checkout_from_live_buffer_then_bind_to_scrub_player(monkeypatch):
     ramp = np.arange(500, dtype=np.float32).reshape(-1, 1) / 500.0  # [0, 1)
     st.buffer.write(ramp)
     co = st.checkout_manager.create(duration_s=0.5)
-    assert co.audio.shape == (500, 1)
+    assert co.n_frames == 500
 
     seen = {}
     # The player's handle is lazy, so a fake library serves the whole
@@ -414,14 +418,14 @@ def test_checkout_from_live_buffer_then_bind_to_scrub_player(monkeypatch):
 
     fake_lib = type("L", (), {
         "fb_playback_create": staticmethod(lambda d, r, c: 0xF00D),
-        "fb_playback_bind": staticmethod(lambda h, p, n, r, c: seen.update(n=n, rate=r, ch=c) or 0),
+        "fb_playback_bind_checkout": staticmethod(lambda h, s, co, start, n: seen.update(start=start, n=n) or 0),
         "fb_playback_play": staticmethod(lambda h: seen.update(played=True) or 0),
         "fb_playback_destroy": staticmethod(lambda h: None),
     })()
     monkeypatch.setattr(native, "load", lambda: fake_lib)
-    st.scrub_player.bind(co.audio, co.sample_rate)
+    st.scrub_player.bind_checkout(st.scratch, co.handle, 0, co.n_frames, co.sample_rate, co.channels)
     st.scrub_player.play()
-    assert seen == dict(n=500, rate=1000, ch=1, played=True)
+    assert seen == dict(start=0, n=500, played=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -521,3 +525,237 @@ def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
         assert (seen["sample_rate"], seen["channels"]) == (slot.sample_rate, slot.channels)
     finally:
         state_mod.build_mixed_capture_source, state_mod.build_capture_source = real_mixed, real_single
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Scratch ownership, adoption at launch, RAM accounting over handles (h9)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _written(st, co, timeout=5.0):
+    import time
+    t0 = time.monotonic()
+    mgr = st.slots[0].checkout_manager
+    while time.monotonic() - t0 < timeout:
+        if mgr.write_state(co.id) == "written":
+            return
+        time.sleep(0.005)
+    raise AssertionError("never written")
+
+
+def test_state_uses_the_configured_scratch_dir_and_starts_the_writer(tmp_path):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path / "s")
+    assert st.scratch_dir == tmp_path / "s" and st.scratch_dir.is_dir()
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.1)
+    _written(st, co)
+    assert (tmp_path / "s" / f"{co.id}.wav").exists()
+    assert st.scratch_dir_error is None
+    st.shutdown()
+
+
+def test_uncreatable_scratch_dir_falls_back_to_default_and_continues(tmp_path, monkeypatch):
+    """F1: an uncreatable configured scratch_dir (bad drive, permission
+    denied, stale removable-media path, ...) must not brick launch --
+    AppState falls back to config.default_scratch_dir() and records what
+    happened instead of raising out of __init__."""
+    import flashback_sampler.app.state as state_mod
+    from pathlib import Path as _Path
+
+    bad_dir = tmp_path / "unwritable"
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(state_mod.app_config, "default_scratch_dir", lambda: fallback_dir)
+
+    real_mkdir = _Path.mkdir
+
+    def raising_mkdir(self, *a, **k):
+        if self == bad_dir:
+            raise OSError("permission denied (simulated)")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(_Path, "mkdir", raising_mkdir)
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=bad_dir)
+    assert st.scratch_dir == fallback_dir and fallback_dir.is_dir()
+    assert st.scratch_dir_error is not None and str(bad_dir) in st.scratch_dir_error
+    # The fallback is fully usable -- a checkout can still be created and written.
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.1)
+    _written(st, co)
+    assert (fallback_dir / f"{co.id}.wav").exists()
+    st.shutdown()
+
+
+def test_adoption_restores_checkouts_into_a_matching_slot(tmp_path):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    co = st.checkout_manager.create(duration_s=0.5)
+    st.checkout_manager.set_trim(co.id, 10, 20)
+    st.checkout_manager.mark_saved(co.id)
+    _written(st, co)
+    st.shutdown()  # files stay
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    cos = st2.slots[0].checkout_manager.list()
+    assert [c.id for c in cos] == [co.id]
+    back = cos[0]
+    assert (back.n_frames, back.trim_in_samples, back.trim_out_samples, back.state) == (500, 10, 20, "saved")
+    assert back.bins["540"].shape == (540, 2, 1)
+    assert len(st2.slots) == 1
+    st2.shutdown()
+
+
+def test_adoption_makes_an_unarmed_slot_for_a_foreign_rate(tmp_path):
+    st = AppState(buffer_seconds=1.0, sample_rate=2000, channels=2, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((2000, 2), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.2)
+    _written(st, co)
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert len(st2.slots) == 2
+    adopted = st2.slots[1]
+    assert (adopted.sample_rate, adopted.channels, adopted.armed) == (2000, 2, False)
+    assert adopted.name == "Main"  # the manifest's slot name
+    assert [c.id for c in adopted.checkout_manager.list()] == [co.id]
+    st2.shutdown()
+
+
+def test_adoption_does_not_match_a_slot_on_rate_alone(tmp_path):
+    """R-h9c: same rate as the Main slot, DIFFERENT channels. Pins the
+    channels half of `s.sample_rate == m.rate and s.channels == m.channels`
+    -- a rate-only match would wrongly fold this into slot 0."""
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=2, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((1000, 2), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.2)
+    _written(st, co)
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert len(st2.slots) == 2
+    adopted = st2.slots[1]
+    assert (adopted.sample_rate, adopted.channels, adopted.armed) == (1000, 2, False)
+    assert [c.id for c in adopted.checkout_manager.list()] == [co.id]
+    st2.shutdown()
+
+
+def test_adoption_does_not_match_a_slot_on_channels_alone(tmp_path):
+    """R-h9c: same channels as the Main slot, DIFFERENT rate. Pins the
+    rate half of the same compound condition -- a channels-only match
+    would wrongly fold this into slot 0."""
+    st = AppState(buffer_seconds=1.0, sample_rate=2000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((2000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.2)
+    _written(st, co)
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert len(st2.slots) == 2
+    adopted = st2.slots[1]
+    assert (adopted.sample_rate, adopted.channels, adopted.armed) == (2000, 1, False)
+    assert [c.id for c in adopted.checkout_manager.list()] == [co.id]
+    st2.shutdown()
+
+
+def test_adoption_survives_add_slot_refusing_a_foreign_rate(tmp_path, monkeypatch):
+    """R-h9b: add_slot raises RuntimeError on a project-RAM refusal.
+    adopt_scratch must swallow that and skip the manifest -- a launch
+    must never raise because of what's sitting on disk."""
+    st = AppState(buffer_seconds=1.0, sample_rate=2000, channels=2, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((2000, 2), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.2)
+    _written(st, co)
+    st.shutdown()
+
+    import flashback_sampler.app.state as state_mod
+
+    def raising_add_slot(self, *a, **k):
+        raise RuntimeError("Project RAM budget exceeded")
+
+    monkeypatch.setattr(state_mod.AppState, "add_slot", raising_add_slot)
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert len(st2.slots) == 1  # no slot could be created for the foreign rate
+    assert st2.slots[0].checkout_manager.list() == []  # the manifest was skipped, not adopted
+    st2.shutdown()
+
+
+def test_adoption_survives_a_range_corrupt_manifest_and_still_adopts_others(tmp_path):
+    """Review round 1, item 1: a parseable manifest with rate=0 reaches
+    add_slot -> NativeAudioCircularBuffer -> ValueError, which escapes a
+    narrow `except RuntimeError`. No on-disk artefact may abort a launch:
+    adopt_scratch must skip it (leaving its files in place) and keep
+    adopting everything else."""
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.5)
+    _written(st, co)
+    st.shutdown()
+
+    (tmp_path / "badrate.wav").write_bytes(b"\x00" * 64)  # just needs to exist
+    write_manifest(tmp_path, Manifest(id="badrate", slot="Ghost", rate=0, channels=1, abs_start=0, abs_end=1,
+                                      created_at=5.0, parent=None, start_frame=0, n_frames=1, trim_in=0, trim_out=0,
+                                      state="pending", partial=False, bins=None))
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)  # must not raise
+    ids = [c.id for c in st2.slots[0].checkout_manager.list()]
+    assert ids == [co.id]  # the real checkout still adopted
+    assert len(st2.slots) == 1  # no slot was left half-built for the bad manifest
+    assert (tmp_path / "badrate.json").exists() and (tmp_path / "badrate.wav").exists()  # left in place
+    st2.shutdown()
+
+
+def test_adoption_takes_a_part_file_as_partial_and_skips_junk(tmp_path):
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.5)
+    _written(st, co)
+    st.shutdown()
+    p = tmp_path / f"{co.id}.wav"
+    data = p.read_bytes()
+    (tmp_path / f"{co.id}.wav.part").write_bytes(data[:44 + 100 * 4])
+    p.unlink()
+    # a manifest with no audio at all, and a corrupt one
+    write_manifest(tmp_path, Manifest(id="ghost", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
+                                      created_at=0.0, parent=None, start_frame=0, n_frames=1, trim_in=0, trim_out=0,
+                                      state="pending", partial=False, bins=None))
+    (tmp_path / "bad.json").write_text("{")
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    cos = st2.slots[0].checkout_manager.list()
+    assert [c.id for c in cos] == [co.id]
+    assert cos[0].partial is True and cos[0].n_frames == 100
+    assert (tmp_path / "ghost.json").exists() and (tmp_path / "bad.json").exists()  # left in place
+    st2.shutdown()
+
+
+def test_adoption_of_a_slice_needs_its_parent(tmp_path):
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.5)
+    _written(st, co)
+    st.shutdown()
+    write_manifest(tmp_path, Manifest(id="sl", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
+                                      created_at=9.0, parent=co.id, start_frame=100, n_frames=50, trim_in=0, trim_out=0,
+                                      state="saved", partial=False, bins=None))
+    write_manifest(tmp_path, Manifest(id="orphan", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
+                                      created_at=9.5, parent="missing", start_frame=0, n_frames=5, trim_in=0, trim_out=0,
+                                      state="saved", partial=False, bins=None))
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    ids = [c.id for c in st2.slots[0].checkout_manager.list()]
+    assert ids == [co.id, "sl"]
+    sl = st2.slots[0].checkout_manager.get("sl")
+    assert sl.parent_id == co.id and sl.start_frame == 100 and sl.path == st2.slots[0].checkout_manager.get(co.id).path
+    st2.shutdown()
+
+
+def test_remove_slot_discards_its_checkouts_and_files(tmp_path):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    slot = st.add_slot(preset_by_name("SCRATCH"))
+    slot.buffer.write(np.zeros((16_000, 1), dtype=np.float32))
+    co = slot.checkout_manager.create(duration_s=0.1)
+    st.remove_slot(1)
+    assert not co.path.exists() and not (tmp_path / f"{co.id}.json").exists()
+    st.shutdown()

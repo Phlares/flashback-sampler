@@ -19,12 +19,20 @@ class _FakePlaybackLib:
         self.play_status = 0
         self.err = b""
         self.bound = None  # (frames ndarray copy, n_frames, rate, channels)
+        self.bound_checkout = None  # (checkout_handle, start, n)
 
     def __getattr__(self, name):
         def _fn(*a):
             self.calls.append((name, a))
             if name == "fb_playback_create":
                 return 0xF00D
+            if name == "fb_playback_bind_checkout":
+                _h, _s, co, start, n = a
+                assert _h is not None, "fb_playback_bind_checkout called with a closed/None handle"
+                self.bound_checkout = (co, start, n)
+                if self.bind_status == 0:
+                    self.state = self.state[:3] + (n, self.state[4])
+                return self.bind_status
             if name == "fb_playback_bind":
                 _h, ptr, n, rate, ch = a
                 assert _h is not None, "fb_playback_bind called with a closed/None handle"

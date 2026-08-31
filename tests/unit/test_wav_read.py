@@ -5,6 +5,7 @@ DAW-written headers."""
 from __future__ import annotations
 
 import struct
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -99,3 +100,45 @@ def test_wav_peak_bins_shape_and_sub_range(tmp_path):
     # bin 0 = frames 20..30
     assert bins[0, 0, 0] == pytest.approx(audio[20, 0])
     assert bins[0, 1, 0] == pytest.approx(audio[29, 0])
+
+
+def test_wav_read_passes_the_real_out_len(tmp_path):
+    """R-h6a: the callee (fb_wav_read) validates the caller's buffer
+    length against what it derives from the file itself and rejects a
+    mismatch — the Python side must pass the buffer's ACTUAL float
+    count (out.size), never a value re-derived separately."""
+    p = tmp_path / "sized.wav"
+    native.wav_write(p, _ramp(20, 2), 8_000, "FLOAT")
+    lib = native.load()
+    orig = lib.fb_wav_read
+    calls = []
+
+    def spy(*a):
+        calls.append(a)
+        return orig(*a)
+
+    with mock.patch.object(lib, "fb_wav_read", side_effect=spy):
+        got = native.wav_read(p, 0, 20)
+    assert len(calls) == 1
+    assert calls[0][-1] == 20 * 2  # n_frames * channels, the real buffer size
+    assert got.shape == (20, 2)
+
+
+def test_wav_peak_bins_passes_the_real_out_len(tmp_path):
+    """Same rule as test_wav_read_passes_the_real_out_len, but out_len is
+    counted in FbPeakBin elements (n_bins * channels), not floats."""
+    p = tmp_path / "sized_peaks.wav"
+    native.wav_write(p, _ramp(20, 2), 8_000, "FLOAT")
+    lib = native.load()
+    orig = lib.fb_wav_peak_bins
+    calls = []
+
+    def spy(*a):
+        calls.append(a)
+        return orig(*a)
+
+    with mock.patch.object(lib, "fb_wav_peak_bins", side_effect=spy):
+        got = native.wav_peak_bins(p, 0, 20, 4)
+    assert len(calls) == 1
+    assert calls[0][-1] == 4 * 2  # n_bins * channels
+    assert got.shape == (4, 2, 2)
