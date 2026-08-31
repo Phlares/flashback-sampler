@@ -9,6 +9,7 @@ const Backend = @import("Backend.zig");
 const FakeBackend = @import("FakeBackend.zig");
 const ErrorSlot = @import("ErrorSlot.zig");
 const wav = @import("wav.zig");
+const test_util = @import("test_util.zig");
 const Playback = @This();
 
 pub const State = extern struct { running: u8, playing: u8, cursor: u64, clip_frames: u64, mix_rate: u32 };
@@ -100,8 +101,9 @@ pub fn bind(self: *Playback, src: ClipSource, rate: u32, channels: u16) !void {
     // hostile n_frames returns InvalidArgument instead of trapping the
     // multiply, and BEFORE the @intCast so the cast never sees a wrapped
     // value either.
-    // Clause order is load-bearing: `channels == 0` must come first, or
-    // the modulo below divides by zero.
+    // Guard-before-switch: this statement must run before the n_samples
+    // switch below, or a zero `channels` makes the modulo that follows
+    // divide by zero.
     if (channels == 0 or channels > 2 or rate == 0) return error.InvalidArgument;
     const n_samples: usize = switch (src) {
         .frames => |f| f.len,
@@ -115,6 +117,12 @@ pub fn bind(self: *Playback, src: ClipSource, rate: u32, channels: u16) !void {
         .file => |f| {
             var o = try wav.open(f.path);
             defer o.file.close(wav.io);
+            // The requested `channels` is what fill() and every
+            // downstream reader will trust as this clip's channel
+            // count; if the file's own header disagrees, reject before
+            // any Playback state (self.clip, self.channels, ...) is
+            // touched.
+            if (o.info.channels != channels) return error.InvalidArgument;
             try wav.readFrames(o.file, o.info, f.start_frame, copy);
         },
     }
@@ -627,7 +635,7 @@ test "bind from a file range reads the same clip as bind from frames" {
     var pb: [64]u8 = undefined;
     var in: [40]f32 = undefined; // 20 stereo frames
     for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) * 0.01;
-    const path = std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/clip.wav", .{tmp.sub_path}) catch unreachable;
+    const path = test_util.tmpPath(&pb, &tmp, "clip.wav");
     try wav.writeFile(path, &in, 48_000, 2, .float32);
 
     var fake = FakeBackend.init(&.{});
@@ -649,4 +657,25 @@ test "bind from a missing file fails and keeps the previous clip" {
     try std.testing.expectError(error.FileNotFound, p.bind(.{ .file = .{ .path = ".zig-cache/tmp/none.wav", .start_frame = 0, .n_frames = 2 } }, 48_000, 2));
     try std.testing.expectEqualSlices(f32, &in, p.clip);
     try std.testing.expectEqual(@as(u64, 2), p.clip_frames.load(.acquire));
+}
+
+test "bind from a file whose channel count disagrees with the requested count is InvalidArgument" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 0, 1, 2, 3, 4, 5, 6, 7 }; // 4 stereo frames
+    const path = test_util.tmpPath(&pb, &tmp, "chanmismatch.wav");
+    try wav.writeFile(path, &in, 48_000, 2, .float32);
+
+    var fake = FakeBackend.init(&.{});
+    var p = Playback.init(std.testing.allocator, fake.backend(), test_spec);
+    defer p.deinit();
+    const before = [_]f32{ 9, 9 };
+    try p.bind(.{ .frames = &before }, 48_000, 1);
+    // The file is stereo; bind() is asked for mono. n_frames * channels
+    // (4 * 1 = 4) fits the requested buffer size cleanly, so only the
+    // new channel-agreement guard can catch the mismatch — a ragged
+    // length would pass for the wrong reason.
+    try std.testing.expectError(error.InvalidArgument, p.bind(.{ .file = .{ .path = path, .start_frame = 0, .n_frames = 4 } }, 48_000, 1));
+    try std.testing.expectEqualSlices(f32, &before, p.clip);
 }

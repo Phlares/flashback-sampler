@@ -50,6 +50,10 @@ lru_next: ?*Checkout,
 
 fn create(allocator: std.mem.Allocator, p: []const u8, start_frame: u64, n_frames: u64, rate: u32, channels: u16, frames: ?[]f32, ws: WriteState) !*Checkout {
     if (p.len >= max_path) return error.PathTooLong;
+    // The one place every checkout is born: reject `channels == 0` here
+    // so every later caller (load, peakBins, Playback.bind's .file arm)
+    // may divide or index by `self.channels` without its own zero-check.
+    if (channels == 0) return error.InvalidArgument;
     const self = try allocator.create(Checkout);
     self.* = .{
         .allocator = allocator,
@@ -140,11 +144,18 @@ pub fn load(self: *Checkout) !void {
     if (self.frames != null) return;
     // `n_frames * channels` alone can wrap `usize` on a corrupt adopted
     // manifest (h7) before `@intCast` ever runs — same divide-form guard
-    // as createFromRing's, checked before the multiply itself.
+    // as createFromRing's, checked before the multiply itself. `chans`
+    // is never 0 here: create() rejects that at construction.
     const chans: u64 = self.channels;
-    if (chans == 0 or self.n_frames > std.math.maxInt(usize) / chans) return error.InvalidArgument;
+    if (self.n_frames > std.math.maxInt(usize) / chans) return error.InvalidArgument;
     var o = try wav.open(self.path());
     defer o.file.close(wav.io);
+    // self.channels is the count every reader of `frames` (peakBins'
+    // RAM arm, Checkout.source, Playback via bind) will trust from here
+    // on; if the file's own header disagrees — a stale manifest, or the
+    // file swapped out from under an adopted path — reject before any
+    // read or state mutation, not after.
+    if (o.info.channels != self.channels) return error.InvalidArgument;
     const buf = try self.allocator.alloc(f32, @intCast(self.n_frames * chans));
     errdefer self.allocator.free(buf);
     try wav.readFrames(o.file, o.info, self.start_frame, buf);
@@ -161,8 +172,13 @@ pub fn evict(self: *Checkout) void {
 }
 
 /// Bins for the deck: from RAM when resident, streamed from the file
-/// otherwise. `out.len == n_bins * channels`. Same reducer both ways,
-/// so the bins are identical whichever path served them.
+/// otherwise. `out.len == n_bins * channels`. The single contract both
+/// arms rely on: `self.channels` IS this checkout's channel count,
+/// whether the audio is in RAM or still on disk — the RAM arm trusts it
+/// directly, and the file arm checks the file's own header against it
+/// before reading, the same check `load()` makes. Same reducer both
+/// ways once that holds, so the bins are identical whichever path
+/// served them.
 pub fn peakBins(self: *Checkout, n_bins: usize, out: []peaks.PeakBin) !void {
     if (self.frames) |f| {
         peaks.peakBinsFlat(f, self.channels, n_bins, out);
@@ -170,6 +186,7 @@ pub fn peakBins(self: *Checkout, n_bins: usize, out: []peaks.PeakBin) !void {
     }
     var o = try wav.open(self.path());
     defer o.file.close(wav.io);
+    if (o.info.channels != self.channels) return error.InvalidArgument;
     try peaks.peakBinsFile(o.file, o.info, self.start_frame, self.n_frames, n_bins, out);
 }
 
@@ -283,6 +300,10 @@ test "a path at max_path is rejected" {
     try std.testing.expectError(error.PathTooLong, adopt(std.testing.allocator, &long, 0, 1, 8_000, 1));
 }
 
+test "create rejects channels == 0, the single guard every constructor shares" {
+    try std.testing.expectError(error.InvalidArgument, adopt(std.testing.allocator, "z.wav", 0, 1, 8_000, 0));
+}
+
 test "load reads the file range into frames; evict frees them" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -300,6 +321,41 @@ test "load reads the file range into frames; evict frees them" {
     co.evict();
     try std.testing.expectEqual(@as(?[]f32, null), co.frames);
     try std.testing.expectEqual(@as(u64, 0), co.residentBytes());
+}
+
+test "load: n_frames * channels overflowing usize is InvalidArgument, not a trap" {
+    // The overflow guard runs before wav.open, so a nonexistent path is
+    // fine here — proof the multiply itself never happens.
+    const co = try adopt(std.testing.allocator, "huge.wav", 0, std.math.maxInt(u64), 8_000, 2);
+    defer co.destroy();
+    try std.testing.expectError(error.InvalidArgument, co.load());
+}
+
+test "load rejects a file whose channel count disagrees with the checkout's declared channels" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 0, 1, 2, 3, 4, 5, 6, 7 }; // 4 stereo frames
+    const wav_path = test_util.tmpPath(&pb, &tmp, "chanmismatch.wav");
+    try wav.writeFile(wav_path, &in, 8_000, 2, .float32);
+    // Declared mono; the file on disk is stereo.
+    const co = try adopt(std.testing.allocator, wav_path, 0, 4, 8_000, 1);
+    defer co.destroy();
+    try std.testing.expectError(error.InvalidArgument, co.load());
+    try std.testing.expectEqual(@as(?[]f32, null), co.frames);
+}
+
+test "peakBins from the file rejects a channel mismatch too" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 0, 1, 2, 3, 4, 5, 6, 7 }; // 4 stereo frames
+    const wav_path = test_util.tmpPath(&pb, &tmp, "chanmismatch2.wav");
+    try wav.writeFile(wav_path, &in, 8_000, 2, .float32);
+    const co = try adopt(std.testing.allocator, wav_path, 0, 4, 8_000, 1); // declared mono
+    defer co.destroy();
+    var out: [3]peaks.PeakBin = undefined; // 3 bins * 1 (declared) channel
+    try std.testing.expectError(error.InvalidArgument, co.peakBins(3, &out));
 }
 
 test "peakBins from RAM equals peakBins from the file" {
