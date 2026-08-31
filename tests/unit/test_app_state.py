@@ -550,6 +550,39 @@ def test_state_uses_the_configured_scratch_dir_and_starts_the_writer(tmp_path):
     co = st.checkout_manager.create(duration_s=0.1)
     _written(st, co)
     assert (tmp_path / "s" / f"{co.id}.wav").exists()
+    assert st.scratch_dir_error is None
+    st.shutdown()
+
+
+def test_uncreatable_scratch_dir_falls_back_to_default_and_continues(tmp_path, monkeypatch):
+    """F1: an uncreatable configured scratch_dir (bad drive, permission
+    denied, stale removable-media path, ...) must not brick launch --
+    AppState falls back to config.default_scratch_dir() and records what
+    happened instead of raising out of __init__."""
+    import flashback_sampler.app.state as state_mod
+    from pathlib import Path as _Path
+
+    bad_dir = tmp_path / "unwritable"
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(state_mod.app_config, "default_scratch_dir", lambda: fallback_dir)
+
+    real_mkdir = _Path.mkdir
+
+    def raising_mkdir(self, *a, **k):
+        if self == bad_dir:
+            raise OSError("permission denied (simulated)")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(_Path, "mkdir", raising_mkdir)
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=bad_dir)
+    assert st.scratch_dir == fallback_dir and fallback_dir.is_dir()
+    assert st.scratch_dir_error is not None and str(bad_dir) in st.scratch_dir_error
+    # The fallback is fully usable -- a checkout can still be created and written.
+    st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
+    co = st.checkout_manager.create(duration_s=0.1)
+    _written(st, co)
+    assert (fallback_dir / f"{co.id}.wav").exists()
     st.shutdown()
 
 

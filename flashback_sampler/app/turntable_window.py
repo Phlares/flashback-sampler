@@ -321,8 +321,14 @@ class TurntableWindow(QMainWindow):
         self._global_hotkeys: GlobalHotkeySource | None = None
         self._apply_global_hotkeys(self._global_hotkeys_enabled)
 
-        # Lazy-create status bar for surfacing non-modal messages.
-        self.statusBar().showMessage("Ready", 0)
+        # Lazy-create status bar for surfacing non-modal messages. F1: a
+        # scratch dir that fell back to the default at launch takes
+        # priority over "Ready" — the user needs to see it, not just the
+        # log.
+        if state.scratch_dir_error:
+            self.statusBar().showMessage(state.scratch_dir_error, 15000)
+        else:
+            self.statusBar().showMessage("Ready", 0)
 
         # ── System tray ──────────────────────────────────────────────
         # Gated on availability (off under headless/offscreen Qt). When a
@@ -1144,11 +1150,18 @@ class TurntableWindow(QMainWindow):
         self.clip_panel.set_duration_text(f"{co.duration_seconds:.1f}s")
         self.clip_panel.set_clip_id(co.id[:6].upper())
         mgr = self._state.active_slot.checkout_manager
-        mgr.pin(co.id)
+        # F2: read write_state BEFORE pin -- load-bearing order. pin()
+        # queues the checkout's async scratch load; write_state() goes
+        # through fb_checkout_info, which calls waitLoad and BLOCKS the
+        # UI thread until that load finishes. Reading state first means
+        # no load has been queued yet, so waitLoad returns immediately
+        # instead of freezing clip selection. `failed` clips are never
+        # evicted, so this reorder does not change which clips report it.
         if mgr.write_state(co.id) == "failed":
             self.statusBar().showMessage(
                 f"Scratch write failed: {co.id[:6].upper()} (clip kept in RAM)", 6000
             )
+        mgr.pin(co.id)
         self.clip_panel.set_times("0:00.00", f"{co.duration_seconds:.2f}s")
         # Restore any saved trim selection for this clip so the band stays
         # anchored to the audio when switching clips or reopening the app.
