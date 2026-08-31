@@ -63,7 +63,7 @@ Zig test count must rise per PR, every new file re-exported in
 | Slices | Trim stays the gesture. Dragging or saving a trimmed range mints a slice checkout in `saved` state (ruling 5) before the export. | The user can come back for more of it, in the app and in the DAW. |
 | Handles | Export = the whole slice PLUS up to `drag_handle_mb` (default 200 MB) of parent audio, split evenly before and after, clamped to the parent. The slice is never truncated. Markers (`cue ` + `smpl`) mark the slice. A user-tunable preference (on by default; 0 = slice only for constrained systems — the handles also size the buffer-deck root's RAM copy). | One formula: budget ∞ = whole parent, budget 0 = slice only. Owner ruling 2026-08-31: the cap bounds the extra audio, not the dragged clip. |
 | DAW clip bounds | Markers are portable and harmless; no DAW documented turns them into clip start/end. PR i Task 0 spikes an Ableton `.alc` sidecar on the box; a preference ships only if the spike passes. | Only the box can answer it (arc lesson: measure, never assume). Other DAWs get a documented table, every row marked untested. |
-| Count cap | `max_active_checkouts = 16` per slot stays. `max_total_ram_mb` per slot and the window's `_evict_oldest_saved_checkout` are deleted. | The deck draws one ring per checkout; the byte cache replaces the MB cap. |
+| Count cap | `max_active_checkouts = 16` per slot stays, enforced by the window's `_evict_oldest_saved_checkout` as before. `max_total_ram_mb` per slot and that function's RAM-cap branch are deleted (plan P5). | The deck draws one ring per checkout; the byte cache replaces the MB cap. |
 | PR split | g `feat/zig-wav-read` (engine only), h `feat/zig-scratch` (the model change), i `feat/slices-handles`. Three PRs → `dev`. | g is testable without the app; h is the big seam; i needs the spike. |
 
 ## Architecture after PR i
@@ -122,7 +122,8 @@ Manifest `<id>.json`:
  "abs_start": 123456, "abs_end": 234567, "created_at": 1756600000.0,
  "parent": null, "start_frame": 0, "n_frames": 111111,
  "trim_in": 0, "trim_out": 0, "state": "pending", "partial": false,
- "bins": {"ring_amp": [...540*2*ch floats...], "panel_bins": [...360*2*ch...]}}
+ "bins": {"540": [...540*2*ch floats, numpy (540,2,ch) layout...],
+          "360": [...360*2*ch floats, numpy (360,2,ch) layout...]}}
 ```
 
 `parent` is the parent id for a slice; `start_frame`/`n_frames` are
@@ -189,8 +190,8 @@ pub fn peakBinsFile(file: std.Io.File, info: Info, start_frame: u64, n_frames: u
 ```c
 typedef struct FbWavInfo { uint32_t rate; uint16_t channels; uint8_t subtype; uint64_t frames; } FbWavInfo;
 FbStatus fb_wav_info(const char *path, FbWavInfo *out);
-FbStatus fb_wav_read(const char *path, uint64_t start_frame, size_t n_frames, float *out);
-FbStatus fb_wav_peak_bins(const char *path, uint64_t start_frame, uint64_t n_frames, size_t n_bins, FbPeakBin *out);
+FbStatus fb_wav_read(const char *path, uint64_t start_frame, size_t n_frames, float *out, size_t out_len);
+FbStatus fb_wav_peak_bins(const char *path, uint64_t start_frame, uint64_t n_frames, size_t n_bins, FbPeakBin *out, size_t out_len);
 ```
 
 `native.py` gains `wav_info(path)`, `wav_read(path, start, n)`,
@@ -301,10 +302,10 @@ uint64_t    fb_scratch_resident_bytes(const FbScratch *);
 FbCheckout *fb_checkout_create(FbScratch *, FbRing *, uint64_t abs_start, uint64_t abs_end, const char *path, FbStatus *status);
 FbCheckout *fb_checkout_slice(FbScratch *, const FbCheckout *parent, uint64_t start, uint64_t n, FbStatus *status);
 FbCheckout *fb_checkout_open(FbScratch *, const char *path, uint64_t start, uint64_t n, FbStatus *status);   // adoption
-void        fb_checkout_info(const FbCheckout *, FbCheckoutInfo *out);
-FbStatus    fb_checkout_peak_bins(FbScratch *, FbCheckout *, size_t n_bins, FbPeakBin *out);
+void        fb_checkout_info(FbScratch *, const FbCheckout *, FbCheckoutInfo *out);
+FbStatus    fb_checkout_peak_bins(FbScratch *, FbCheckout *, size_t n_bins, FbPeakBin *out, size_t out_len);
 void        fb_checkout_pin(FbScratch *, FbCheckout *, uint8_t on);       /* on = pin + preload */
-FbStatus    fb_checkout_export(FbScratch *, FbCheckout *, const char *dst, uint64_t start, uint64_t n, FbSubtype, const FbMarkers *);   // PR h passes NULL markers
+FbStatus    fb_checkout_export(FbScratch *, FbCheckout *, const char *dst, uint64_t start, uint64_t n, FbSubtype);   // PR i adds a trailing `const FbMarkers *`
 void        fb_checkout_destroy(FbScratch *, FbCheckout *);
 FbStatus    fb_playback_bind_checkout(FbPlayback *, FbScratch *, FbCheckout *);
 ```
@@ -344,9 +345,10 @@ that uses audio calls `Scratch.touch`.
   preset).
 - Window: `_peak_bins_from_audio` deleted; `_clip_bins_cache` fills
   from the manifest bins; selecting a clip calls `fb_checkout_pin`
-  (previous selection unpinned); `_evict_oldest_saved_checkout` and
-  the RAM-cap retry loop in `_on_buffer_drag_out` deleted; play binds
-  through `scrub_player.bind_checkout(handle)`.
+  (previous selection unpinned); `_evict_oldest_saved_checkout` stays
+  for the count cap, its RAM-cap branch and the retry loop in
+  `_on_buffer_drag_out` deleted (plan P5); play binds through
+  `scrub_player.bind_checkout(handle)`.
 - Preferences: `scratch_dir` (browse button, same shape as the export
   pool row). Changing it applies at next launch (the running writer
   keeps its paths).
@@ -549,3 +551,22 @@ the spike passes.
 - A slot recreated for adopted checkouts gets a 60 s ring.
 - Quit with jobs queued blocks `shutdown` until the drain completes; the
   ">500 ms" status message is deferred to the PR h hand-off.
+
+## Deviations recorded during PR h
+
+- `pinned` is a plain `bool` guarded by `Scratch.mutex`, not atomic. A
+  separate `hold: u32` transient residency count blocks eviction at the
+  same tier, for ABI reads that touch `frames` outside the mutex; it is
+  distinct so an ABI read never clears the app's own pin.
+- `Checkout.adopt` takes `rate: u32, channels: u16` directly, not a
+  `wav.Info`.
+- No `last_use` tick (plan P7's intrusive LRU, confirmed): each
+  `Checkout` also carries `lru_bytes`, a snapshot of `residentBytes()`
+  taken at LRU-insert time, so eviction accounts bytes without
+  re-reading `frames`.
+- The foreign-rate slot `adopt_scratch` recreates for checkouts whose
+  rate/channels match no existing slot uses a 60 s ring — an arbitrary
+  small default; the slot only holds adopted checkouts, never arms for
+  capture.
+- `DEFAULT_CHECKOUT_CACHE_MB` stays `0.0` until the owner's Task h11
+  select→playable measurement (see above) replaces it.
