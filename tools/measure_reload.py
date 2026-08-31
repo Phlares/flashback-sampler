@@ -49,7 +49,13 @@ def main(rate: int, seconds: int) -> None:
         t0 = time.perf_counter()
         h = s.checkout_create(buf, buf.total_written - seconds * rate, buf.total_written, path)
         t_copy = time.perf_counter() - t0
-        while s.checkout_info(h).write_state != 2:
+        while True:
+            write_state = s.checkout_info(h).write_state
+            if write_state == 2:  # written
+                break
+            if write_state == 3:  # failed -- would spin forever otherwise
+                print(f"checkout write failed on {path}", file=sys.stderr)
+                return
             time.sleep(0.01)
         t_written = time.perf_counter() - t0
         s.checkout_pin(h, False)  # trims to budget 0 -> evicted

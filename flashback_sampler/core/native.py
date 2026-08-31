@@ -658,7 +658,6 @@ class NativeScratch:
         self._h = self._lib.fb_scratch_create(int(budget_bytes), C.byref(status))
         if not self._h:
             _status_raise(status.value, "fb_scratch_create")
-        self._running = False
 
     @property
     def handle(self):
@@ -666,12 +665,10 @@ class NativeScratch:
 
     def start(self) -> None:
         _status_raise(self._lib.fb_scratch_start(self._h), "fb_scratch_start")
-        self._running = True
 
     def stop(self) -> None:
         if self._h:
             self._lib.fb_scratch_stop(self._h)
-        self._running = False
 
     def close(self) -> None:
         if self._h:

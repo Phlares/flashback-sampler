@@ -10,15 +10,13 @@ the numpy layout (n_bins, 2, channels); `bins_to_json` / `bins_from_json`
 convert.
 
 `created_at` here is a wall-clock stamp set once at manifest creation
-and preserved by every later rewrite (trim, mark_saved, ...) — it is
-NOT `Checkout.created_at` (a `time.monotonic()` value scoped to one
-process run, used for in-memory LRU ordering only). The preservation is
-mechanical, in `write_manifest` itself: it reads whatever manifest
-already sits at the target path and keeps THAT file's `created_at`,
-using the incoming value only when nothing is there yet. A caller is
-free to re-stamp `created_at` on the `Manifest` it passes in (h8's
-`_write_manifest` does, on every trim/mark_saved) — `write_manifest`
-overrides it right back to the on-disk value.
+and preserved by every later rewrite (trim, mark_saved, ...). The
+preservation is mechanical, in `write_manifest` itself: it reads
+whatever manifest already sits at the target path and keeps THAT
+file's `created_at`, using the incoming value only when nothing is
+there yet. A caller is free to re-stamp `created_at` on the `Manifest`
+it passes in (h8's `_write_manifest` does, on every trim/mark_saved) —
+`write_manifest` overrides it right back to the on-disk value.
 """
 
 from __future__ import annotations

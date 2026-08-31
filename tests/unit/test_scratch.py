@@ -150,8 +150,7 @@ def test_export_from_file_agrees_across_two_calls(ring, scratch, tmp_path):
     scratch.checkout_destroy(h)
 
 
-def test_bind_checkout_plays_the_range(ring, scratch, tmp_path, monkeypatch):
-    from tests.unit.test_scrub_player import _FakePlaybackLib
+def test_bind_checkout_plays_the_range(ring, scratch, tmp_path):
     # The real library binds; a fake player would not exercise Zig. Use
     # the real player only for bind (no device open happens at bind).
     from flashback_sampler.core.scrub_player import NativeScrubPlayer

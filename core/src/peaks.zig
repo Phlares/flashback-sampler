@@ -89,9 +89,10 @@ pub fn reduceFrame(frame: []const f32, out_bin: []PeakBin, first: *bool) void {
     }
 }
 
-/// Bins over a flat interleaved buffer — the numpy `_peak_bins_from_audio`
-/// semantics: zeroed output, an empty bin (b <= a) copies the previous
-/// bin, bin 0 stays zero when empty. `out.len == n_bins * channels`.
+/// Bins over a flat interleaved buffer — matches the numpy-era reference
+/// rule this ported from: zeroed output, an empty bin (b <= a) copies
+/// the previous bin, bin 0 stays zero when empty. `out.len == n_bins *
+/// channels`.
 pub fn peakBinsFlat(frames: []const f32, channels: u16, n_bins: usize, out: []PeakBin) void {
     const chans: usize = channels;
     std.debug.assert(out.len == n_bins * chans);
