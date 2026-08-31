@@ -40,6 +40,16 @@ test "writeHeader rejects n_frames whose data size overflows the u32 RIFF size, 
     try std.testing.expectError(error.TooLong, writeHeader(&h, 48_000, 2, .float32, 600_000_000));
 }
 
+test "writeHeader rejects n_frames whose product overflows u64 itself, not just the u32 RIFF bound" {
+    // 600_000_000 * 8 above fits comfortably inside u64 and only trips
+    // the `data_len_wide > maxInt(u32) - 36` clause — the std.math.mul
+    // overflow clause right above it is never exercised by that value.
+    // A compound condition needs one mutation per clause: maxInt(u64) *
+    // 8 (stereo float32's block_align) overflows the u64 product itself.
+    var h: [44]u8 = undefined;
+    try std.testing.expectError(error.TooLong, writeHeader(&h, 48_000, 2, .float32, std.math.maxInt(u64)));
+}
+
 /// The sample formats this module supports (writer and reader). Backed
 /// by `u8` so the wire value (used by Task 6's C ABI: 0/1/2) is stable
 /// across Zig versions.

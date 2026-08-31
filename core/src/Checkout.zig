@@ -88,6 +88,11 @@ pub fn createFromRing(allocator: std.mem.Allocator, ring: *Ring, abs_start: u64,
     if (abs_end <= abs_start) return error.InvalidArgument;
     const n = abs_end - abs_start;
     const chans: u64 = ring.channels;
+    // n arrives raw off caller-supplied abs_start/abs_end (eventually a
+    // ctypes boundary) — `n * chans` alone can wrap `usize` on a hostile
+    // span before `@intCast` ever runs. Divide form, not `n * chans >
+    // maxInt(usize)`: the product itself is what would overflow.
+    if (n > std.math.maxInt(usize) / chans) return error.InvalidArgument;
     const frames = try allocator.alloc(f32, @intCast(n * chans));
     errdefer allocator.free(frames);
     var done: u64 = 0;
@@ -114,7 +119,12 @@ pub fn slice(allocator: std.mem.Allocator, parent: *const Checkout, start: u64, 
     // raw from ctypes, and the addition can overflow-trap in ReleaseSafe
     // on a hostile value.
     if (n == 0 or start > parent.n_frames or n > parent.n_frames - start) return error.InvalidArgument;
-    return create(allocator, parent.path(), parent.start_frame + start, n, parent.rate, parent.channels, null, .adopted);
+    // parent.start_frame + start: same hazard as the guard above, but on
+    // the PARENT's own start_frame — a corrupt adopted manifest (h7) can
+    // set that near maxInt(u64). std.math.add rejects the wrap instead
+    // of letting a plain `+` trap.
+    const abs_start = std.math.add(u64, parent.start_frame, start) catch return error.InvalidArgument;
+    return create(allocator, parent.path(), abs_start, n, parent.rate, parent.channels, null, .adopted);
 }
 
 pub fn destroy(self: *Checkout) void {
@@ -184,6 +194,24 @@ test "slice references the parent's file at the parent's offset" {
     try std.testing.expectEqual(@as(?[]f32, null), s.frames);
     try std.testing.expectError(error.InvalidArgument, slice(std.testing.allocator, parent, 40, 11));
     try std.testing.expectError(error.InvalidArgument, slice(std.testing.allocator, parent, 0, 0));
+}
+
+test "slice: a hostile start or parent.start_frame is InvalidArgument, not an overflow trap" {
+    const parent = try adopt(std.testing.allocator, "parent.wav", 100, 50, 48_000, 2);
+    defer parent.destroy();
+    // Under the brief's original `start + n > parent.n_frames` form this
+    // addition itself overflow-traps before the comparison ever runs;
+    // the subtraction-form guard (`start > parent.n_frames`) rejects it
+    // cleanly instead, short-circuiting before any subtraction.
+    try std.testing.expectError(error.InvalidArgument, slice(std.testing.allocator, parent, std.math.maxInt(u64), 1));
+
+    // The OTHER side: a parent whose own start_frame is corrupt (as an
+    // h7 manifest could feed adopt()). `start`/`n` here pass the guard
+    // above cleanly — the overflow is in `parent.start_frame + start`,
+    // guarded separately by std.math.add.
+    const corrupt_parent = try adopt(std.testing.allocator, "corrupt.wav", std.math.maxInt(u64) - 5, 50, 48_000, 2);
+    defer corrupt_parent.destroy();
+    try std.testing.expectError(error.InvalidArgument, slice(std.testing.allocator, corrupt_parent, 10, 5));
 }
 
 test "a path at max_path is rejected" {

@@ -1,6 +1,6 @@
-//! test_util.zig — shared test-only helpers. `tmpPath` was duplicated
-//! privately in more than one test file; this is the one copy every
-//! module's tests import instead.
+//! test_util.zig — shared test-only helpers. `tmpPath` is lifted out of
+//! peaks.zig, its only prior owner, so later modules' tests (h2+) share
+//! this one copy instead of growing their own private duplicates.
 const std = @import("std");
 
 /// Builds the path `tmpDir` really created: `.zig-cache/tmp/<sub_path>/
