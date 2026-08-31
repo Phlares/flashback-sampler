@@ -267,6 +267,30 @@ pub fn pin(self: *Scratch, co: *Checkout, on: bool) void {
     }
 }
 
+/// R-h1d: take transient residency for an ABI call about to read
+/// `co.frames` (or stream from its file) outside `mutex` — the eviction
+/// walk skips `hold > 0` the same tier as `pinned` (see
+/// `evictOverBudgetLocked`), so a job finishing mid-read cannot free
+/// `frames` out from under the caller. Waits out any `.load` in flight
+/// first (never a `.write` — see `waitLoad`'s own contract), then takes
+/// the count under `mutex` and returns. Pair with `release`.
+pub fn hold(self: *Scratch, co: *Checkout) void {
+    self.waitLoad(co);
+    self.mutex.lockUncancelable(io);
+    co.hold += 1;
+    self.mutex.unlock(io);
+}
+
+/// End of a `hold`. Re-checks the budget at once, same as `pin`'s
+/// unpin arm — a hold taken while over budget must not leave the entry
+/// stranded resident forever once released.
+pub fn release(self: *Scratch, co: *Checkout) void {
+    self.mutex.lockUncancelable(io);
+    co.hold -= 1;
+    self.evictOverBudgetLocked();
+    self.mutex.unlock(io);
+}
+
 /// Record a use: move to the LRU head, then trim to budget.
 pub fn touch(self: *Scratch, co: *Checkout) void {
     self.mutex.lockUncancelable(io);
@@ -909,6 +933,21 @@ test "forget unlinks and stops counting; destroy afterwards is clean" {
     s.forget(p.b);
     try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
     try std.testing.expectEqual(@as(?*Checkout, null), s.lru_head);
+}
+
+test "Scratch.hold/release: hold blocks eviction, release re-checks the budget at once" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    try p.writeBoth(&s);
+    s.hold(p.a);
+    s.setBudget(0);
+    try std.testing.expect(p.a.frames != null); // held: survives
+    try std.testing.expectEqual(@as(?[]f32, null), p.b.frames); // not held: evicted (positive control)
+    s.release(p.a);
+    try std.testing.expectEqual(@as(?[]f32, null), p.a.frames); // release re-checked the budget
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
 }
 
 test "a held checkout survives budget 0 like a pinned one (R-h1d: hold is eviction-blocking, same tier as pinned)" {

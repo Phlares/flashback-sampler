@@ -116,6 +116,17 @@ class FbWavInfo(C.Structure):
     _fields_ = [("rate", C.c_uint32), ("channels", C.c_uint16), ("subtype", C.c_uint8), ("frames", C.c_uint64)]
 
 
+class FbCheckoutInfo(C.Structure):
+    _fields_ = [
+        ("rate", C.c_uint32), ("channels", C.c_uint16), ("write_state", C.c_uint8),
+        ("n_frames", C.c_uint64), ("start_frame", C.c_uint64), ("resident_bytes", C.c_uint64),
+    ]
+
+
+# Mirrors Checkout.WriteState in core/src/Checkout.zig.
+WRITE_STATES = {0: "queued", 1: "writing", 2: "written", 3: "failed", 4: "adopted"}
+
+
 def _declare(lib: C.CDLL) -> None:
     """Argument/return types mirroring core/include/flashback_core.h,
     export by export. A mismatch here is silent memory corruption, not
@@ -173,9 +184,11 @@ def _declare(lib: C.CDLL) -> None:
 
     lib.fb_wav_info.argtypes = [C.c_char_p, C.POINTER(FbWavInfo)]
     lib.fb_wav_info.restype = C.c_int
-    lib.fb_wav_read.argtypes = [C.c_char_p, C.c_uint64, C.c_size_t, f32p]
+    # out_len (R-h6a): the callee validates this against its own
+    # derived length instead of trusting a re-derived caller size.
+    lib.fb_wav_read.argtypes = [C.c_char_p, C.c_uint64, C.c_size_t, f32p, C.c_size_t]
     lib.fb_wav_read.restype = C.c_int
-    lib.fb_wav_peak_bins.argtypes = [C.c_char_p, C.c_uint64, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin)]
+    lib.fb_wav_peak_bins.argtypes = [C.c_char_p, C.c_uint64, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin), C.c_size_t]
     lib.fb_wav_peak_bins.restype = C.c_int
 
     lib.fb_devices_list.argtypes = [C.POINTER(FbDevice), C.c_size_t]
@@ -227,6 +240,39 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_playback_last_error.restype = C.c_char_p
     lib.fb_playback_destroy.argtypes = [C.c_void_p]
     lib.fb_playback_destroy.restype = None
+
+    u64, vp = C.c_uint64, C.c_void_p
+    lib.fb_scratch_create.argtypes = [u64, C.POINTER(C.c_int)]
+    lib.fb_scratch_create.restype = vp
+    lib.fb_scratch_start.argtypes = [vp]
+    lib.fb_scratch_start.restype = C.c_int
+    lib.fb_scratch_stop.argtypes = [vp]
+    lib.fb_scratch_stop.restype = None
+    lib.fb_scratch_destroy.argtypes = [vp]
+    lib.fb_scratch_destroy.restype = None
+    lib.fb_scratch_set_budget.argtypes = [vp, u64]
+    lib.fb_scratch_set_budget.restype = None
+    lib.fb_scratch_resident_bytes.argtypes = [vp]
+    lib.fb_scratch_resident_bytes.restype = u64
+    lib.fb_checkout_create.argtypes = [vp, vp, u64, u64, C.c_char_p, C.POINTER(C.c_int)]
+    lib.fb_checkout_create.restype = vp
+    lib.fb_checkout_slice.argtypes = [vp, vp, u64, u64, C.POINTER(C.c_int)]
+    lib.fb_checkout_slice.restype = vp
+    lib.fb_checkout_open.argtypes = [vp, C.c_char_p, u64, u64, C.POINTER(C.c_int)]
+    lib.fb_checkout_open.restype = vp
+    lib.fb_checkout_info.argtypes = [vp, vp, C.POINTER(FbCheckoutInfo)]
+    lib.fb_checkout_info.restype = None
+    # out_len (R-h6a), same rule as fb_wav_peak_bins above.
+    lib.fb_checkout_peak_bins.argtypes = [vp, vp, C.c_size_t, C.POINTER(FbPeakBin), C.c_size_t]
+    lib.fb_checkout_peak_bins.restype = C.c_int
+    lib.fb_checkout_pin.argtypes = [vp, vp, C.c_uint8]
+    lib.fb_checkout_pin.restype = None
+    lib.fb_checkout_export.argtypes = [vp, vp, C.c_char_p, u64, u64, C.c_int]
+    lib.fb_checkout_export.restype = C.c_int
+    lib.fb_checkout_destroy.argtypes = [vp, vp]
+    lib.fb_checkout_destroy.restype = None
+    lib.fb_playback_bind_checkout.argtypes = [vp, vp, vp, u64, u64]
+    lib.fb_playback_bind_checkout.restype = C.c_int
 
 
 def list_devices(max_devices: int = 128) -> list[dict]:
@@ -306,7 +352,11 @@ def wav_read(path, start_frame: int, n_frames: int) -> np.ndarray:
     lib = _require_lib()
     info = wav_info(path)
     out = np.zeros((int(n_frames), int(info.channels)), dtype=np.float32)
-    _wav_raise(lib.fb_wav_read(str(path).encode("utf-8"), int(start_frame), int(n_frames), _as_f32p(out)), path)
+    # out.size is the real float count of this buffer (R-h6a): the
+    # callee re-derives its own length from the file and rejects a
+    # mismatch, so this must be the buffer's ACTUAL size, never a value
+    # separately recomputed from n_frames/info.channels.
+    _wav_raise(lib.fb_wav_read(str(path).encode("utf-8"), int(start_frame), int(n_frames), _as_f32p(out), out.size), path)
     return out
 
 
@@ -315,9 +365,13 @@ def wav_peak_bins(path, start_frame: int, n_frames: int, n_bins: int) -> np.ndar
     lib = _require_lib()
     info = wav_info(path)
     out = np.zeros((int(n_bins), int(info.channels), 2), dtype=np.float32)
+    # The wire buffer is FbPeakBin-typed (2 floats each), so its real
+    # length in THAT unit is out.size // 2, i.e. n_bins * channels — not
+    # out.size itself (R-h6a: must be the buffer's actual struct count).
+    out_len = out.size // 2
     _wav_raise(lib.fb_wav_peak_bins(
         str(path).encode("utf-8"), int(start_frame), int(n_frames), int(n_bins),
-        out.ctypes.data_as(C.POINTER(FbPeakBin)),
+        out.ctypes.data_as(C.POINTER(FbPeakBin)), out_len,
     ), path)
     return np.ascontiguousarray(out.transpose(0, 2, 1))
 
@@ -361,6 +415,11 @@ class NativeAudioCircularBuffer:
         self.buffer = np.ctypeslib.as_array(storage, shape=(storage_frames, channels))
 
     # -- primitives -----------------------------------------------------
+
+    @property
+    def handle(self):
+        """The raw Zig pointer, for calls that take the ring as an argument."""
+        return self._h
 
     @property
     def total_written(self) -> int:
@@ -564,6 +623,113 @@ class NativeAudioCircularBuffer:
             self._h = None
 
     def __del__(self):  # belt-and-braces; tests call close() explicitly
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def _status_raise(status: int, what: str) -> None:
+    """One FbStatus → exception rule for the checkout calls."""
+    if status == _OK:
+        return
+    if status == _INVALID_ARG:
+        raise ValueError(f"{what}: invalid_arg")
+    if status == _OUT_OF_RANGE:
+        raise RuntimeError(f"{what}: out_of_range (span not written yet)")
+    if status == _OVERWRITTEN:
+        raise RuntimeError(f"{what}: overwritten (the ring lapped the span)")
+    if status == _OUT_OF_MEMORY:
+        raise MemoryError(f"{what}: out_of_memory")
+    if status == _IO_ERROR:
+        raise FileNotFoundError(f"{what}: io_error")
+    raise RuntimeError(f"{what}: status {status}")
+
+
+class NativeScratch:
+    """The process-wide scratch writer + RAM cache: a handle on a Zig
+    `Scratch`. Checkout handles are plain ints (Zig pointers); the
+    CheckoutManager owns their lifetime and destroys every one before
+    `close()`."""
+
+    def __init__(self, budget_bytes: int):
+        self._lib = _require_lib()
+        status = C.c_int(_OK)
+        self._h = self._lib.fb_scratch_create(int(budget_bytes), C.byref(status))
+        if not self._h:
+            _status_raise(status.value, "fb_scratch_create")
+        self._running = False
+
+    @property
+    def handle(self):
+        return self._h
+
+    def start(self) -> None:
+        _status_raise(self._lib.fb_scratch_start(self._h), "fb_scratch_start")
+        self._running = True
+
+    def stop(self) -> None:
+        if self._h:
+            self._lib.fb_scratch_stop(self._h)
+        self._running = False
+
+    def close(self) -> None:
+        if self._h:
+            self._lib.fb_scratch_destroy(self._h)
+            self._h = None
+
+    def set_budget(self, budget_bytes: int) -> None:
+        self._lib.fb_scratch_set_budget(self._h, int(budget_bytes))
+
+    @property
+    def resident_bytes(self) -> int:
+        return int(self._lib.fb_scratch_resident_bytes(self._h))
+
+    # -- checkouts ------------------------------------------------------
+    def checkout_create(self, ring: NativeAudioCircularBuffer, abs_start: int, abs_end: int, path) -> int:
+        status = C.c_int(_OK)
+        h = self._lib.fb_checkout_create(self._h, ring.handle, int(abs_start), int(abs_end), str(path).encode("utf-8"), C.byref(status))
+        if not h:
+            _status_raise(status.value, "fb_checkout_create")
+        return h
+
+    def checkout_slice(self, parent: int, start: int, n: int) -> int:
+        status = C.c_int(_OK)
+        h = self._lib.fb_checkout_slice(self._h, parent, int(start), int(n), C.byref(status))
+        if not h:
+            _status_raise(status.value, "fb_checkout_slice")
+        return h
+
+    def checkout_open(self, path, start_frame: int, n_frames: int) -> int:
+        status = C.c_int(_OK)
+        h = self._lib.fb_checkout_open(self._h, str(path).encode("utf-8"), int(start_frame), int(n_frames), C.byref(status))
+        if not h:
+            _status_raise(status.value, f"fb_checkout_open {path}")
+        return h
+
+    def checkout_info(self, h: int) -> FbCheckoutInfo:
+        info = FbCheckoutInfo()
+        self._lib.fb_checkout_info(self._h, h, C.byref(info))
+        return info
+
+    def checkout_peak_bins(self, h: int, n_bins: int) -> np.ndarray:
+        """(n_bins, 2, channels) float32 — the get_peak_bins layout."""
+        channels = int(self.checkout_info(h).channels)
+        out = np.zeros((int(n_bins), channels, 2), dtype=np.float32)
+        out_len = int(n_bins) * channels  # FbPeakBin count (R-h6a), not the float count
+        _status_raise(self._lib.fb_checkout_peak_bins(self._h, h, int(n_bins), out.ctypes.data_as(C.POINTER(FbPeakBin)), out_len), "fb_checkout_peak_bins")
+        return np.ascontiguousarray(out.transpose(0, 2, 1))
+
+    def checkout_pin(self, h: int, on: bool) -> None:
+        self._lib.fb_checkout_pin(self._h, h, 1 if on else 0)
+
+    def checkout_export(self, h: int, dst, start: int, n: int, subtype: str) -> None:
+        _status_raise(self._lib.fb_checkout_export(self._h, h, str(dst).encode("utf-8"), int(start), int(n), SUBTYPE_INTS[subtype]), "fb_checkout_export")
+
+    def checkout_destroy(self, h: int) -> None:
+        self._lib.fb_checkout_destroy(self._h, h)
+
+    def __del__(self):
         try:
             self.close()
         except Exception:
