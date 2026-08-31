@@ -348,9 +348,8 @@ pub fn read(self: *Ring, abs_start: u64, out: []f32) ReadError!void {
     return error.Overwritten;
 }
 
-/// One (min, max) pair per channel per display bin. `extern` fixes the
-/// layout to two consecutive f32 — the ctypes host maps a numpy
-/// float32[n_bins][channels][2] view straight onto `[*]PeakBin`.
+/// Alias of `peaks.PeakBin` (extern; see there for the layout the
+/// ctypes host relies on).
 pub const PeakBin = peaks.PeakBin;
 
 pub const PeakBinsError = error{ InvalidArgument, Overwritten };
@@ -409,10 +408,8 @@ pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) P
         const n = @min(n_frames_req, n_avail);
         if (n == 0) return;
         const abs_start = tw - n;
-        // numpy: step = n / n_bins in f64, edge_i = trunc(i * step). The
-        // multiply must be `float(i) * step`, not `i * n / n_bins` — a
-        // different rounding order moves edges by one frame and shifts
-        // every waveform golden (spec "Risks", peak-bin parity).
+        // Same bin-edge rule as `peaks.binEdge`'s doc comment — see there
+        // for the numpy rationale; kept in one place so the two cannot drift.
         const step: f64 = @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(n_bins));
         const span_ref = peaks.binEdge(step, 1, n, n_bins) - peaks.binEdge(step, 0, n, n_bins);
         const stride: u64 = @max(1, span_ref / peak_bins_max_samples_per_bin);

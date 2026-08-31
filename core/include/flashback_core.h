@@ -82,7 +82,10 @@ typedef struct FbWavInfo { uint32_t rate; uint16_t channels; uint8_t subtype; ui
 FbStatus fb_wav_info(const char *path, FbWavInfo *out);
 /* out holds n_frames * channels floats (channels from fb_wav_info). */
 FbStatus fb_wav_read(const char *path, uint64_t start_frame, size_t n_frames, float *out);
-/* out holds n_bins * channels FbPeakBin, out[bin * channels + ch]. */
+/* out holds n_bins * channels FbPeakBin, out[bin * channels + ch].
+ * n_frames == 0 returns FB_OK with out zeroed even for an out-of-range
+ * start (matches the ring's empty window); fb_wav_read validates the
+ * span first. */
 FbStatus fb_wav_peak_bins(const char *path, uint64_t start_frame, uint64_t n_frames, size_t n_bins, FbPeakBin *out);
 
 size_t     fb_devices_list(FbDevice *out, size_t max);        /* 0 on non-Windows */
