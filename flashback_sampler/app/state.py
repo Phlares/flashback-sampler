@@ -147,9 +147,15 @@ class AppState:
         (the default), the slot inherits whichever device is currently
         set at the AppState level when it goes to build a source.
 
+        `armed` sets the new slot's initial armed state (default True,
+        the normal "Add Source" path); adoption passes False for a
+        foreign-rate slot it recreates just to hold checkouts.
+
         Raises RuntimeError if adding the new slot's ring buffer would
         push the total project RAM footprint past
-        self.project_ram_budget_mb.
+        self.project_ram_budget_mb. `total_project_ram_bytes()` includes
+        `self.scratch.resident_bytes`, so this refusal also depends on
+        how much the scratch cache currently holds, not just ring sizes.
         """
         new_ring_bytes = preset.ram_bytes()
         current_bytes = self.total_project_ram_bytes()
@@ -180,43 +186,39 @@ class AppState:
     def adopt_scratch(self) -> list[Checkout]:
         """Adopt every manifest in the scratch dir: a root goes to the
         first slot with its rate and channels, else to a new unarmed slot
-        named from the manifest (60 s ring — the smallest that still
-        plays); a slice goes where its parent went. Anything unreadable
-        or without audio is skipped and left on disk. Crash and quit
+        named from the manifest (60 s ring — an arbitrary small default;
+        a foreign-rate slot only exists to hold adopted checkouts, not to
+        capture into); a slice goes where its parent went. Anything
+        unreadable, without audio, or that fails anywhere in adoption
+        (a corrupt-but-parseable manifest, a locked `.part` rename, a
+        RAM-budget refusal for a new slot, ...) is skipped and left on
+        disk -- no on-disk artefact may abort a launch. Crash and quit
         take this same path."""
         adopted: list[Checkout] = []
         where: dict[str, CaptureSlot] = {}
         for m in scan(self.scratch_dir):
-            if m.parent is None:
-                found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
-                if found is None:
-                    continue
-                audio, partial = found
-                slot = next((s for s in self.slots if s.sample_rate == m.rate and s.channels == m.channels), None)
-                if slot is None:
-                    try:
+            try:
+                if m.parent is None:
+                    found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
+                    if found is None:
+                        continue
+                    audio, partial = found
+                    slot = next((s for s in self.slots if s.sample_rate == m.rate and s.channels == m.channels), None)
+                    if slot is None:
                         slot = self.add_slot(
                             QualityPreset(name="ADOPTED", sample_rate=int(m.rate), channels=int(m.channels),
                                           buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
                             name=m.slot or "Adopted", armed=False,
                         )
-                    except RuntimeError:
-                        # R-h9b: add_slot can refuse on a project-RAM budget
-                        # exceeded -- what's already on disk must never
-                        # abort a launch. Skip this manifest, keep going.
-                        continue
-                try:
                     co = slot.checkout_manager.adopt_root(m, audio, partial)
-                except (OSError, ValueError, RuntimeError):
-                    continue
-            else:
-                slot = where.get(m.parent)
-                if slot is None:
-                    continue
-                try:
+                else:
+                    slot = where.get(m.parent)
+                    if slot is None:
+                        continue
                     co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
-                except (KeyError, ValueError, RuntimeError):
-                    continue
+            except Exception:
+                # No on-disk artefact may abort a launch -- skip and continue.
+                continue
             where[co.id] = slot
             adopted.append(co)
         return adopted
@@ -271,9 +273,9 @@ class AppState:
             slot.stop_capture()
         except Exception:  # pragma: no cover
             pass
-        slot.checkout_manager.discard_all()
         # A removed slot's checkouts go with it: manifests and files
         # deleted.
+        slot.checkout_manager.discard_all()
         try:
             slot.buffer.close()
         except Exception:  # pragma: no cover
@@ -437,9 +439,10 @@ class AppState:
         Stops capture if it was running; the caller is responsible for
         restarting capture after the rebuild.
 
-        Existing Checkouts are preserved — they're immutable in-RAM
-        snapshots. The active slot's CheckoutManager._buffer reference
-        is updated so new checkouts pull from the fresh ring.
+        Existing Checkouts are preserved — they're file-backed scratch
+        handles, independent of the ring they were cut from. The active
+        slot's CheckoutManager._buffer reference is updated so new
+        checkouts pull from the fresh ring.
         """
         slot = self.active_slot
         was_running = slot.is_capturing()
@@ -481,8 +484,14 @@ class AppState:
             except Exception:  # pragma: no cover
                 pass
         for slot in self.slots:
-            slot.checkout_manager.close()
-        self.scratch.close()  # drains the writer
+            try:
+                slot.checkout_manager.close()
+            except Exception:  # pragma: no cover
+                pass
+        try:
+            self.scratch.close()  # drains the writer
+        except Exception:  # pragma: no cover
+            pass
         try:
             self.scrub_player.close()
         except Exception:  # pragma: no cover
