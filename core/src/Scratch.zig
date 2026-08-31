@@ -253,8 +253,120 @@ fn lruRemoveLocked(self: *Scratch, co: *Checkout) void {
     co.lru_bytes = 0;
 }
 
+/// Pin = "the UI is looking at this one". Pinned entries are never
+/// evicted, and pinning an evicted checkout queues its preload so PLAY
+/// finds it resident. Unpinning re-checks the budget at once.
+pub fn pin(self: *Scratch, co: *Checkout, on: bool) void {
+    self.mutex.lockUncancelable(io);
+    defer self.mutex.unlock(io);
+    co.pinned = on;
+    if (on) {
+        if (co.frames == null) self.submitLocked(co, .load);
+    } else {
+        self.evictOverBudgetLocked();
+    }
+}
+
+/// Record a use: move to the LRU head, then trim to budget.
+pub fn touch(self: *Scratch, co: *Checkout) void {
+    self.mutex.lockUncancelable(io);
+    defer self.mutex.unlock(io);
+    if (co.frames != null) {
+        self.lruRemoveLocked(co);
+        self.lruInsertHeadLocked(co);
+    }
+    self.evictOverBudgetLocked();
+}
+
+pub fn setBudget(self: *Scratch, bytes: u64) void {
+    self.mutex.lockUncancelable(io);
+    defer self.mutex.unlock(io);
+    self.budget_bytes = bytes;
+    self.evictOverBudgetLocked();
+}
+
+/// Take `co` out of the cache before the caller destroys it.
+///
+/// With a worker running, waits for any job on `co` first (a write in
+/// flight must finish before its frames are freed) — quiescence is
+/// reached and the worker itself is the one that would have linked/
+/// unlinked `co` meanwhile.
+///
+/// With no worker running (ruling R-h4b/R-h3f), waiting would hang
+/// forever: nothing will ever pop `co`'s queued job or broadcast. So
+/// instead this dequeues `co` from the FIFO by hand, under the mutex,
+/// before it can be destroyed out from under a job that will now never
+/// run — the deadlock the pre-flight caught.
+pub fn forget(self: *Scratch, co: *Checkout) void {
+    self.mutex.lockUncancelable(io);
+    defer self.mutex.unlock(io);
+    if (self.thread != null) {
+        while (co.job != .none) self.cond.waitUncancelable(io, &self.mutex);
+    } else {
+        self.dequeueLocked(co);
+    }
+    self.lruRemoveLocked(co);
+}
+
+pub fn residentBytes(self: *Scratch) u64 {
+    self.mutex.lockUncancelable(io);
+    defer self.mutex.unlock(io);
+    return self.resident_bytes;
+}
+
+/// Unlink `co` from the FIFO if it is still queued, and reset its job to
+/// `.none`. Only safe to call when no worker is running: with a worker,
+/// `co` might already be popped (mid-job, `queue_next == null` but
+/// `job != .none`) and unlinking it here would race the worker's own
+/// mutation of `job`. `forget`'s no-worker branch is the only caller.
+/// The FIFO is singly linked, so removing a non-head node means walking
+/// from `queue_head` to find its predecessor.
+fn dequeueLocked(self: *Scratch, co: *Checkout) void {
+    if (co.job == .none) return;
+    if (self.queue_head == co) {
+        self.queue_head = co.queue_next;
+        if (self.queue_head == null) self.queue_tail = null;
+    } else {
+        var prev = self.queue_head;
+        while (prev) |p| : (prev = p.queue_next) {
+            if (p.queue_next == co) {
+                p.queue_next = co.queue_next;
+                if (self.queue_tail == co) self.queue_tail = p;
+                break;
+            }
+        }
+    }
+    co.queue_next = null;
+    co.job = .none;
+}
+
+/// Walk from the LRU tail while over budget. Skips pinned entries, held
+/// entries (`hold > 0`: an ABI call is reading `frames` right now
+/// outside the mutex — R-h1d, same eviction-blocking tier as `pinned`),
+/// entries with a job in flight, and entries whose audio is not yet safe
+/// on disk (`queued`/`writing`/`failed`) — evicting those would lose the
+/// only copy.
+///
+/// A `frames == null` entry can reach this walk: a `.write` submitted on
+/// a checkout with no frames links into the LRU at submit time (before
+/// `doWrite` ever runs, per `submitLocked`), and `doWrite`'s own
+/// no-frames failure path leaves it linked forever with a 0-byte
+/// snapshot — a "ghost" node inherited from h3. Its `write_state` never
+/// becomes `.written`/`.adopted`, so the check below already keeps it
+/// out of the removal branch; `Checkout.evict()` is also a no-op on null
+/// frames regardless, so no separate `frames == null` guard is needed
+/// here.
 fn evictOverBudgetLocked(self: *Scratch) void {
-    _ = self; // Task h4
+    var cur = self.lru_tail;
+    while (self.resident_bytes > self.budget_bytes) {
+        const co = cur orelse return;
+        cur = co.lru_prev;
+        if (co.pinned or co.hold > 0 or co.job != .none) continue;
+        const ws = co.write_state.load(.acquire);
+        if (ws != .written and ws != .adopted) continue;
+        self.lruRemoveLocked(co);
+        co.evict();
+    }
 }
 
 // ---- tests ----
@@ -630,4 +742,167 @@ test "stop before start is a safe no-op" {
     var s = Scratch.init(1 << 30);
     s.stop();
     try std.testing.expect(s.thread == null);
+}
+
+// ---- Task h4: LRU under a byte budget, pin, touch, forget ----
+
+/// Two written roots in a tmp dir, both resident, no thread running.
+const Pair = struct {
+    tmp: std.testing.TmpDir,
+    ring: Ring,
+    a: *Checkout,
+    b: *Checkout,
+    pa: [64]u8 = undefined,
+    pb: [64]u8 = undefined,
+
+    fn init(self: *Pair) !void {
+        self.tmp = std.testing.tmpDir(.{});
+        self.ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+        var in: [10]f32 = undefined;
+        for (&in, 0..) |*s, i| s.* = @floatFromInt(i);
+        self.ring.write(&in);
+        self.a = try Checkout.createFromRing(std.testing.allocator, &self.ring, 0, 4, tmpPath(&self.pa, &self.tmp, "a.wav"));
+        self.b = try Checkout.createFromRing(std.testing.allocator, &self.ring, 4, 10, tmpPath(&self.pb, &self.tmp, "b.wav"));
+    }
+    fn writeBoth(self: *Pair, s: *Scratch) !void {
+        try s.start();
+        s.submit(self.a, .write);
+        s.submit(self.b, .write);
+        s.stop();
+    }
+    fn deinit(self: *Pair) void {
+        self.a.destroy();
+        self.b.destroy();
+        self.ring.deinit();
+        self.tmp.cleanup();
+    }
+};
+const tmpPath = test_util.tmpPath;
+
+test "budget 0 drops every written root after its write; bytes read 0" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(0);
+    try p.writeBoth(&s);
+    try std.testing.expectEqual(@as(?[]f32, null), p.a.frames);
+    try std.testing.expectEqual(@as(?[]f32, null), p.b.frames);
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
+}
+
+test "eviction is LRU: touch moves to the head; the tail goes first" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    try p.writeBoth(&s); // both resident: a (16 B) then b (24 B) at the head
+    s.touch(p.a); // a is now most recent
+    s.setBudget(20); // 40 > 20: evict the tail = b
+    try std.testing.expect(p.a.frames != null);
+    try std.testing.expectEqual(@as(?[]f32, null), p.b.frames);
+    try std.testing.expectEqual(@as(u64, 16), s.residentBytes());
+}
+
+test "a pinned checkout survives budget 0; unpin evicts it" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    try p.writeBoth(&s);
+    s.pin(p.a, true);
+    s.setBudget(0);
+    try std.testing.expect(p.a.frames != null);
+    try std.testing.expectEqual(@as(?[]f32, null), p.b.frames);
+    s.pin(p.a, false);
+    try std.testing.expectEqual(@as(?[]f32, null), p.a.frames);
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
+}
+
+test "a checkout that is not yet written is never evicted" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(0);
+    // no thread: a and b stay .queued
+    s.submit(p.a, .write);
+    s.setBudget(0);
+    try std.testing.expect(p.a.frames != null);
+    try std.testing.expectEqual(@as(u64, 16), s.residentBytes());
+}
+
+test "pin on an evicted checkout preloads it (budget 0 keeps it while pinned)" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(0);
+    try p.writeBoth(&s); // both evicted
+    try s.start();
+    s.pin(p.b, true);
+    s.waitLoad(p.b);
+    s.stop();
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 4, 5, 6, 7, 8, 9 }, p.b.frames.?);
+    try std.testing.expectEqual(@as(u64, 24), s.residentBytes());
+}
+
+test "forget unlinks and stops counting; destroy afterwards is clean" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    try p.writeBoth(&s);
+    s.forget(p.a);
+    try std.testing.expectEqual(@as(u64, 24), s.residentBytes());
+    try std.testing.expectEqual(p.b, s.lru_head.?);
+    try std.testing.expectEqual(p.b, s.lru_tail.?);
+    s.forget(p.b);
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
+    try std.testing.expectEqual(@as(?*Checkout, null), s.lru_head);
+}
+
+test "a held checkout survives budget 0 like a pinned one (R-h1d: hold is eviction-blocking, same tier as pinned)" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    try p.writeBoth(&s);
+    p.a.hold = 1; // no worker is running at this point (writeBoth already stopped it)
+    s.setBudget(0);
+    try std.testing.expect(p.a.frames != null); // held: survives
+    try std.testing.expectEqual(@as(?[]f32, null), p.b.frames); // not held: evicted
+    p.a.hold = 0;
+    s.setBudget(0); // re-check at once, same as unpin does
+    try std.testing.expectEqual(@as(?[]f32, null), p.a.frames);
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
+}
+
+test "R-h4a: a failed write (job none, write_state failed) stays resident and unevictable" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    Recorder.reset();
+    Recorder.fail_next = true;
+    var s = Scratch.init(1 << 30);
+    s.write_fn = &Recorder.write;
+    try s.start();
+    s.submit(p.a, .write);
+    s.waitJob(p.a); // job reaches .none; write_state becomes .failed
+    s.stop();
+    try std.testing.expectEqual(Checkout.Job.none, p.a.job);
+    try std.testing.expectEqual(Checkout.WriteState.failed, p.a.write_state.load(.acquire));
+    s.setBudget(0); // over budget: the eviction walk reaches p.a with job == .none
+    try std.testing.expect(p.a.frames != null); // a failed write is not lost to eviction
+}
+
+test "forget on an unstarted scratch dequeues the FIFO entry instead of hanging (R-h4b/R-h3f)" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    s.submit(p.a, .write); // no start(): thread stays null, nothing will ever pop this job
+    s.forget(p.a); // must return without a worker to run the job
+    try std.testing.expectEqual(Checkout.Job.none, p.a.job);
+    try std.testing.expectEqual(@as(?*Checkout, null), s.queue_head);
+    try std.testing.expectEqual(@as(?*Checkout, null), s.queue_tail);
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
+    try std.testing.expectEqual(@as(?*Checkout, null), s.lru_head);
 }
