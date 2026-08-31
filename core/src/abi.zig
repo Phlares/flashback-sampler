@@ -14,7 +14,6 @@ const Mixer = @import("Mixer.zig");
 const Playback = @import("Playback.zig");
 const Checkout = @import("Checkout.zig");
 const Scratch = @import("Scratch.zig");
-const test_util = @import("test_util.zig");
 const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
@@ -798,17 +797,28 @@ export fn fb_checkout_open(s: *Scratch, path: [*:0]const u8, start_frame: u64, n
     return co;
 }
 
-/// R-h6b: waits out a `.load` in flight before reading the frames-
-/// derived fields (n_frames/start_frame are constant post-construction,
-/// but resident_bytes reads `co.frames`, which `Checkout.load` assigns
-/// OUTSIDE Scratch.mutex — see doLoad's own doc — so a mutex alone would
-/// not close this race; waitLoad is the actual guard). `resident_bytes`
-/// racing a concurrent EVICT (not a load) is accepted as a benign torn
-/// read of a scalar count here: a caller reading the underlying DATA,
-/// not just this count, goes through fb_checkout_peak_bins/_export/
-/// fb_playback_bind_checkout instead, which take a real hold.
+/// `resident_bytes` reads `co.frames`, a two-word optional slice that is
+/// not itself atomic — closing every race on it needs BOTH of the
+/// following, neither sufficient alone:
+///   - `waitLoad(co)` first: `Checkout.load` assigns `co.frames` OUTSIDE
+///     Scratch.mutex (see doLoad's own doc), so a mutex alone would not
+///     see that write ordered correctly against a load still in flight
+///     — waitLoad is the only thing that blocks until a `.load` job has
+///     fully finished.
+///   - `s.mutex` around the read itself: an EVICT (not a load) runs
+///     entirely under `s.mutex` (`evictOverBudgetLocked` calls
+///     `co.evict()` while still holding it), and can free `co.frames`
+///     from the WORKER thread for an unrelated job's post-completion
+///     budget check, at any moment `waitLoad` alone does not cover.
+///     Taking `s.mutex` here makes that a mutual-exclusion boundary
+///     against this exact read.
+/// Together these close both races; the worker never holds `s.mutex`
+/// during file I/O (only for the bookkeeping around a job), so taking
+/// it here never blocks on a write or load actually happening.
 export fn fb_checkout_info(s: *Scratch, co: *Checkout, out: *FbCheckoutInfo) void {
     s.waitLoad(co);
+    s.mutex.lockUncancelable(wav.io);
+    defer s.mutex.unlock(wav.io);
     out.* = .{
         .rate = co.rate,
         .channels = co.channels,
@@ -824,13 +834,17 @@ export fn fb_checkout_info(s: *Scratch, co: *Checkout, out: *FbCheckoutInfo) voi
 /// own count of that buffer (R-h6a) — never trusted without a match.
 /// R-h1d: `hold`/`release` bracket the read so a job finishing between
 /// this call starting and `co.peakBins` running cannot free `frames`
-/// out from under it (the eviction walk skips `hold > 0`).
+/// out from under it (the eviction walk skips `hold > 0`). `touch`
+/// records this as a real use, moving `co` to the LRU head — without
+/// it every read here would be invisible to the cache, and eviction
+/// would fall back to pure load order instead of least-recently-used.
 export fn fb_checkout_peak_bins(s: *Scratch, co: *Checkout, n_bins: usize, out: [*]peaks.PeakBin, out_len: usize) FbStatus {
     if (n_bins == 0) return .invalid_arg;
     const len = std.math.mul(usize, n_bins, co.channels) catch return .invalid_arg;
     if (len != out_len) return .invalid_arg;
     s.hold(co);
     defer s.release(co);
+    s.touch(co);
     co.peakBins(n_bins, out[0..len]) catch |e| return checkoutStatus(e);
     return .ok;
 }
@@ -845,14 +859,16 @@ export fn fb_checkout_pin(s: *Scratch, co: *Checkout, on: u8) void {
 /// guard uses the subtraction form so a hostile `start` cannot overflow
 /// the addition `start + n` under ReleaseSafe. R-h1d: `hold`/`release`
 /// bracket the whole read (both branches) for the same reason as
-/// fb_checkout_peak_bins. R-h6g: no trailing `FbMarkers *` yet — PR i
-/// adds region-aware export on top of this signature.
+/// fb_checkout_peak_bins, and `touch` marks the LRU use the same way.
+/// R-h6g: no trailing `FbMarkers *` yet — PR i adds region-aware export
+/// on top of this signature.
 export fn fb_checkout_export(s: *Scratch, co: *Checkout, dst: [*:0]const u8, start: u64, n: u64, subtype: c_int) FbStatus {
     if (subtype < 0 or subtype > 2) return .invalid_arg;
     if (n == 0 or start > co.n_frames or n > co.n_frames - start) return .invalid_arg;
     const st: wav.Subtype = @enumFromInt(@as(u8, @intCast(subtype)));
     s.hold(co);
     defer s.release(co);
+    s.touch(co);
     wav.write_mutex.lockUncancelable(wav.io);
     defer wav.write_mutex.unlock(wav.io);
     const ws = co.write_state.load(.acquire);
@@ -880,11 +896,13 @@ export fn fb_checkout_destroy(s: *Scratch, co: *Checkout) void {
 /// R-h1b: subtraction-form range guard, same reason as fb_checkout_export.
 /// R-h1d: `hold`/`release` bracket `Checkout.source` (which returns a
 /// `frames` sub-slice or a file range — either way a reference into
-/// state that must not be evicted mid-bind) and `Playback.bind`'s copy.
+/// state that must not be evicted mid-bind) and `Playback.bind`'s copy;
+/// `touch` marks the LRU use, same as the other two wrapped exports.
 export fn fb_playback_bind_checkout(pb: *Playback, s: *Scratch, co: *Checkout, start: u64, n: u64) FbStatus {
     if (n == 0 or start > co.n_frames or n > co.n_frames - start) return .invalid_arg;
     s.hold(co);
     defer s.release(co);
+    s.touch(co);
     pb.bind(co.source(start, n), co.rate, co.channels) catch |e| return checkoutStatus(e);
     return .ok;
 }
@@ -986,6 +1004,47 @@ test "fb_checkout_peak_bins rejects a mismatched out_len instead of trusting a c
     try std.testing.expectEqual(FbStatus.ok, fb_checkout_peak_bins(s, co, 2, &bins, 4));
 }
 
+test "fb_checkout_peak_bins touches the checkout: reading A then adding B over budget evicts the UNTOUCHED one, not A" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pbp: [64]u8 = undefined;
+    const path_a = std.fmt.bufPrintZ(&pa, ".zig-cache/tmp/{s}/touch-a.wav", .{tmp.sub_path}) catch unreachable;
+    const path_b = std.fmt.bufPrintZ(&pbp, ".zig-cache/tmp/{s}/touch-b.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 2, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    var in: [16]f32 = undefined; // 8 stereo frames
+    for (&in, 0..) |*f, i| f.* = @floatFromInt(i);
+    fb_ring_write(ring, &in, 8);
+    const s = fb_scratch_create(1 << 30, null) orelse return error.CreateFailed; // generous: both writes land uncontended
+    defer fb_scratch_destroy(s);
+    try std.testing.expectEqual(FbStatus.ok, fb_scratch_start(s));
+
+    // Both 4 stereo frames: residentBytes = 4 * 2 * 4 = 32 each.
+    const a = fb_checkout_create(s, ring, 0, 4, path_a, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, a);
+    s.waitJob(a);
+    const b = fb_checkout_create(s, ring, 4, 8, path_b, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, b);
+    s.waitJob(b);
+    // Submit order alone would put b at the LRU head and a at the tail
+    // (submitLocked inserts each new .write at the head) — so without a
+    // touch, a lowered budget would evict `a` next, not `b`.
+
+    var bins: [2]peaks.PeakBin = undefined; // n_bins(1) * channels(2)
+    // Read A: this must call Scratch.touch, moving A to the LRU head —
+    // otherwise this whole test is exercising nothing but write order.
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_peak_bins(s, a, 1, &bins, 2));
+
+    fb_scratch_set_budget(s, 32); // room for exactly one of the two 32-byte entries
+    var info_a: FbCheckoutInfo = undefined;
+    var info_b: FbCheckoutInfo = undefined;
+    fb_checkout_info(s, a, &info_a);
+    fb_checkout_info(s, b, &info_b);
+    try std.testing.expectEqual(@as(u64, 32), info_a.resident_bytes); // touched: survives
+    try std.testing.expectEqual(@as(u64, 0), info_b.resident_bytes); // untouched: evicted
+}
+
 /// R-h6d: the Python racy "RAM vs file agree" test cannot be made
 /// deterministic (the write finishing is a race with the test's own
 /// timing), so the RAM branch is pinned here instead — in-process Zig,
@@ -997,6 +1056,9 @@ test "fb_checkout_peak_bins rejects a mismatched out_len instead of trusting a c
 /// exact same bytes for comparison.
 const ParkedWrite = struct {
     var park: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    fn reset() void {
+        park.store(false, .monotonic);
+    }
     fn write(path: []const u8, frames: []const f32, rate: u32, channels: u16) anyerror!void {
         while (park.load(.acquire)) std.Thread.yield() catch {};
         try wav.writeFile(path, frames, rate, channels, .float32);
@@ -1016,13 +1078,28 @@ test "fb_checkout_export: the RAM branch (pre-write) and the file branch (post-w
 
     var s = Scratch.init(1 << 20);
     s.write_fn = &ParkedWrite.write;
+    ParkedWrite.reset(); // defensive: a prior failed run in this binary must not leave park stuck true
     ParkedWrite.park.store(true, .release); // the write never lands until unparked below
     try s.start();
-    defer s.stop();
+    defer s.stop(); // registered before the unpark defer below: see its comment for why that matters
 
     var st: FbStatus = .io_error;
     const co = fb_checkout_create(&s, &ring, 0, 20, co_path, &st) orelse return error.CreateFailed;
-    defer fb_checkout_destroy(&s, co);
+    defer fb_checkout_destroy(&s, co); // also registered before the unpark defer, same reason
+    // Registered LAST, after every defer above that can itself block on
+    // the parked worker: `fb_checkout_destroy` -> `forget`'s
+    // worker-running branch waits for co's `.write` job to finish, and
+    // `s.stop()` joins the worker thread — both would hang forever
+    // against a still-parked write. Zig defers unwind LIFO (most
+    // recently registered runs first), so THIS being the last one
+    // registered is what guarantees it runs before both of those on
+    // every exit path (the `try`s and `expectEqual`s all the way to the
+    // bottom of this test included), not just the happy path. Putting
+    // it in the same combined defer as `s.stop()` — tried first, and
+    // wrong — does not help: `fb_checkout_destroy`'s defer, registered
+    // between the two, would still unwind before it (reproduced: the
+    // suite hung for real on a deliberately forced failure here).
+    defer ParkedWrite.park.store(false, .release);
     try std.testing.expectEqual(FbStatus.ok, st);
     // Not written/adopted yet (parked): fb_checkout_export must take the
     // RAM (frames) branch here, not the file branch.
@@ -1189,6 +1266,23 @@ test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
 test "FbWavInfo layout matches native.py's FbWavInfo ctypes struct" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(FbWavInfo));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbWavInfo, "frames"));
+}
+
+test "FbCheckoutInfo layout matches native.py's FbCheckoutInfo ctypes struct" {
+    // The trickiest padding of the three mirrored structs: rate(u32) +
+    // channels(u16) + write_state(u8) leaves 7 bytes before the first
+    // u64 field, which needs 8-byte alignment — 1 padding byte pushes
+    // n_frames to offset 8. A Zig-only drift here (a reordered field, a
+    // changed field type) would still pass `zig build test` on its own;
+    // this is what pins it against native.py's FbCheckoutInfo ctypes
+    // Structure actually agreeing, byte for byte.
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(FbCheckoutInfo));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(FbCheckoutInfo, "rate"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(FbCheckoutInfo, "channels"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(FbCheckoutInfo, "write_state"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbCheckoutInfo, "n_frames"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(FbCheckoutInfo, "start_frame"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(FbCheckoutInfo, "resident_bytes"));
 }
 
 test "fb_ring_rms reports per-channel RMS of the newest window" {
