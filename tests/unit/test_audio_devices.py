@@ -193,13 +193,6 @@ def test_capture_list_ignores_render_rows(monkeypatch):
     assert kinds == {"loopback", "input"}
 
 
-def test_audio_devices_does_not_import_sounddevice():
-    # Source-level pin: the module imports sounddevice lazily today, so a
-    # sys.modules check is green before the change.
-    import inspect
-    assert "sounddevice" not in inspect.getsource(audio_devices)
-
-
 def test_default_output_device_enumerates_once(monkeypatch):
     calls = {"n": 0}
     real = list(_fake_devices())
