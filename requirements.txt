@@ -1,5 +1,6 @@
 numpy>=1.24
 PySide6>=6.7
+platformdirs>=4.0
 
 # dev — install with `pip install -e ".[dev]"` or directly:
 # pytest>=8.0

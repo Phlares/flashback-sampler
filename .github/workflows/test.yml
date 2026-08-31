@@ -29,8 +29,8 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
       # tests/conftest.py exits the session when the native library is
-      # missing; this variable is kept for older checkouts and is
-      # otherwise redundant.
+      # missing. This variable is kept so a revert of that gate does not
+      # silently lose the CI check.
       FLASHBACK_REQUIRE_NATIVE: "1"
 
     steps:

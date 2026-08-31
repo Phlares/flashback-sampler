@@ -1,12 +1,10 @@
-"""Native library smoke: bindings load and round-trip. The session
-requires the built library (tests/conftest.py); the skipif below is a
-per-file belt for direct invocation."""
+"""Native library smoke: bindings load and round-trip. The session gate
+in tests/conftest.py is the single mechanism that requires the built
+library; no per-file check is needed."""
 import numpy as np
 import pytest
 
-native = pytest.importorskip("flashback_sampler.core.native")
-
-pytestmark = pytest.mark.skipif(native.load() is None, reason="flashback_core library not built (cd core && zig build -Doptimize=ReleaseSafe)")
+from flashback_sampler.core import native
 
 
 def test_roundtrip_write_read():
@@ -114,9 +112,7 @@ def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
 def test_get_peak_bins_correct_past_capacity_before_physical_wrap():
     """Pins `Ring.peakBins`'s split between `capacity` (the readable
     window) and the ring's PHYSICAL modulus (`storage_frames` = capacity
-    + a 4096-frame guard band) -- native-only, because for the Python
-    implementation the two are always equal (len(buffer) == buffer_size),
-    so this scenario cannot be constructed there.
+    + a 4096-frame guard band).
 
     total_written here (10,000) exceeds capacity (8000) but stays well
     under storage_frames (8000 + 4096 = 12096), so NO physical wrap has
@@ -196,3 +192,7 @@ def test_get_peak_bins_and_get_rms_levels_after_close_keep_their_shape():
     rms = buf.get_rms_levels()
     assert rms.shape == (1,)
     assert np.all(rms == 0.0)
+
+    summary = buf.get_summary_bins(4)
+    assert summary.shape == (4, 1)
+    assert np.all(summary == 0.0)

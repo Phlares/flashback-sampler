@@ -355,8 +355,10 @@ pub const PeakBin = extern struct { min: f32, max: f32 };
 pub const PeakBinsError = error{ InvalidArgument, Overwritten };
 
 /// Cap on samples inspected per bin: above it the bin is stride-sampled so
-/// the per-tick cost stays bounded regardless of ring size (256 × 360 bins
-/// × stereo ≈ 46k reads, sub-millisecond).
+/// the per-tick cost stays bounded regardless of ring size. The stride
+/// branch samples `k ≈ 257` positions per bin (this cap plus one), so the
+/// real budget is `k × 360 bins × 2 channels ≈ 185k` float reads per tick,
+/// still sub-millisecond.
 pub const peak_bins_max_samples_per_bin: u64 = 256;
 /// Slack left below capacity on a saturated ring so the writer can advance
 /// during the in-place scan without tripping the verify (4096 frames ≈
@@ -379,14 +381,18 @@ pub const peak_bins_read_headroom: u64 = 4096;
 /// numpy would propagate them.
 ///
 /// Reads `frames` IN PLACE through the seqlock — no copy of a multi-
-/// hundred-MB ring at 30 Hz — then verifies `total_written` exactly like
-/// `read`, but STRICTER: two clauses, not one. The first guards the
-/// unsigned subtraction against a racing flush (ReleaseSafe traps on
-/// underflow); the second is the lap check. A flush during the scan
-/// retries here where numpy's single-clause check would have accepted
-/// the read — both end in zeros or a retry, never torn data. On three
-/// torn attempts `out` is all zeros and the error says so; an empty
-/// window is all zeros and success.
+/// hundred-MB ring at 30 Hz — then verifies `total_written`, but the
+/// verify bounds only the OLD end of the span: `t2 >= abs_start` guards
+/// the unsigned subtraction after a racing flush (ReleaseSafe traps on
+/// underflow), and `t2 - abs_start <= capacity` is the lap check. `read`
+/// additionally requires `t2 >= abs_start + n`; this scan does not, so
+/// the stride branch's last bin may sample up to `stride` frames past
+/// `total_written`. Those positions sit inside the writer's in-flight
+/// block, are always taken `% storage_frames` so they never leave the
+/// allocation, and fold into that one bin's min/max — a ported numpy
+/// quirk, display-only by construction. On three torn attempts `out` is
+/// all zeros and the error says so; an empty window is all zeros and
+/// success.
 pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) PeakBinsError!void {
     if (n_bins == 0) return error.InvalidArgument;
     std.debug.assert(out.len == n_bins * self.channels);
@@ -441,9 +447,12 @@ pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) P
                 }
             }
         }
-        // Seqlock verify, same two clauses as `read`: the first guards the
-        // unsigned subtraction against a racing flush (ReleaseSafe traps
-        // on underflow); the second is the lap check.
+        // Seqlock verify: bounds only the OLD end of the span. `t2 >=
+        // abs_start` guards the unsigned subtraction against a racing
+        // flush (ReleaseSafe traps on underflow); `t2 - abs_start <=
+        // capacity` is the lap check. Unlike `read`, there is no `t2 >=
+        // abs_start + n` clause — the stride branch's overshoot reads are
+        // accepted, not retried (see the doc comment above).
         const t2 = self.total_written.load(.acquire);
         if (t2 >= abs_start and t2 - abs_start <= self.capacity) return;
     }
@@ -451,6 +460,8 @@ pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) P
     return error.Overwritten;
 }
 
+/// The clip waveform's `_peak_bins_from_audio` (turntable_window.py) computes
+/// the same edges in numpy; keep them in step.
 fn binEdge(step: f64, i: usize, n: u64, n_bins: usize) u64 {
     if (i == n_bins) return n; // numpy sets the last edge to `stop` exactly
     // @intFromFloat truncates toward zero == numpy's int64 cast here (non-negative).
