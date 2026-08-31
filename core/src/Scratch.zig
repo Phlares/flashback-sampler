@@ -1012,18 +1012,35 @@ test "the writer thread and a control-thread wav.writeFile serialise through wav
     const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, n, tmpPath(&pa, &tmp, "w.wav"));
     defer co.destroy();
     try s.start();
-    s.submit(co, .write);
-    // Race a second writer from this thread through the same mutex: the
-    // spec's "Risks" item about global_single_threaded from a second
-    // thread — this must serialise, not deadlock or corrupt either file.
+    // `defer s.stop()` right after `start`, not a trailing explicit call:
+    // if anything below this point returns an error (e.g. the writeFile
+    // below), defers unwind top-down from here, and `co.destroy()` (a
+    // few lines up) would free `co.frames` while the worker is still
+    // live inside `doWrite` — a use-after-free in the very test proving
+    // threading safety. `stop` is safe to call more than once, so this
+    // costs nothing on the normal path either.
+    defer s.stop();
     const other = tmpPath(&pb, &tmp, "c.wav");
+    // Force the interleaving deterministically, not by scheduling luck:
+    // take `write_mutex` BEFORE submitting the worker's job, so the
+    // worker's `defaultWrite` (its `write_fn`) is guaranteed to block
+    // trying to acquire this same mutex the instant it reaches its own
+    // `wav.writeFile` call inside `doWrite` — the worker holds no
+    // `Scratch.mutex` while blocked there, so this is not a lock
+    // inversion. That means this thread's own `wav.writeFile` below is
+    // guaranteed to land first, every run, while the worker's write is
+    // still pending on the held lock: the exact contended interleaving
+    // this test exists to prove serialises rather than deadlocking or
+    // corrupting either file. Without forcing the order this way, the
+    // worker could finish its entire write before this thread ever took
+    // the mutex, making the run sequential and the test unable to tell.
     {
         wav.write_mutex.lockUncancelable(wav.io);
         defer wav.write_mutex.unlock(wav.io);
+        s.submit(co, .write); // the worker now races toward the same mutex, held by this thread
         try wav.writeFile(other, in[0 .. n * 2], 48_000, 2, .float32);
     }
     s.waitJob(co);
-    s.stop();
     try std.testing.expectEqual(Checkout.WriteState.written, co.write_state.load(.acquire));
     inline for (.{ "w.wav", "c.wav" }) |name| {
         var pp: [64]u8 = undefined;
@@ -1036,19 +1053,20 @@ test "the writer thread and a control-thread wav.writeFile serialise through wav
     }
 }
 
-// R-h5a's companion pin: the eviction guard's `co.job != .none` clause
-// (evictOverBudgetLocked) is the ONLY thing protecting a checkout in one
-// real window — a re-submitted `.write` on a still-resident, already-
-// `.written` checkout, between `run` popping the job (co.job stays
-// `.write`, unchanged from submit) and `doWrite`'s first store of
-// `.writing`. That window is a handful of instructions in real
-// execution; it can't be hit by scheduling luck in a portable test. But
-// its state is fully reproducible by hand: finish a real write (worker
-// started, then stopped), then submit a second `.write` with NO worker
-// running to ever pick it up. `co.job` becomes `.write` and
-// `write_state` stays `.written` — exactly the window's shape — and
-// stays that way indefinitely, long enough to probe the guard directly.
-test "R-h5b: a re-submitted write on a still-written, resident checkout is not evicted (job != .none is the only guard in that window)" {
+// h4 carry: a re-submitted write is not evicted mid-window. The eviction
+// guard's `co.job != .none` clause (evictOverBudgetLocked) is the ONLY
+// thing protecting a checkout in one real window — a re-submitted
+// `.write` on a still-resident, already-`.written` checkout, between
+// `run` popping the job (co.job stays `.write`, unchanged from submit)
+// and `doWrite`'s first store of `.writing`. That window is a handful of
+// instructions in real execution; it can't be hit by scheduling luck in
+// a portable test. But its state is fully reproducible by hand: finish a
+// real write (worker started, then stopped), then submit a second
+// `.write` with NO worker running to ever pick it up. `co.job` becomes
+// `.write` and `write_state` stays `.written` — exactly the window's
+// shape — and stays that way indefinitely, long enough to probe the
+// guard directly.
+test "h4 carry: a re-submitted write is not evicted mid-window (job != .none is the only guard there)" {
     var p: Pair = undefined;
     try p.init();
     defer p.deinit();
@@ -1063,6 +1081,12 @@ test "R-h5b: a re-submitted write on a still-written, resident checkout is not e
 
     s.setBudget(0); // over budget: only `co.job != .none` protects p.a here (write_state == .written passes the ws check too)
     try std.testing.expect(p.a.frames != null); // must survive: a write is still (re-)pending on it
+    // Positive control: p.b (no job pending) WAS evicted at the same
+    // budget-0 call. Without this, a broken guard that skips eviction
+    // entirely would still pass the line above — this pins that the walk
+    // actually ran and actually spared p.a specifically, not that it did
+    // nothing.
+    try std.testing.expect(p.b.frames == null);
 
     s.forget(p.a); // stranded job on an unstarted scratch: dequeue by hand before destroy
     s.forget(p.b); // p.b was already evicted by setBudget(0); a harmless no-op
