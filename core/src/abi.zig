@@ -289,6 +289,14 @@ export fn fb_ring_peak_bins(ring: *Ring, n_frames: u64, n_bins: usize, out: [*]R
     return .ok;
 }
 
+export fn fb_ring_rms(ring: *Ring, n_frames: u64, out: [*]f32) FbStatus {
+    ring.rmsLatest(n_frames, out[0..ring.channels]) catch |err| return switch (err) {
+        error.Overwritten => .overwritten,
+        error.OutOfRange => .out_of_range,
+    };
+    return .ok;
+}
+
 export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usize, rate: u32, channels: u16, subtype: c_int) FbStatus {
     if (rate == 0 or channels == 0) return .invalid_arg;
     if (subtype < 0 or subtype > 2) return .invalid_arg;
@@ -619,4 +627,14 @@ test "fb_ring_peak_bins rejects n_bins == 0 and reduces a ramp" {
 test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(Ring.PeakBin));
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(Ring.PeakBin, "max"));
+}
+
+test "fb_ring_rms reports per-channel RMS of the newest window" {
+    const ring = fb_ring_create(16, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    const in = [_]f32{ 3, 4, 0, 0 };
+    fb_ring_write(ring, &in, 4);
+    var out: [1]f32 = undefined;
+    try std.testing.expectEqual(FbStatus.ok, fb_ring_rms(ring, 4, &out));
+    try std.testing.expectEqual(@as(f32, 2.5), out[0]);
 }

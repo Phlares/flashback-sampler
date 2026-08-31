@@ -163,6 +163,9 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_ring_peak_bins.argtypes = [C.c_void_p, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin)]
     lib.fb_ring_peak_bins.restype = C.c_int
 
+    lib.fb_ring_rms.argtypes = [C.c_void_p, C.c_uint64, f32p]
+    lib.fb_ring_rms.restype = C.c_int
+
     lib.fb_wav_write.argtypes = [C.c_char_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16, C.c_int]
     lib.fb_wav_write.restype = C.c_int
 
@@ -440,6 +443,16 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         if status == _INVALID_ARG:
             raise ValueError("n_bins must be positive")
         return np.ascontiguousarray(out.transpose(0, 2, 1))
+
+    def get_rms_levels(self, window_seconds: float = 0.1) -> np.ndarray:
+        """RMS per channel over the newest window (level meter). Zeros when
+        the window is empty or torn -- the engine zeroes `out` on error --
+        and for a closed handle."""
+        out = np.zeros(self.channels, dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
+        self._lib.fb_ring_rms(self._h, max(0, int(window_seconds * self.sample_rate)), _as_f32p(out))
+        return out
 
     def get_summary_bins(self, n_bins: int, seconds=None, bin_span_samples=None) -> np.ndarray:
         """See AudioCircularBuffer.get_summary_bins's docstring for the

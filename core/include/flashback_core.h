@@ -65,6 +65,8 @@ FbStatus fb_ring_summary_bins(FbRing *, size_t n_bins, uint64_t n_samples,
  * FB_INVALID_ARG for n_bins == 0; FB_OVERWRITTEN (out zeroed) after three
  * torn attempts; FB_OK with out zeroed for an empty window. */
 FbStatus fb_ring_peak_bins(FbRing *, uint64_t n_frames, size_t n_bins, FbPeakBin *out);
+/* RMS per channel over the newest n_frames; out holds `channels` floats, zeroed on error. */
+FbStatus fb_ring_rms(FbRing *, uint64_t n_frames, float *out);
 /* Serialized internally (a mutex guards the whole call) — safe to call
  * from multiple host threads concurrently, unlike every other fb_ring_*
  * export above, which assume single-writer/single-control-thread

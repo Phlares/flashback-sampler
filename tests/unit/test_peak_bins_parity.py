@@ -42,3 +42,15 @@ def test_zig_peak_bins_equal_numpy(rate, channels, duration, frames, seconds, n_
         np.testing.assert_array_equal(zig, ref)
     finally:
         buf.close()
+
+
+def test_zig_rms_matches_numpy_reference():
+    from flashback_sampler.core.buffer import RingDerivedOps
+    buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=48_000, channels=2)
+    try:
+        rng = np.random.default_rng(3)
+        buf.write(rng.standard_normal((30_000, 2)).astype(np.float32))
+        ref = RingDerivedOps.get_rms_levels(buf, 0.2)   # the numpy path, called unbound
+        np.testing.assert_allclose(buf.get_rms_levels(0.2), ref, rtol=1e-5)
+    finally:
+        buf.close()

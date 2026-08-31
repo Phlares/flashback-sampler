@@ -476,6 +476,33 @@ fn reduceFrame(self: *const Ring, frame_idx: u64, bin: []PeakBin, first: *bool) 
     first.* = false;
 }
 
+/// RMS per channel over the newest `n_frames_req` frames, clamped like
+/// `read`'s callers: min(req, total_written, capacity). `out.len ==
+/// channels`. Reads through `read` in `max_write_frames` chunks — each
+/// chunk is a verified seqlock copy, and the scratch is a fixed 32 KiB
+/// stack array, so the ring's size never reaches the stack. Sum of
+/// squares in f64 (as Summary does) so long windows keep precision.
+pub fn rmsLatest(self: *Ring, n_frames_req: u64, out: []f32) ReadError!void {
+    std.debug.assert(out.len == self.channels);
+    @memset(out, 0);
+    const tw = self.total_written.load(.acquire);
+    const n = @min(n_frames_req, @min(tw, self.capacity));
+    if (n == 0) return;
+    var ss: [2]f64 = .{ 0, 0 }; // channels <= 2 is enforced by Ring.init
+    var scratch: [max_write_frames * 2]f32 = undefined; // channels <= 2 is enforced by Ring.init
+    var abs = tw - n;
+    var left = n;
+    while (left > 0) {
+        const take: usize = @intCast(@min(left, max_write_frames));
+        const chunk = scratch[0 .. take * self.channels];
+        try self.read(abs, chunk);
+        for (chunk, 0..) |v, i| ss[i % self.channels] += @as(f64, v) * @as(f64, v);
+        abs += take;
+        left -= take;
+    }
+    for (out, 0..) |*o, c| o.* = @floatCast(@sqrt(ss[c] / @as(f64, @floatFromInt(n))));
+}
+
 test "init rejects sample_rate == 0" {
     try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 0, .channels = 2, .seconds = 1.0 }));
 }
@@ -1301,4 +1328,49 @@ test "peakBins: a request shorter than the available window reads only the newes
     try ring.peakBins(100, 2, &out); // newest 100 of 1000: abs 900..999
     try expectBin(&out, 0, 900, 949);
     try expectBin(&out, 1, 950, 999);
+}
+
+test "rmsLatest: exact values, newest-window clamp, per-channel" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 3, 4, 0, 0 });
+    var out: [1]f32 = undefined;
+    try ring.rmsLatest(4, &out);
+    try std.testing.expectEqual(@as(f32, 2.5), out[0]); // sqrt((9 + 16) / 4)
+    try ring.rmsLatest(2, &out);
+    try std.testing.expectEqual(@as(f32, 0), out[0]); // newest two frames are silent
+    var st = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 2, .seconds = 1.0 });
+    defer st.deinit();
+    st.write(&[_]f32{ 1, 2, 1, 2 });
+    var out2: [2]f32 = undefined;
+    try st.rmsLatest(2, &out2);
+    try std.testing.expectEqual(@as(f32, 1), out2[0]);
+    try std.testing.expectEqual(@as(f32, 2), out2[1]);
+}
+
+test "rmsLatest: a window longer than max_write_frames is read in chunks" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 10_000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    const block = [_]f32{0.5} ** 9000; // > 2 chunks of 4096
+    ring.write(&block);
+    var out: [1]f32 = undefined;
+    try ring.rmsLatest(9000, &out);
+    try std.testing.expectEqual(@as(f32, 0.5), out[0]); // ss = 9000 * 0.25, exact in f64
+}
+
+test "rmsLatest: empty ring is zero and ok" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    var out: [1]f32 = .{7};
+    try ring.rmsLatest(16, &out);
+    try std.testing.expectEqual(@as(f32, 0), out[0]);
+}
+
+test "rmsLatest: a request longer than capacity reads only the newest capacity frames" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0 }); // capacity 16
+    defer ring.deinit();
+    ring.write(&([_]f32{100} ** 4 ++ [_]f32{0.5} ** 16)); // 20 frames: the loud four are lapped out
+    var out: [1]f32 = undefined;
+    try ring.rmsLatest(1000, &out);
+    try std.testing.expectEqual(@as(f32, 0.5), out[0]);
 }
