@@ -58,9 +58,12 @@ def test_get_segment_retries_on_transient_read_failure(monkeypatch):
     A live writer/reader race is inherently probabilistic -- pounding the
     buffer from a background thread does NOT reliably prove the retry
     loop matters, since most single-attempt reads still succeed by luck
-    even with zero retries. Monkeypatching fb_ring_read to force exactly
-    two synthetic failures before succeeding makes the retry behavior
-    deterministic instead of luck-dependent."""
+    even with zero retries (confirmed while fixing this: the
+    concurrency stress test in test_buffer.py,
+    test_writer_and_reader_concurrent_no_corruption, passed 3/3 runs
+    with the retry loop removed entirely). Monkeypatching fb_ring_read
+    to force exactly two synthetic failures before succeeding makes the
+    retry behavior deterministic instead of luck-dependent."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(np.arange(500, dtype=np.float32)[:, None])
 
@@ -88,8 +91,7 @@ def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
     success). Without a retry, checkout.py's create_from_abs_range
     (drag-select) sees a torn read as a hard failure -- an empty array /
     RuntimeError -- on a request that would have succeeded a moment
-    later. Matches NativeAudioCircularBuffer.copy_abs_range's 3-attempt
-    retry."""
+    later."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(np.arange(500, dtype=np.float32)[:, None])
 
@@ -173,3 +175,24 @@ def test_wav_pcm_codes_match_the_documented_quantizer(tmp_path, subtype, scale, 
     v = (audio * np.float32(scale)).astype(np.float64)  # f32 multiply as in wav.zig, then exact rounding in f64
     codes = np.sign(v) * np.floor(np.abs(v) + 0.5)     # half away from zero == Zig @round
     np.testing.assert_array_equal(got, codes.astype(np.float32) / np.float32(denom))
+
+
+def test_get_peak_bins_and_get_rms_levels_after_close_keep_their_shape():
+    """Pins the closed-handle guards' shape against the live path's. A
+    mono ring's get_peak_bins guard returned `out` (n_bins, channels, 2)
+    RAW, before the transpose the live path applies -- the documented
+    (n_bins, 2, channels) shape only held for a live handle. Confirmed
+    broken before the fix: shape came back (4, 1, 2), not (4, 2, 1);
+    waveform_view's bins[:, 1, ch] would IndexError on that shape for a
+    mono ring closed mid-read."""
+    buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=1)
+    buf.close()
+
+    bins = buf.get_peak_bins(0.1, 4)
+    assert bins.shape == (4, 2, 1)
+    assert bins.dtype == np.float32
+    assert np.all(bins == 0.0)
+
+    rms = buf.get_rms_levels()
+    assert rms.shape == (1,)
+    assert np.all(rms == 0.0)
