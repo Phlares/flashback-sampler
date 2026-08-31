@@ -47,6 +47,13 @@ hold: u32,
 queue_next: ?*Checkout,
 lru_prev: ?*Checkout,
 lru_next: ?*Checkout,
+/// Snapshot of `residentBytes()` taken by Scratch at LRU-insert time.
+/// `residentBytes()` reads `frames.len`, which can change (load, evict)
+/// while this checkout stays linked — Scratch.lruRemoveLocked must
+/// subtract the exact figure it added, not whatever `frames` holds at
+/// removal time, or `resident_bytes` drifts or underflows. Owned by
+/// Scratch.mutex, same as the list links.
+lru_bytes: u64,
 
 fn create(allocator: std.mem.Allocator, p: []const u8, start_frame: u64, n_frames: u64, rate: u32, channels: u16, frames: ?[]f32, ws: WriteState) !*Checkout {
     if (p.len >= max_path) return error.PathTooLong;
@@ -71,6 +78,7 @@ fn create(allocator: std.mem.Allocator, p: []const u8, start_frame: u64, n_frame
         .queue_next = null,
         .lru_prev = null,
         .lru_next = null,
+        .lru_bytes = 0,
     };
     @memcpy(self.path_buf[0..p.len], p);
     return self;
