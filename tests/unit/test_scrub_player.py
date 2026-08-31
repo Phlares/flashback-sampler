@@ -68,9 +68,9 @@ def test_create_is_lazy_and_first_bind_passes_rate_channels_and_device(lib):
 
 
 def test_construct_without_library_is_silent_and_the_first_native_call_raises(monkeypatch):
-    """Zig-less workstations stay green (tests/conftest.py): AppState
-    builds a player at startup, so construction must not touch the
-    native library. Only a call that needs the handle may raise."""
+    """AppState builds a player at startup before any clip exists, so
+    construction must not touch the native library; only a call that
+    needs the handle may raise."""
     monkeypatch.setattr(native, "_lib", None)
     monkeypatch.setattr(native, "_lib_tried", True)
     p = NativeScrubPlayer()

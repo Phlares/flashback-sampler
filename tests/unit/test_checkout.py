@@ -2,7 +2,7 @@
 Unit tests for the Checkout workflow.
 
 Checkout = pull an immutable snapshot of the live ring buffer, preserve it
-in RAM for scrubbing/preview, and optionally save to WAV or FLAC. The ring
+in RAM for scrubbing/preview, and optionally save to WAV. The ring
 buffer must keep writing throughout.
 """
 
@@ -14,11 +14,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import soundfile as sf
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
 from tests.fixtures.sine_source import ramp_block, sine_block
+from tests.fixtures.wavread import read_wav
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ from tests.fixtures.sine_source import ramp_block, sine_block
 
 
 def test_create_checkout_snapshots_latest_n_seconds():
-    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 1500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.5)  # last 500 samples
@@ -46,7 +46,7 @@ def test_create_checkout_snapshots_latest_n_seconds():
 
 
 def test_checkout_id_is_unique():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     a = mgr.create(duration_s=0.2)
@@ -55,7 +55,7 @@ def test_checkout_id_is_unique():
 
 
 def test_list_returns_all_active_checkouts():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 800, channels=1))
     mgr = CheckoutManager(buffer=buf)
     a = mgr.create(duration_s=0.2)
@@ -71,7 +71,7 @@ def test_checkout_anchor_offset_pulls_earlier_range():
     With a 2 s buffer at 1 kHz containing samples 0..1999, a 0.5 s checkout
     ending 0.5 s ago should yield samples 1000..1499 (not the most recent).
     """
-    buf = AudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=2.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 2000, channels=1))
     mgr = CheckoutManager(buffer=buf)
 
@@ -85,7 +85,7 @@ def test_checkout_anchor_offset_pulls_earlier_range():
 
 
 def test_checkout_anchor_offset_zero_matches_default_path():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 800, channels=1))
     mgr = CheckoutManager(buffer=buf)
 
@@ -104,7 +104,7 @@ def test_checkout_anchor_offset_clamped_when_past_buffered():
     past the rolling edge anchors "as far back as the buffer allows."
     """
     # Buffer capacity is 10 s; only 2 s of audio buffered so far.
-    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 2000, channels=1))
     mgr = CheckoutManager(buffer=buf)
 
@@ -126,7 +126,7 @@ def test_checkout_anchor_offset_just_inside_buffered_pulls_earliest_audio():
     returned clip points at the OLDEST audio in the ring. A ramp
     starting at 0 should yield sample values near 0 at the clip's head.
     """
-    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 3000, channels=1))  # 3 s buffered
     mgr = CheckoutManager(buffer=buf)
 
@@ -142,7 +142,7 @@ def test_checkout_anchor_offset_mid_buffer_pulls_middle_audio():
     Clip window = [2.5 s ago, 1.5 s ago]. With a 0..2999 ramp at 1 kHz,
     that maps to samples [500..1500). First sample ≈ 500, last ≈ 1499.
     """
-    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=10.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 3000, channels=1))
     mgr = CheckoutManager(buffer=buf)
 
@@ -153,7 +153,7 @@ def test_checkout_anchor_offset_mid_buffer_pulls_middle_audio():
 
 
 def test_create_from_abs_range_pulls_exact_samples():
-    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 3000, channels=1))
     mgr = CheckoutManager(buffer=buf)
 
@@ -166,7 +166,7 @@ def test_create_from_abs_range_pulls_exact_samples():
 
 
 def test_create_from_abs_range_rejects_inverted():
-    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 3000, channels=1))
     mgr = CheckoutManager(buffer=buf)
     with pytest.raises(ValueError):
@@ -174,7 +174,7 @@ def test_create_from_abs_range_rejects_inverted():
 
 
 def test_create_from_abs_range_rejects_past_head():
-    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 1000, channels=1))
     mgr = CheckoutManager(buffer=buf)
     with pytest.raises(RuntimeError, match="past current head"):
@@ -196,7 +196,7 @@ def test_create_from_abs_range_rejects_overwritten():
     Start of the requested range is older than the ring capacity —
     it's already been overwritten by newer audio.
     """
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     _chunked_write(buf, 3000)  # total_written=3000, only samples 2000..3000 still live
     mgr = CheckoutManager(buffer=buf)
     with pytest.raises(RuntimeError, match="already been overwritten"):
@@ -205,7 +205,7 @@ def test_create_from_abs_range_rejects_overwritten():
 
 def test_create_from_abs_range_succeeds_within_live_ring():
     """Pull the last 300 ms from a ring that's wrapped several times."""
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     _chunked_write(buf, 2500)  # total_written=2500, samples 1500..2500 still live
     mgr = CheckoutManager(buffer=buf)
 
@@ -216,7 +216,7 @@ def test_create_from_abs_range_succeeds_within_live_ring():
 
 
 def test_checkout_anchor_offset_rejects_negative():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     with pytest.raises(ValueError):
@@ -224,7 +224,7 @@ def test_checkout_anchor_offset_rejects_negative():
 
 
 def test_checkout_duration_clamped_to_available():
-    buf = AudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=5.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 200, channels=1))  # only 200 samples buffered
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=3.0)  # ask for 3000, should clamp to 200
@@ -247,7 +247,7 @@ def test_checkout_create_does_not_stall_writer():
     in-write time must stay under 1 ms, which proves checkout creation
     does not block the audio callback thread.
     """
-    buf = AudioCircularBuffer(duration_seconds=30.0, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=30.0, sample_rate=48_000, channels=2)
     mgr = CheckoutManager(buffer=buf, max_active_checkouts=1024, max_total_ram_mb=4096)
     stop = threading.Event()
     results = {}
@@ -310,7 +310,7 @@ def test_save_as_wav_writes_correct_samples(tmp_path: Path):
     for float audio. We use a normalized sine wave and verify exact sample
     equality (within floating-point precision).
     """
-    buf = AudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=1)
     buf.write(sine_block(0, 24_000, freq_hz=440.0, sample_rate=48_000, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.2)  # last 9600 samples
@@ -319,36 +319,17 @@ def test_save_as_wav_writes_correct_samples(tmp_path: Path):
     mgr.save(co.id, target, fmt="WAV")
 
     assert target.exists()
-    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
-    assert sr == 48_000
+    data, info = read_wav(target)
+    assert info.samplerate == 48_000
     assert data.shape == (9600, 1)
     # WAV defaults to float32 subtype (bit-perfect round-trip)
-    assert sf.info(str(target)).subtype == "FLOAT"
+    assert info.subtype == "FLOAT"
     assert np.allclose(data, co.audio, atol=1e-7)
     assert co.state == "saved"
 
 
-def test_save_as_flac_round_trips(tmp_path: Path):
-    buf = AudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=2)
-    buf.write(sine_block(0, 12000, freq_hz=440.0, sample_rate=48_000, channels=2))
-    mgr = CheckoutManager(buffer=buf)
-    co = mgr.create(duration_s=0.2)  # last 9600 samples
-    assert co.audio.shape == (9600, 2)
-
-    target = tmp_path / "clip.flac"
-    mgr.save(co.id, target, fmt="FLAC")
-    assert target.exists()
-    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
-    assert sr == 48_000
-    assert data.shape == (9600, 2)
-    # FLAC is lossless for 16-bit and higher; float32 → FLAC round-trips
-    # exactly at the sample values we care about here.
-    assert np.allclose(data, co.audio, atol=1e-4)
-    assert co.state == "saved"
-
-
 def test_save_invalid_format_raises(tmp_path: Path):
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.2)
@@ -357,7 +338,7 @@ def test_save_invalid_format_raises(tmp_path: Path):
 
 
 def test_save_unknown_id_raises(tmp_path: Path):
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     mgr = CheckoutManager(buffer=buf)
     with pytest.raises(KeyError):
         mgr.save("nonsense-id", tmp_path / "x.wav", fmt="WAV")
@@ -374,7 +355,7 @@ def test_flushing_buffer_does_not_invalidate_existing_checkouts():
     must not touch a checkout's audio. This guards the isolation boundary
     between the Checkout lifecycle and the buffer lifecycle.
     """
-    buf = AudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=2)
     buf.write(sine_block(0, 24_000, freq_hz=440.0, sample_rate=48_000, channels=2))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.2)
@@ -390,7 +371,7 @@ def test_flushing_buffer_does_not_invalidate_existing_checkouts():
 
 
 def test_discard_removes_from_active_list():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.2)
@@ -400,7 +381,7 @@ def test_discard_removes_from_active_list():
 
 
 def test_discard_unknown_id_raises():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     mgr = CheckoutManager(buffer=buf)
     with pytest.raises(KeyError):
         mgr.discard("nope")
@@ -414,7 +395,7 @@ def test_discard_unknown_id_raises():
 def test_ram_cap_refuses_new_checkouts_when_exceeded():
     # Buffer: 10 s @ 48k stereo = ~3.7 MB. Each 10s checkout = ~3.7 MB.
     # Cap at 4 MB: second checkout should refuse.
-    buf = AudioCircularBuffer(duration_seconds=10.0, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=10.0, sample_rate=48_000, channels=2)
     buf.write(np.zeros((48_000 * 10, 2), dtype=np.float32))
     mgr = CheckoutManager(buffer=buf, max_total_ram_mb=4)
     a = mgr.create(duration_s=10.0)
@@ -433,35 +414,39 @@ def test_ram_cap_refuses_new_checkouts_when_exceeded():
 
 
 def _mgr_with_checkout(tmp_path=None):
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 800, channels=1))
     mgr = CheckoutManager(buffer=buf)
     co = mgr.create(duration_s=0.5)
     return mgr, co
 
 
+def test_save_rejects_flac(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    with pytest.raises(ValueError):
+        mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
+
+
+def test_save_without_native_library_raises(tmp_path, monkeypatch):
+    """No fallback encoder remains: a missing engine is an error, not a
+    silent detour."""
+    from flashback_sampler.core import native
+    mgr, co = _mgr_with_checkout()
+    monkeypatch.setattr(native, "load", lambda: None)
+    with pytest.raises(RuntimeError):
+        mgr.save(co.id, tmp_path / "clip.wav")
+
+
 def test_save_wav_defaults_to_float32_subtype(tmp_path):
     mgr, co = _mgr_with_checkout()
     target = mgr.save(co.id, tmp_path / "clip.wav")
-    assert sf.info(str(target)).subtype == "FLOAT"
-
-
-def test_save_flac_defaults_to_pcm_24(tmp_path):
-    mgr, co = _mgr_with_checkout()
-    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
-    assert sf.info(str(target)).subtype == "PCM_24"
-
-
-def test_save_flac_coerces_float_to_pcm_24(tmp_path):
-    mgr, co = _mgr_with_checkout()
-    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC", subtype="FLOAT")
-    assert sf.info(str(target)).subtype == "PCM_24"
+    assert read_wav(target)[1].subtype == "FLOAT"
 
 
 def test_save_explicit_pcm_16(tmp_path):
     mgr, co = _mgr_with_checkout()
     target = mgr.save(co.id, tmp_path / "clip.wav", subtype="PCM_16")
-    assert sf.info(str(target)).subtype == "PCM_16"
+    assert read_wav(target)[1].subtype == "PCM_16"
 
 
 def test_save_rejects_unknown_subtype(tmp_path):
@@ -489,13 +474,9 @@ def test_mark_saved_sets_state():
 
 def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     """WAV saves must route through the Zig encoder when the native
-    library is built (this machine) instead of always calling
-    soundfile.write -- FLAC always keeps its existing soundfile path
-    (native.py has no FLAC encoder)."""
+    library is built (this machine): the write goes through
+    `fb_wav_write` and nothing else."""
     from flashback_sampler.core import native
-
-    if native.load() is None:
-        pytest.skip("flashback_core library not built")
 
     calls = []
     real = native.wav_write
@@ -508,32 +489,12 @@ def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     target = mgr.save(co.id, tmp_path / "clip.wav")
 
     assert calls, "WAV save did not route through the native encoder"
-    # The file soundfile reads back must still match the checkout's audio
+    # The file the oracle reads back must still match the checkout's audio
     # -- routing to a different encoder must not change the bytes a
     # consumer (Ableton, this repo's own tests) reads back.
-    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
-    assert sr == co.sample_rate
+    data, info = read_wav(target)
+    assert info.samplerate == co.sample_rate
     assert np.allclose(data, co.trimmed_audio(), atol=1e-7)
-
-
-def test_flac_save_does_not_use_native_encoder(tmp_path, monkeypatch):
-    """FLAC has no native encoder (native.SUBTYPE_INTS covers WAV subtypes
-    only) -- FLAC saves must keep going through soundfile regardless of
-    whether the native library is present."""
-    from flashback_sampler.core import native
-
-    calls = []
-    real = native.wav_write
-    monkeypatch.setattr(
-        native, "wav_write",
-        lambda *a, **k: (calls.append(a), real(*a, **k))[1],
-    )
-
-    mgr, co = _mgr_with_checkout()
-    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
-
-    assert not calls, "FLAC save must never call the native WAV encoder"
-    assert target.exists()
 
 
 def test_mark_saved_unknown_id_raises():

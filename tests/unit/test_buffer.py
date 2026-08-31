@@ -1,9 +1,7 @@
-"""
-Ratify existing AudioCircularBuffer behavior via tests.
-
-These tests exercise the buffer as it is today (pre-seqlock refactor). They
-must keep passing after the M2 seqlock refactor with no semantic changes.
-"""
+"""The ring buffer's behaviour contract, now served by the Zig core
+alone: NativeAudioCircularBuffer over Ring.zig. The `buffer_cls` fixture
+survives as a name so the 37 contract tests (36 selected under
+-m "not perf"; one is perf-marked) read unchanged."""
 
 from __future__ import annotations
 
@@ -13,20 +11,13 @@ import time
 import numpy as np
 import pytest
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
 from flashback_sampler.core import native as native_mod
 from tests.fixtures.sine_source import ramp_block
 
 
-@pytest.fixture(params=["python", "native"])
-def buffer_cls(request):
-    """Every test in this file runs twice: once per implementation.
-    This suite IS the parity contract for the Zig core."""
-    if request.param == "native":
-        if native_mod.load() is None:
-            pytest.skip("flashback_core library not built")
-        return native_mod.NativeAudioCircularBuffer
-    return AudioCircularBuffer
+@pytest.fixture
+def buffer_cls():
+    return native_mod.NativeAudioCircularBuffer
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -49,22 +40,6 @@ def test_empty_buffer_get_latest_returns_zero_length(buffer_cls):
     buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     result = buf.get_latest(0.5)
     assert result.shape == (0, 2)
-
-
-def test_status_shape(buffer_cls):
-    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
-    s = buf.status()
-    for key in (
-        "buffered_seconds",
-        "buffer_capacity_seconds",
-        "fill_percent",
-        "write_pos",
-        "total_written_samples",
-        "sample_rate",
-        "channels",
-        "memory_mb",
-    ):
-        assert key in s
 
 
 def test_capacity_bytes_is_readable_capacity_not_physical_storage(buffer_cls):
@@ -93,49 +68,21 @@ def test_write_advances_position_and_total(buffer_cls):
 
 
 def test_write_pos_wraps_at_the_physical_buffer_size_after_a_real_wrap(buffer_cls):
-    """Implementation-agnostic invariant: write_pos == total_written %
-    buffer.shape[0] -- buffer.shape[0] is each implementation's own
-    PHYSICAL modulus (buffer_size for Python, storage_frames for native;
-    see native.py's TWO SIZES note), so this holds for both without
-    either implementation needing to agree on what that physical size
-    actually is. Writes past 4196 frames (buffer_size=100 + native's
-    4096-frame guard band) so native's physical wrap point is actually
-    exercised, not just Python's smaller one. Pins native.py's write_pos
-    against being computed with buffer_size (the READABLE capacity)
-    instead of storage_frames (the PHYSICAL size it actually wraps at)
-    -- that mutation reddens this test (write_pos comes back 0 instead
-    of the correct 804 at these exact numbers; see the Task 7 fix
-    report's mutation record)."""
+    """write_pos == total_written % buffer.shape[0] -- buffer.shape[0] is
+    the PHYSICAL modulus (storage_frames; see native.py's TWO SIZES
+    note), not the readable capacity. Writes past 4196 frames
+    (buffer_size=100 + the 4096-frame guard band) so the physical wrap
+    point is actually exercised. Pins native.py's write_pos against
+    being computed with buffer_size (the READABLE capacity) instead of
+    storage_frames (the PHYSICAL size it actually wraps at) -- that
+    mutation reddens this test (write_pos comes back 0 instead of the
+    correct 804 at these exact numbers; see the Task 7 fix report's
+    mutation record)."""
     buf = buffer_cls(duration_seconds=1.0, sample_rate=100, channels=1)
     chunk = np.zeros((100, 1), dtype=np.float32)  # == buffer_size: one write() call per lap, no multi-wrap
-    for _ in range(50):  # 5000 frames total, past native's storage_frames (100 + 4096 = 4196)
+    for _ in range(50):  # 5000 frames total, past storage_frames (100 + 4096 = 4196)
         buf.write(chunk)
     assert buf.write_pos == buf.total_written % buf.buffer.shape[0]
-
-
-# python-impl internal: probes write_pos and raw physical buffer indexing
-# past the wrap point. Both are genuinely different between implementations
-# by design (native.py's TWO SIZES note) — native wraps its PHYSICAL
-# storage at storage_frames = buffer_size + a guard band (thousands of
-# frames), not at buffer_size, so write_pos and buffer[i] here would not
-# agree with the Python values asserted below even though both
-# implementations are behaving correctly. Not parity-testable via raw
-# indexing; get_latest/get_segment (which native re-derives from abs
-# indices, hiding the physical layout) are the parity-tested equivalent.
-def test_write_wraps_around_end_of_ring():
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
-    buf.write(ramp_block(0, 800, channels=1))  # fills 0..800
-    buf.write(ramp_block(800, 400, channels=1))  # wraps: 800..1000 then 0..200
-    assert buf.write_pos == 200
-    assert buf.total_written == 1200
-    assert buf.is_full is True
-    # Sample at absolute position 1000 should have overwritten the sample at
-    # ring index 0 — check we see `1000.0` there, not `0.0`.
-    assert buf.buffer[0, 0] == pytest.approx(1000.0)
-    assert buf.buffer[199, 0] == pytest.approx(1199.0)
-    # The un-wrapped tail (200..800) should still hold its original content.
-    assert buf.buffer[200, 0] == pytest.approx(200.0)
-    assert buf.buffer[799, 0] == pytest.approx(799.0)
 
 
 def test_write_mono_1d_gets_reshaped(buffer_cls):
@@ -225,9 +172,8 @@ def test_get_segment_clamped_to_available(buffer_cls):
 
 # ─────────────────────────────────────────────────────────────────────────
 # copy_abs_range — the shared-surface entry point checkout.py uses to
-# read an absolute [abs_start, abs_end) span without reaching into
-# implementation-private internals (a Python lock for AudioCircularBuffer;
-# a raw ctypes read for NativeAudioCircularBuffer).
+# read an absolute [abs_start, abs_end) span without reaching into a raw
+# ctypes read directly.
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -282,24 +228,22 @@ def test_get_rms_levels_sine_is_sqrt_half_amplitude(buffer_cls):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# get_summary_bins — pre-decimated RMS ring (had NO test coverage, either
-# implementation, before this parity test: Summary is the phase's largest
-# numeric port, and the two implementations could have silently agreed on
-# a shared mistake at their SUMMARY_SLOT_SAMPLES==4096 boundary (Python
-# excludes unfrozen partial slots via its slot-generation tag; native's
-# rmsBins clamps against `capacity` instead) without either side's own
-# suite ever catching it. Asserted ANALYTICALLY (constant amplitude ->
-# known RMS), not cross-checked against the other implementation, which
-# is what actually makes a shared mistake visible instead of invisible.
+# get_summary_bins — pre-decimated RMS ring. Summary is the phase's
+# largest numeric port, and its SUMMARY_SLOT_SAMPLES==4096 boundary had
+# no test coverage before this. Asserted ANALYTICALLY (constant
+# amplitude -> known RMS), which is what makes a mistake at that
+# boundary visible instead of invisible.
 # ─────────────────────────────────────────────────────────────────────────
 
 
 def test_get_summary_bins_constant_amplitude_is_exact_rms(buffer_cls):
-    # Frame count is an exact multiple of the summary slot size (4096, both
-    # implementations' default) so every slot involved is fully FROZEN --
-    # no partial-slot edge case to reason about, keeping the analytic
-    # assertion simple: RMS of a constant-amplitude signal is exactly that
-    # amplitude, in every bin, with no approximation needed.
+    # Frame count is an exact multiple of the summary slot size (4096,
+    # Ring.Config.summary_slot_frames's default) so every slot involved
+    # is fully FROZEN -- no partial-slot edge case to reason about,
+    # keeping the analytic assertion simple: RMS of a constant-amplitude
+    # signal is exactly that amplitude, in every bin, with no
+    # approximation needed. This test hardcodes that 4096 -- it and
+    # Ring.Config.summary_slot_frames change together.
     buf = buffer_cls(duration_seconds=2.0, sample_rate=4096, channels=1)
     buf.write(np.full((8192, 1), 0.5, dtype=np.float32))  # == 2 slots exactly
     bins = buf.get_summary_bins(n_bins=2)  # bin_span defaults to 8192/2 == 4096, one slot per bin
@@ -317,8 +261,8 @@ def test_get_summary_bins_seconds_zero_is_zero_bins_not_all_available(buffer_cls
     (the "give me everything" default) -- both collapsed to the same
     n_samples=0 wire value, so native() silently returned the FULL
     window's RMS for an explicit zero-second request. Confirmed
-    divergence before the fix: native returned non-zero bins here while
-    AudioCircularBuffer correctly returned all zeros."""
+    divergence before the fix: native returned non-zero bins here
+    instead of all zeros."""
     buf = buffer_cls(duration_seconds=1.0, sample_rate=4096, channels=1)
     buf.write(np.full((4096, 1), 0.5, dtype=np.float32))
     bins = buf.get_summary_bins(n_bins=2, seconds=0)
@@ -463,13 +407,10 @@ def test_flush_on_empty_buffer_is_harmless(buffer_cls):
 
 
 def test_close_is_safe_to_call_and_idempotent(buffer_cls):
-    """Both implementations must expose close() so app code (e.g.
-    AppState.rebuild_buffer, discarding the buffer it just replaced) can
-    release a NativeAudioCircularBuffer's Zig-owned handle deterministically
-    instead of waiting on __del__/GC. AudioCircularBuffer's close() is a
-    no-op (pure Python, GC already handles it) but must still exist and be
-    safe to call, including twice, so callers don't need an isinstance
-    check to know which implementation they're holding."""
+    """close() must exist so app code (e.g. AppState.rebuild_buffer,
+    discarding the buffer it just replaced) can release the Zig-owned
+    handle deterministically instead of waiting on __del__/GC. Must be
+    safe to call, including twice."""
     buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
     buf.close()
@@ -700,33 +641,3 @@ def test_buffer_gain_db_roundtrips_and_mutes(buffer_cls):
     buf.gain_db = float("-inf")  # mute
     assert buf.gain == 0.0
     assert buf.gain_db == float("-inf")
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# make_ring_buffer factory
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def test_make_ring_buffer_prefers_native_when_available():
-    """The single constructor every app call site routes through. On a
-    machine with the native library built (this one), it must return
-    NativeAudioCircularBuffer -- this is the assertion that fails if the
-    factory is ever hardcoded to always return the Python fallback."""
-    from flashback_sampler.core.buffer import make_ring_buffer
-    buf = make_ring_buffer(duration_seconds=1.0, sample_rate=8, channels=2)
-    if native_mod.load() is not None:
-        assert type(buf).__name__ == "NativeAudioCircularBuffer"
-    else:
-        assert isinstance(buf, AudioCircularBuffer)
-    assert buf.sample_rate == 8 and buf.channels == 2
-
-
-def test_make_ring_buffer_falls_back_to_python_when_native_unavailable(monkeypatch):
-    """Covers the other half of the branch: force native.load() to report
-    unavailable and confirm the factory falls back to AudioCircularBuffer
-    rather than raising or still returning a native instance."""
-    from flashback_sampler.core.buffer import make_ring_buffer
-    monkeypatch.setattr(native_mod, "load", lambda: None)
-    buf = make_ring_buffer(duration_seconds=1.0, sample_rate=8, channels=2)
-    assert isinstance(buf, AudioCircularBuffer)
-    assert type(buf).__name__ != "NativeAudioCircularBuffer"

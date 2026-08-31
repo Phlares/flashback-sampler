@@ -283,7 +283,20 @@ band. A parity test runs the numpy implementation and the Zig one on
 the same ring contents before the numpy one is deleted; the parity
 test goes with it, and a Zig test pins the bin arithmetic directly.
 
+Deviation (PR f plan): `peakBins`/`fb_ring_peak_bins` take a window
+length `n_frames`, not `(abs_start, abs_end)` — the retry loop
+re-snapshots and re-clamps inside Zig, as `fb_ring_summary_bins`
+already does. `out` layout `[bin][channel]{min,max}`.
+
 ### Deletions
+
+Deviation (PR f plan): `get_rms_levels` was numpy maths; it now calls
+`fb_ring_rms` (`Ring.rmsLatest`). Two behaviour differences, both
+fail-safe: `peakBins`' seqlock verify is stricter than numpy's
+one-clause check (a flush during the scan retries instead of being
+accepted), and `rmsLatest` does not retry a torn window (numpy's
+`get_latest` retried three times) — both surface as zeros, which the
+meter and the waveform already draw as silence.
 
 - `AudioCircularBuffer`, `_peak_bins_impl`, `RingDerivedOps`,
   `make_ring_buffer` (`core/buffer.py` is deleted). `native.py` keeps
@@ -296,6 +309,11 @@ test goes with it, and a Zig test pins the bin arithmetic directly.
   buffer. `test_native_smoke.py`'s fallback test goes.
 - Deleted modules move to `_ToRemove/` for one approval at the end of
   the PR.
+
+Deviation (PR f plan): `test_native_smoke.py`'s fallback test is not
+deleted but re-pointed — a bundled-but-broken library still makes
+`load()` return None and the constructor raise `RuntimeError`; the
+fallback assertion is gone.
 
 ### Dependencies
 

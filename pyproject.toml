@@ -11,9 +11,6 @@ requires-python = ">=3.10"
 authors = [{ name = "Phlares" }]
 dependencies = [
     "numpy>=1.24",
-    "sounddevice>=0.5.0",
-    "soundfile>=0.12.1",
-    "soundcard>=0.4.3 ; sys_platform == 'win32'",
     "PySide6>=6.7",
     "platformdirs>=4.0",
 ]

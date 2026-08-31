@@ -82,8 +82,10 @@ SELECTION_COLOR_CLIP = "#FF9500"     # orange
 
 
 def _peak_bins_from_audio(audio: np.ndarray, n_bins: int) -> np.ndarray:
-    """Same shape as AudioCircularBuffer.get_peak_bins but operating on
+    """Same shape as NativeAudioCircularBuffer.get_peak_bins but operating on
     a static (N, channels) array — used to render a checkout's fixed audio."""
+    # Bin edges must agree with Ring.binEdge (core/src/Ring.zig):
+    # trunc(float(i) * step), last edge = n.
     if audio.ndim == 1:
         audio = audio[:, np.newaxis]
     n = int(audio.shape[0])
@@ -1187,7 +1189,7 @@ class TurntableWindow(QMainWindow):
     def _default_clip_save_dir(self):
         return Path.home() / "Documents"
 
-    def _save_current_clip(self, fmt: str | None = None, trimmed: bool = True) -> None:
+    def _save_current_clip(self, trimmed: bool = True) -> None:
         """Prompt for a target path and save the clip currently shown in
         the clip panel. When `trimmed` is True, uses the stored trim
         fracs (set via drag on the clip waveform)."""
@@ -1197,30 +1199,20 @@ class TurntableWindow(QMainWindow):
             return
         slot = self._state.active_slot
         suffix = "trim" if trimmed and self._clip_trim_fracs.get(co.id) else ""
-        default_ext = ".flac" if fmt == "FLAC" else ".wav"
-        filter_spec = (
-            "WAV audio (*.wav);;FLAC audio (*.flac)" if fmt is None
-            else ("WAV audio (*.wav)" if fmt == "WAV" else "FLAC audio (*.flac)")
-        )
+        default_ext = ".wav"
+        filter_spec = "WAV audio (*.wav)"
         default_path = str(
             self._default_clip_save_dir()
             / f"{self._suggested_clip_filename(slot, co, suffix)}{default_ext}"
         )
-        target, selected = QFileDialog.getSaveFileName(
+        target, _ = QFileDialog.getSaveFileName(
             self, "Save clip", default_path, filter_spec
         )
         if not target:
             return
-        # Resolve format from filter choice or file extension
-        if fmt is None:
-            resolved = "FLAC" if (
-                selected.startswith("FLAC") or target.lower().endswith(".flac")
-            ) else "WAV"
-        else:
-            resolved = fmt
         try:
             slot.checkout_manager.save(
-                co.id, Path(target), fmt=resolved, trimmed=trimmed
+                co.id, Path(target), fmt="WAV", trimmed=trimmed
             )
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
@@ -1375,21 +1367,14 @@ class TurntableWindow(QMainWindow):
             "Save trimmed as WAV…" if has_trim else "Save as WAV…", self
         )
         act_save_wav.triggered.connect(
-            lambda: self._save_current_clip(fmt="WAV", trimmed=has_trim)
+            lambda: self._save_current_clip(trimmed=has_trim)
         )
         menu.addAction(act_save_wav)
-        act_save_flac = QAction(
-            "Save trimmed as FLAC…" if has_trim else "Save as FLAC…", self
-        )
-        act_save_flac.triggered.connect(
-            lambda: self._save_current_clip(fmt="FLAC", trimmed=has_trim)
-        )
-        menu.addAction(act_save_flac)
         if has_trim:
             menu.addSeparator()
             act_save_full_wav = QAction("Save full clip as WAV…", self)
             act_save_full_wav.triggered.connect(
-                lambda: self._save_current_clip(fmt="WAV", trimmed=False)
+                lambda: self._save_current_clip(trimmed=False)
             )
             menu.addAction(act_save_full_wav)
             act_clear_trim = QAction("Clear trim selection", self)

@@ -4,15 +4,10 @@ implements.
 
 Lives in `core/` because it's the contract the ring buffer and the
 `CaptureSlot` multi-source refactor in M10.2+ depend on. The concrete
-backends (WASAPI loopback via soundcard, mic/line-in via sounddevice,
-eventually Windows per-process loopback, CoreAudioTap on macOS,
-PipeWire on Linux) live in `core/loopback_capture.py` and
-`core/capture.py` today and will migrate into a platform-specific
-`io/` subpackage in a later milestone.
-
-This module is intentionally import-cheap: no Qt, no soundcard, no
-sounddevice. That lets unit tests instantiate fake capture sources
-without pulling in the real hardware backends.
+backend is `core/native_capture.py`: `NativeCaptureSource` (one Zig
+`Capture` per source) and `NativeMixedSource` (N sources into one
+ring). This module is import-cheap: no Qt, no ctypes, so unit tests
+can instantiate fake sources.
 """
 
 from __future__ import annotations
@@ -26,7 +21,7 @@ class CaptureSource(Protocol):
     Minimal structural type every capture backend must satisfy.
 
     The live audio pipeline is always:
-        concrete CaptureSource -> AudioCircularBuffer.write(frames)
+        concrete CaptureSource -> Ring.write (in Zig; fakes call NativeAudioCircularBuffer.write)
 
     Call order:
         1. `start()` — open the platform stream / COM apartment and

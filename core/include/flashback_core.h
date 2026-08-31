@@ -18,6 +18,7 @@ typedef enum FbStatus {
 } FbStatus;
 
 typedef enum FbSubtype { FB_FLOAT32 = 0, FB_PCM_24 = 1, FB_PCM_16 = 2 } FbSubtype;
+typedef struct FbPeakBin { float min; float max; } FbPeakBin;
 
 typedef struct FbCapture FbCapture; /* opaque */
 typedef struct FbMixer FbMixer; /* opaque */
@@ -45,8 +46,9 @@ uint64_t fb_ring_capacity(const FbRing *);
  * mid-copy into. A caller building a zero-copy view over fb_ring_storage
  * MUST shape that view with THIS value, and any write position derived
  * by modulo must wrap at THIS value too — using fb_ring_capacity for
- * either silently corrupts fb_ring_summary_bins-adjacent code that
- * walks the raw buffer directly (e.g. a peak-bins reader). Use
+ * either silently corrupts a host that walks the raw buffer directly --
+ * the engine's own fb_ring_peak_bins uses storage_frames internally; a
+ * host walking the raw buffer must too. Use
  * fb_ring_capacity instead for "how much audio can I get back" /
  * clamping calls. The two answer different questions; neither
  * substitutes for the other. */
@@ -58,6 +60,13 @@ void fb_ring_flush(FbRing *);
 FbStatus fb_ring_read(FbRing *, uint64_t abs_start, size_t n_frames, float *out);
 FbStatus fb_ring_summary_bins(FbRing *, size_t n_bins, uint64_t n_samples,
                               uint64_t bin_span_frames, float *out_rms);
+/* min/max per channel per bin over the newest n_frames (headroom-clamped).
+ * out holds n_bins * channels FbPeakBin, out[bin * channels + ch].
+ * FB_INVALID_ARG for n_bins == 0; FB_OVERWRITTEN (out zeroed) after three
+ * torn attempts; FB_OK with out zeroed for an empty window. */
+FbStatus fb_ring_peak_bins(FbRing *, uint64_t n_frames, size_t n_bins, FbPeakBin *out);
+/* RMS per channel over the newest n_frames; out holds `channels` floats, zeroed on error. */
+FbStatus fb_ring_rms(FbRing *, uint64_t n_frames, float *out);
 /* Serialized internally (a mutex guards the whole call) — safe to call
  * from multiple host threads concurrently, unlike every other fb_ring_*
  * export above, which assume single-writer/single-control-thread

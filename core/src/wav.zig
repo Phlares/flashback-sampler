@@ -1,8 +1,9 @@
 //! Minimal RIFF/WAVE writer. FLOAT32 payload is the ring's bytes
 //! verbatim — a bit-perfect pull. 44-byte canonical header; libsndfile
-//! and every DAW read it. Parity vs soundfile is DECODE-equality
-//! (samples + format), not byte-equality (libsndfile adds PEAK/fact
-//! chunks we deliberately don't).
+//! and every DAW read it. Parity is checked by
+//! `tests/fixtures/wavread.py`, an independent stdlib reader:
+//! DECODE-equality (samples + format), not byte-equality (libsndfile
+//! adds PEAK/fact chunks we deliberately don't).
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -92,8 +93,8 @@ pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, 
 /// that keeps `round(1.0 * scale)` in range: scale = 32767 / 8388607
 /// (not 32768 / 8388608), so +full-scale and -full-scale are NOT
 /// symmetric — -1.0 lands one LSB short of the negative rail. That
-/// asymmetry is the documented contract Task 7 checks against
-/// soundfile, not a bug.
+/// asymmetry is the documented contract `tests/unit/test_native_smoke.py`
+/// pins through `wavread.py`, not a bug.
 ///
 /// A NaN sample silently becomes full-scale positive here: `clamp`'s
 /// `@min`/`@max` always return the finite bound when compared against

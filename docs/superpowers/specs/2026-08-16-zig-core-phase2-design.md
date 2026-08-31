@@ -266,3 +266,12 @@ overruled.
   the DLL, not a catchable Python exception.
 - Capture (loopback, mic/line-in, per-process) is Windows-only as of
   this PR; the README and module docstrings say so.
+
+## Deviations recorded by part 2 (2026-08-30)
+
+Part 2 (PRs d, e, f) is specified in
+`2026-08-30-zig-core-phase2-d-f-design.md`, which wins where the two
+differ. Recorded there by the PR f plan: `fb_ring_peak_bins` takes a
+window length, not absolute bounds; `fb_ring_rms` moves the level
+meter's RMS into Zig; `tests/fixtures/wavread.py` replaces soundfile as
+the WAV oracle; the test session hard-requires the native library.

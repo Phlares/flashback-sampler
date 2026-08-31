@@ -6,7 +6,7 @@ import time
 import pytest
 
 from flashback_sampler.core import native
-from flashback_sampler.core.buffer import make_ring_buffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.native_capture import NativeCaptureSource
 from flashback_sampler.core.native_capture import NativeMixedSource
 
@@ -28,7 +28,7 @@ def test_list_devices_has_a_default_loopback(lib):
 
 @pytest.mark.parametrize("kind", ["loopback", "input"])
 def test_default_endpoint_captures_two_seconds(lib, kind):
-    buf = make_ring_buffer(duration_seconds=10, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=10, sample_rate=48_000, channels=2)
     src = NativeCaptureSource(buf, kind=kind)
     src.start()
     time.sleep(2.0)
@@ -50,7 +50,7 @@ def test_default_endpoint_captures_two_seconds(lib, kind):
 def test_loopback_at_96k_when_mix_is_48k_reports_mix_rate(lib):
     """AUTOCONVERTPCM: we ask 96 kHz stereo; the engine converts. mix_rate
     tells the truth so the UI can warn (spec: 'honest rate')."""
-    buf = make_ring_buffer(duration_seconds=10, sample_rate=96_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=10, sample_rate=96_000, channels=2)
     src = NativeCaptureSource(buf, kind="loopback", sample_rate=96_000)
     src.start()
     time.sleep(1.0)
@@ -65,7 +65,7 @@ def test_process_loopback_of_this_python_process_opens(lib):
     """Opens the process-loopback client for our own PID. It has no render
     stream so frames stay 0 — the assertion is that activation SUCCEEDS."""
     import os
-    buf = make_ring_buffer(duration_seconds=5, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=5, sample_rate=48_000, channels=2)
     src = NativeCaptureSource(buf, kind="process", pid=os.getpid())
     src.start()
     time.sleep(1.5)
@@ -78,7 +78,7 @@ def test_two_source_mix_records_frames_on_both(lib):
     """Default loopback + default input through one Zig mixer for 2 s.
     frames_written counts the COMMON span, so > 1 s of frames proves
     both sources delivered at least that much."""
-    buf = make_ring_buffer(duration_seconds=10, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(duration_seconds=10, sample_rate=48_000, channels=2)
     src = NativeMixedSource(buf, specs=[{"kind": "loopback"}, {"kind": "input"}])
     src.start()
     time.sleep(2.0)
