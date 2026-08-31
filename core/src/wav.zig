@@ -299,6 +299,37 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
     }
 }
 
+/// Stream `n_frames` from `start_frame` of `src` into a new `dst` in
+/// subtype `st`. One 64 KiB read buffer, one 64 KiB encode buffer, both
+/// on the stack. The range is validated against the source BEFORE dst
+/// is created, so an OutOfRange leaves no file behind. Serialisation
+/// with other writers is the caller's job (PR h: `write_mutex`).
+pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u64, st: Subtype) !void {
+    var o = try open(src);
+    defer o.file.close(io);
+    if (start_frame > o.info.frames or n_frames > o.info.frames - start_frame) return error.OutOfRange;
+    const chans: u64 = o.info.channels;
+    const data_len_wide: u64 = n_frames * chans * st.bytesPerSample();
+    if (data_len_wide > std.math.maxInt(u32) - header_len) return error.TooLong;
+    var out = try std.Io.Dir.cwd().createFile(io, dst, .{});
+    defer out.close(io);
+    var header: [header_len]u8 = undefined;
+    writeHeader(&header, o.info.rate, o.info.channels, st, n_frames);
+    try out.writeStreamingAll(io, &header);
+    const frames_per_chunk: u64 = read_chunk_bytes / (4 * chans);
+    var samples: [read_chunk_bytes / 4]f32 = undefined;
+    var enc: [read_chunk_bytes]u8 = undefined;
+    var done: u64 = 0;
+    while (done < n_frames) {
+        const take = @min(n_frames - done, frames_per_chunk);
+        const ns: usize = @intCast(take * chans);
+        try readFrames(o.file, o.info, start_frame + done, samples[0..ns]);
+        const n = encodeSamples(st, samples[0..ns], &enc);
+        try out.writeStreamingAll(io, enc[0..n]);
+        done += take;
+    }
+}
+
 /// Stream samples to `path` through a fixed 64 KiB stack buffer — no
 /// allocation regardless of clip length (a 15-minute grab never doubles
 /// memory). Chunk boundary is sample-aligned for every subtype
@@ -335,10 +366,10 @@ pub fn writeFile(path: []const u8, samples: []const f32, rate: u32, channels: u1
     var header: [header_len]u8 = undefined;
     writeHeader(&header, rate, channels, st, samples.len / channels);
     try file.writeStreamingAll(io, &header);
-    var buf: [16384 * 4]u8 = undefined;
+    var buf: [read_chunk_bytes]u8 = undefined;
     var remaining = samples;
     while (remaining.len > 0) {
-        const take = @min(remaining.len, 16384);
+        const take = @min(remaining.len, read_chunk_bytes / 4);
         const n = encodeSamples(st, remaining[0..take], &buf);
         try file.writeStreamingAll(io, buf[0..n]);
         remaining = remaining[take..];
@@ -772,6 +803,59 @@ test "readFrames: a truncated .part reads its clamped prefix" {
     var out: [2]f32 = undefined;
     try readFrames(o.file, o.info, 0, &out);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1, 2 }, &out);
+}
+
+test "copyRange: a sub-span, float32 -> pcm16, reads back as the quantized slice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const in = [_]f32{ 0.0, 0.5, -0.5, 1.0, 0.25, -0.25 }; // 6 mono frames
+    const src = tmpWritePath(&pa, &tmp, "src.wav");
+    try writeFile(src, &in, 8_000, 1, .float32);
+    const dst = tmpWritePath(&pd, &tmp, "dst.wav");
+    try copyRange(src, dst, 1, 3, .pcm_16); // frames 1..4 = 0.5, -0.5, 1.0
+    var o = try open(dst);
+    defer o.file.close(io);
+    try std.testing.expectEqual(Subtype.pcm_16, o.info.subtype);
+    try std.testing.expectEqual(@as(u64, 3), o.info.frames);
+    try std.testing.expectEqual(@as(u32, 8_000), o.info.rate);
+    var out: [3]f32 = undefined;
+    try readFrames(o.file, o.info, 0, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 16384.0 / 32768.0), out[0], 1e-7);
+    try std.testing.expectApproxEqAbs(@as(f32, -16384.0 / 32768.0), out[1], 1e-7);
+    try std.testing.expectApproxEqAbs(@as(f32, 32767.0 / 32768.0), out[2], 1e-7);
+}
+
+test "copyRange: float32 -> float32 is byte-identical to writeFile of the slice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    var pe: [64]u8 = undefined;
+    var in: [40]f32 = undefined; // 20 stereo frames
+    for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) * 0.01;
+    const src = tmpWritePath(&pa, &tmp, "a.wav");
+    try writeFile(src, &in, 48_000, 2, .float32);
+    try copyRange(src, tmpWritePath(&pd, &tmp, "b.wav"), 5, 10, .float32);
+    try writeFile(tmpWritePath(&pe, &tmp, "c.wav"), in[10..30], 48_000, 2, .float32);
+    var b: [header_len + 80]u8 = undefined;
+    var c: [header_len + 80]u8 = undefined;
+    const gb = try tmp.dir.readFile(std.testing.io, "b.wav", &b);
+    const gc = try tmp.dir.readFile(std.testing.io, "c.wav", &c);
+    try std.testing.expectEqualSlices(u8, gc, gb);
+}
+
+test "copyRange: past the source end is OutOfRange and creates no file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3 };
+    const src = tmpWritePath(&pa, &tmp, "s.wav");
+    try writeFile(src, &in, 8_000, 1, .float32);
+    try std.testing.expectError(error.OutOfRange, copyRange(src, tmpWritePath(&pd, &tmp, "never.wav"), 2, 5, .float32));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "never.wav", .{}));
 }
 
 test "open: a huge channel count is Unsupported, not an integer-overflow trap" {
