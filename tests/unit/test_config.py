@@ -154,3 +154,11 @@ def test_checkout_cache_mb_roundtrip_and_floor(tmp_path):
     assert config.load_checkout_cache_mb(p) == 512.0
     config.save_checkout_cache_mb(-3, p)
     assert config.load_checkout_cache_mb(p) == 0.0
+    # A negative (or garbage) value already sitting in config.json — not
+    # written through save_checkout_cache_mb's own floor — must still be
+    # floored on read. This is the case R-h7g calls out: load's floor is
+    # the ONLY protection once a raw value is already on disk.
+    config.save_config({config.CHECKOUT_CACHE_MB_KEY: -3}, p)
+    assert config.load_checkout_cache_mb(p) == 0.0
+    config.save_config({config.CHECKOUT_CACHE_MB_KEY: "banana"}, p)
+    assert config.load_checkout_cache_mb(p) == config.DEFAULT_CHECKOUT_CACHE_MB
