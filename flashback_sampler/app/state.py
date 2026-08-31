@@ -12,8 +12,10 @@ so unit tests can drive it headless.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
+from flashback_sampler.app import config as app_config
 from flashback_sampler.app.audio_devices import (
     CaptureDevice,
     OutputDevice,
@@ -23,8 +25,9 @@ from flashback_sampler.app.audio_devices import (
     default_output_device,
 )
 from flashback_sampler.core.capture_slot import CaptureSlot
-from flashback_sampler.core.checkout import CheckoutManager
-from flashback_sampler.core.native import NativeAudioCircularBuffer
+from flashback_sampler.core.checkout import Checkout, CheckoutManager
+from flashback_sampler.core.manifest import resolve_audio, scan
+from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
 
@@ -50,7 +53,19 @@ class AppState:
         buffer_seconds: float = DEFAULT_BUFFER_SECONDS,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         channels: int = DEFAULT_CHANNELS,
+        scratch_dir: Path | None = None,
+        checkout_cache_mb: float | None = None,
     ):
+        # ── Scratch: the process-wide writer thread + RAM cache ─────────
+        # One per AppState; every slot's CheckoutManager writes through
+        # it. Checkouts scratch to <scratch_dir>/<id>.wav on creation
+        # (epic #53). Budget in bytes; 0 = only pinned/in-flight stay.
+        self.scratch_dir = Path(scratch_dir) if scratch_dir is not None else app_config.load_scratch_dir()
+        self.scratch_dir.mkdir(parents=True, exist_ok=True)
+        cache_mb = app_config.load_checkout_cache_mb() if checkout_cache_mb is None else float(checkout_cache_mb)
+        self.scratch = NativeScratch(budget_bytes=int(cache_mb * 1024 * 1024))
+        self.scratch.start()
+
         # ── Slot list ─────────────────────────────────────────────────
         # Build one initial slot from the constructor args. It's
         # conceptually a "CUSTOM" quality preset since the values come
@@ -69,7 +84,8 @@ class AppState:
                 initial_preset,
                 name="Main",
                 max_active_checkouts=16,
-                max_total_ram_mb=1024,
+                scratch=self.scratch,
+                scratch_dir=self.scratch_dir,
             )
         ]
         self.active_slot_index: int = 0
@@ -95,6 +111,11 @@ class AppState:
         if self.output_spec is not None:
             self.scrub_player.set_device(self.output_spec.id)
 
+        # Restore whatever the scratch dir already holds -- a normal
+        # relaunch after clean shutdown, or the same path a crash left
+        # behind (crash and quit take this same recovery path).
+        self.adopt_scratch()
+
     # ------------------------------------------------------------------
     # Slot access
     # ------------------------------------------------------------------
@@ -115,8 +136,8 @@ class AppState:
         preset: QualityPreset,
         name: str = "",
         max_active_checkouts: int = 16,
-        max_total_ram_mb: float = 1024.0,
         capture_spec: Optional[CaptureDevice] = None,
+        armed: bool = True,
     ) -> CaptureSlot:
         """
         Append a new CaptureSlot built from `preset`. Does NOT change
@@ -148,11 +169,57 @@ class AppState:
             preset,
             name=name or f"Source {len(self.slots) + 1}",
             max_active_checkouts=max_active_checkouts,
-            max_total_ram_mb=max_total_ram_mb,
+            scratch=self.scratch,
+            scratch_dir=self.scratch_dir,
         )
         slot.capture_spec = capture_spec
+        slot.armed = armed
         self.slots.append(slot)
         return slot
+
+    def adopt_scratch(self) -> list[Checkout]:
+        """Adopt every manifest in the scratch dir: a root goes to the
+        first slot with its rate and channels, else to a new unarmed slot
+        named from the manifest (60 s ring — the smallest that still
+        plays); a slice goes where its parent went. Anything unreadable
+        or without audio is skipped and left on disk. Crash and quit
+        take this same path."""
+        adopted: list[Checkout] = []
+        where: dict[str, CaptureSlot] = {}
+        for m in scan(self.scratch_dir):
+            if m.parent is None:
+                found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
+                if found is None:
+                    continue
+                audio, partial = found
+                slot = next((s for s in self.slots if s.sample_rate == m.rate and s.channels == m.channels), None)
+                if slot is None:
+                    try:
+                        slot = self.add_slot(
+                            QualityPreset(name="ADOPTED", sample_rate=int(m.rate), channels=int(m.channels),
+                                          buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
+                            name=m.slot or "Adopted", armed=False,
+                        )
+                    except RuntimeError:
+                        # R-h9b: add_slot can refuse on a project-RAM budget
+                        # exceeded -- what's already on disk must never
+                        # abort a launch. Skip this manifest, keep going.
+                        continue
+                try:
+                    co = slot.checkout_manager.adopt_root(m, audio, partial)
+                except (OSError, ValueError, RuntimeError):
+                    continue
+            else:
+                slot = where.get(m.parent)
+                if slot is None:
+                    continue
+                try:
+                    co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
+                except (KeyError, ValueError, RuntimeError):
+                    continue
+            where[co.id] = slot
+            adopted.append(co)
+        return adopted
 
     def effective_capture_spec_for_slot(self, slot: CaptureSlot) -> Optional[CaptureDevice]:
         """
@@ -168,9 +235,10 @@ class AppState:
 
     def total_project_ram_bytes(self) -> int:
         """
-        Sum of every slot's ring buffer bytes PLUS the bytes of every
-        live Checkout across every slot. Reflects the actual
-        resident-in-RAM footprint of the whole session.
+        Sum of every slot's ring buffer bytes PLUS the scratch cache's
+        resident bytes -- every checkout's RAM copy, counted once per
+        process. Reflects the actual resident-in-RAM footprint of the
+        whole session.
         """
         total = 0
         for slot in self.slots:
@@ -179,8 +247,7 @@ class AppState:
             # readable window by a guard band (see native.py's
             # capacity_bytes docstring).
             total += slot.buffer.capacity_bytes
-            for co in slot.checkout_manager.list():
-                total += co.ram_bytes
+        total += self.scratch.resident_bytes
         return total
 
     def total_project_ram_mb(self) -> float:
@@ -204,9 +271,9 @@ class AppState:
             slot.stop_capture()
         except Exception:  # pragma: no cover
             pass
-        # Checkouts hold copies of ring audio (get_latest/get_segment/
-        # copy_abs_range all memcpy out), not views -- closing the ring
-        # here does not invalidate them, so no checkout release is needed.
+        slot.checkout_manager.discard_all()
+        # A removed slot's checkouts go with it: manifests and files
+        # deleted.
         try:
             slot.buffer.close()
         except Exception:  # pragma: no cover
@@ -354,7 +421,6 @@ class AppState:
     def apply_checkout_caps(
         self,
         max_active: int | None = None,
-        max_ram_mb: float | None = None,
     ) -> None:
         """
         Update the active slot's CheckoutManager caps in place.
@@ -364,10 +430,6 @@ class AppState:
         mgr = self.active_slot.checkout_manager
         if max_active is not None:
             mgr._max_active = int(max_active)  # noqa: SLF001
-        if max_ram_mb is not None:
-            mgr._max_ram_bytes = int(  # noqa: SLF001
-                float(max_ram_mb) * 1024 * 1024
-            )
 
     def rebuild_buffer(self, new_seconds: float) -> None:
         """
@@ -418,6 +480,9 @@ class AppState:
                 slot.stop_capture()
             except Exception:  # pragma: no cover
                 pass
+        for slot in self.slots:
+            slot.checkout_manager.close()
+        self.scratch.close()  # drains the writer
         try:
             self.scrub_player.close()
         except Exception:  # pragma: no cover
