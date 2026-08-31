@@ -161,6 +161,61 @@ fn parseFmt(fb: []const u8) ParseError!Fmt {
     return .{ .channels = channels, .rate = rate, .block_align = block_align, .subtype = subtype };
 }
 
+/// Read and write share one chunk size: 64 KiB on the stack, never the
+/// heap. 16384 float32 mono samples, 8192 stereo frames per iteration.
+pub const read_chunk_bytes = 16384 * 4;
+
+pub const ReadError = error{OutOfRange} || std.Io.File.ReadPositionalError;
+
+/// Fill `out` (interleaved, `out.len / info.channels` frames) from
+/// `start_frame`. Whole-span or nothing: a span past `info.frames`
+/// returns OutOfRange before any read.
+pub fn readFrames(file: std.Io.File, info: Info, start_frame: u64, out: []f32) ReadError!void {
+    const chans: u64 = info.channels;
+    std.debug.assert(out.len % chans == 0);
+    const n_frames: u64 = out.len / chans;
+    if (start_frame + n_frames > info.frames) return error.OutOfRange;
+    const block = info.blockAlign();
+    const frames_per_chunk: u64 = read_chunk_bytes / block;
+    var buf: [read_chunk_bytes]u8 = undefined;
+    var done: u64 = 0;
+    while (done < n_frames) {
+        const take = @min(n_frames - done, frames_per_chunk);
+        const nbytes: usize = @intCast(take * block);
+        const offset = info.data_offset + (start_frame + done) * block;
+        const got = try file.readPositionalAll(io, buf[0..nbytes], offset);
+        // `frames` was clamped to the file at open; a short read here
+        // means the file shrank underneath us. Treat it as the span
+        // being gone, not as silence.
+        if (got != nbytes) return error.OutOfRange;
+        const o_start: usize = @intCast(done * chans);
+        const o_end: usize = @intCast((done + take) * chans);
+        decodeSamples(info.subtype, buf[0..nbytes], out[o_start..o_end]);
+        done += take;
+    }
+}
+
+/// The inverse of `encodeSamples`. PCM codes divide by 2^(bits-1) — the
+/// libsndfile convention `tests/fixtures/wavread.py` pins (32767 reads
+/// as 32767/32768) — so encode→decode is exact at the codes, not at the
+/// original floats. FLOAT32 is a memcpy of the bits.
+pub fn decodeSamples(st: Subtype, bytes: []const u8, out: []f32) void {
+    switch (st) {
+        .float32 => @memcpy(std.mem.sliceAsBytes(out), bytes[0 .. out.len * 4]),
+        .pcm_16 => for (out, 0..) |*s, i| {
+            const v = std.mem.readInt(i16, bytes[i * 2 ..][0..2], .little);
+            s.* = @as(f32, @floatFromInt(v)) / 32768.0;
+        },
+        .pcm_24 => for (out, 0..) |*s, i| {
+            // Three little-endian bytes; shift into the top of an i32 so
+            // the arithmetic shift back sign-extends bit 23.
+            const raw: u32 = @as(u32, bytes[i * 3]) | (@as(u32, bytes[i * 3 + 1]) << 8) | (@as(u32, bytes[i * 3 + 2]) << 16);
+            const v: i32 = @as(i32, @bitCast(raw << 8)) >> 8;
+            s.* = @as(f32, @floatFromInt(v)) / 8388608.0;
+        },
+    }
+}
+
 /// Write a canonical 44-byte RIFF/WAVE header for `n_frames` frames of
 /// `channels`-channel audio at `rate` Hz in subtype `st`. A "frame" is
 /// one sample per channel, so the data chunk size is
@@ -582,6 +637,141 @@ test "open: pcm32 and float64 are Unsupported" {
 
 test "open: a missing file surfaces the OS error" {
     try std.testing.expectError(error.FileNotFound, open(".zig-cache/tmp/does-not-exist.wav"));
+}
+
+test "decodeSamples: pcm16 and pcm24 scale by 2^(bits-1); float32 is the raw bits" {
+    var out: [2]f32 = undefined;
+    decodeSamples(.pcm_16, &[_]u8{ 0xFF, 0x7F, 0x00, 0x80 }, &out); // 32767, -32768
+    try std.testing.expectApproxEqAbs(@as(f32, 32767.0 / 32768.0), out[0], 1e-9);
+    try std.testing.expectEqual(@as(f32, -1.0), out[1]);
+    decodeSamples(.pcm_24, &[_]u8{ 0xFF, 0xFF, 0x7F, 0x00, 0x00, 0x80 }, &out); // 8388607, -8388608
+    try std.testing.expectApproxEqAbs(@as(f32, 8388607.0 / 8388608.0), out[0], 1e-9);
+    try std.testing.expectEqual(@as(f32, -1.0), out[1]);
+    const in = [_]f32{ 0.5, -0.25 };
+    decodeSamples(.float32, std.mem.sliceAsBytes(&in), &out);
+    try std.testing.expectEqualSlices(f32, &in, &out);
+}
+
+test "writeFile -> readFrames is sample-exact for float32 and code-exact for pcm" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    // 3 stereo frames, values that survive pcm quantization exactly
+    const in = [_]f32{ 0.0, 0.5, -0.5, 1.0, -1.0, 0.25 };
+    inline for (.{ Subtype.float32, Subtype.pcm_16, Subtype.pcm_24 }) |st| {
+        const path = tmpWritePath(&pb, &tmp, "rt.wav");
+        try writeFile(path, &in, 48_000, 2, st);
+        var o = try open(path);
+        defer o.file.close(io);
+        try std.testing.expectEqual(@as(u64, 3), o.info.frames);
+        var out: [6]f32 = undefined;
+        try readFrames(o.file, o.info, 0, &out);
+        // encode then decode: q(x) = round(x * (scale)) / 2^(bits-1)
+        const scale: f32 = switch (st) {
+            .float32 => 1.0,
+            .pcm_16 => 32767.0,
+            .pcm_24 => 8388607.0,
+        };
+        const denom: f32 = switch (st) {
+            .float32 => 1.0,
+            .pcm_16 => 32768.0,
+            .pcm_24 => 8388608.0,
+        };
+        for (in, out) |x, y| {
+            const expect = if (st == .float32) x else @round(x * scale) / denom;
+            try std.testing.expectApproxEqAbs(expect, y, 1e-7);
+        }
+    }
+}
+
+test "readFrames: a sub-span starts at start_frame" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    var in: [10]f32 = undefined; // 5 stereo frames: L = i, R = 10 + i
+    for (0..5) |i| {
+        in[i * 2] = @floatFromInt(i);
+        in[i * 2 + 1] = @floatFromInt(10 + i);
+    }
+    const path = tmpWritePath(&pb, &tmp, "span.wav");
+    try writeFile(path, &in, 8_000, 2, .float32);
+    var o = try open(path);
+    defer o.file.close(io);
+    var out: [4]f32 = undefined; // frames 2 and 3
+    try readFrames(o.file, o.info, 2, &out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 12, 3, 13 }, &out);
+}
+
+test "readFrames: past the end is OutOfRange, nothing partial" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3 };
+    const path = tmpWritePath(&pb, &tmp, "oor.wav");
+    try writeFile(path, &in, 8_000, 1, .float32);
+    var o = try open(path);
+    defer o.file.close(io);
+    var out: [2]f32 = undefined;
+    try std.testing.expectError(error.OutOfRange, readFrames(o.file, o.info, 2, &out));
+}
+
+test "readFrames: a trailing chunk after data is not decoded as samples" {
+    // W1: the OutOfRange guard's real job is a file whose bytes CONTINUE
+    // after the data chunk (a DAW may append cue/smpl/LIST chunks). A
+    // short read alone can't catch that case, since the file has bytes
+    // past `info.frames` to read successfully and decode as junk.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3 };
+    const path = tmpWritePath(&pb, &tmp, "trailer.wav");
+    try writeFile(path, &in, 8_000, 1, .float32);
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+    const len = try f.length(io);
+    const trailer = "LIST" ++ [_]u8{ 8, 0, 0, 0 } ++ [_]u8{0x7F} ** 8;
+    try f.writePositionalAll(io, trailer, len);
+    f.close(io);
+    var o = try open(path);
+    defer o.file.close(io);
+    try std.testing.expectEqual(@as(u64, 3), o.info.frames); // the walk stops at `data`
+    var out: [2]f32 = undefined;
+    try std.testing.expectError(error.OutOfRange, readFrames(o.file, o.info, 2, &out));
+}
+
+test "readFrames spans more than one chunk-buffer iteration" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    // read_chunk_bytes / 4 = 16384 float32 mono frames per chunk; +5 forces a second, partial chunk
+    const n = read_chunk_bytes / 4 + 5;
+    var samples: [n]f32 = undefined;
+    for (&samples, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) / @as(f32, n);
+    const path = tmpWritePath(&pb, &tmp, "big.wav");
+    try writeFile(path, &samples, 44_100, 1, .float32);
+    var o = try open(path);
+    defer o.file.close(io);
+    var out: [n]f32 = undefined;
+    try readFrames(o.file, o.info, 0, &out);
+    try std.testing.expectEqualSlices(f32, &samples, &out);
+}
+
+test "readFrames: a truncated .part reads its clamped prefix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3, 4 };
+    const path = tmpWritePath(&pb, &tmp, "part.wav");
+    try writeFile(path, &in, 8_000, 1, .float32);
+    // chop the file to header + 2 frames + 2 stray bytes
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+    try f.setLength(io, header_len + 8 + 2);
+    f.close(io);
+    var o = try open(path);
+    defer o.file.close(io);
+    try std.testing.expectEqual(@as(u64, 2), o.info.frames);
+    var out: [2]f32 = undefined;
+    try readFrames(o.file, o.info, 0, &out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 1, 2 }, &out);
 }
 
 test "open: a huge channel count is Unsupported, not an integer-overflow trap" {
