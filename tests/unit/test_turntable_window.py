@@ -384,17 +384,6 @@ def test_switching_tracks_resets_selection_mode(qapp, state):
 # ── OUT→ checkout flow + clip-side ring population ───────────────────────────
 
 
-def test_peak_bins_from_audio():
-    from flashback_sampler.app.turntable_window import _peak_bins_from_audio
-    import numpy as np
-    audio = np.linspace(-0.5, 0.5, 1000, dtype=np.float32).reshape(-1, 1)
-    bins = _peak_bins_from_audio(audio, n_bins=10)
-    assert bins.shape == (10, 2, 1)
-    # First bin's min should be near -0.5, last bin's max near 0.5
-    assert bins[0, 0, 0] < -0.4
-    assert bins[-1, 1, 0] > 0.4
-
-
 def test_out_button_creates_checkout(qapp, state):
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
@@ -604,9 +593,8 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         mgr = state.active_slot.checkout_manager
         co = mgr.create(duration_s=0.5)
         win._refresh_clip_side(auto_select_newest=True)
-        n = co.audio.shape[0]
-        co.trim_in_samples = n // 4
-        co.trim_out_samples = n // 2
+        n = co.n_frames
+        mgr.set_trim(co.id, n // 4, n // 2)
         win._export_pool_dir = tmp_path
         monkeypatch.setattr(
             "flashback_sampler.app.turntable_window.perform_file_drag",
@@ -702,7 +690,7 @@ def test_buffer_drag_out_default_mode_drags_duration_window(qapp, state, tmp_pat
         assert cos[0].state == "saved"
         # Window is clamped to what's buffered: exactly the 1 s written.
         sr = state.active_slot.buffer.sample_rate
-        assert cos[0].audio.shape[0] == sr
+        assert cos[0].n_frames == sr
         assert len(list(tmp_path.glob("*.wav"))) == 1
     finally:
         win.close()
@@ -711,27 +699,42 @@ def test_buffer_drag_out_default_mode_drags_duration_window(qapp, state, tmp_pat
 def test_refresh_clip_side_caches_peak_bins_per_checkout(qapp, state, monkeypatch):
     """Waveform bins are computed once per checkout, not on every refresh —
     otherwise refresh cost grows with every banked clip (measured live:
-    0.17s -> 1.7s over 8 drags)."""
-    import flashback_sampler.app.turntable_window as tw
+    0.17s -> 1.7s over 8 drags). Checkout.bins is precomputed once at
+    create() time, so the cost this guards is the window's own
+    ring_amp/panel_bins reduction in _clip_bins_cache — pin that it runs
+    at most once per checkout (via a CheckoutManager.peak_bins spy, the
+    engine-reaching fallback path) and that cache entries are identity
+    -stable across repeat refreshes."""
+    from flashback_sampler.core.checkout import CheckoutManager
 
     calls = []
-    real = tw._peak_bins_from_audio
-    monkeypatch.setattr(
-        tw, "_peak_bins_from_audio",
-        lambda audio, n_bins: calls.append(n_bins) or real(audio, n_bins),
-    )
+    real_peak_bins = CheckoutManager.peak_bins
+
+    def spy(self, checkout_id, n_bins):
+        calls.append(checkout_id)
+        return real_peak_bins(self, checkout_id, n_bins)
+
+    monkeypatch.setattr(CheckoutManager, "peak_bins", spy)
+
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
         mgr = state.active_slot.checkout_manager
-        mgr.create(duration_s=0.2)
-        mgr.create(duration_s=0.2)
+        a = mgr.create(duration_s=0.2)
+        b = mgr.create(duration_s=0.2)
         win._refresh_clip_side(auto_select_newest=True)
-        first_pass = len(calls)
-        assert first_pass > 0
+        ring_a = win._clip_bins_cache[a.id]["ring_amp"]
+        ring_b = win._clip_bins_cache[b.id]["ring_amp"]
+        panel_b = win._clip_bins_cache[b.id]["panel_bins"]  # b is the displayed clip
+
         win._refresh_clip_side()
         win._refresh_clip_side()
-        assert len(calls) == first_pass  # all hits served from cache
+
+        assert win._clip_bins_cache[a.id]["ring_amp"] is ring_a
+        assert win._clip_bins_cache[b.id]["ring_amp"] is ring_b
+        assert win._clip_bins_cache[b.id]["panel_bins"] is panel_b
+        assert calls.count(a.id) <= 1
+        assert calls.count(b.id) <= 1
     finally:
         win.close()
 
@@ -935,10 +938,10 @@ def test_play_click_binds_the_checkout_at_its_rate_and_plays(qapp, state, monkey
     co = _checkout(state)
     co.sample_rate = 96_000  # pin a non-default rate so the bind-rate assert is real
     win._tick()
-    fake.state = (0, 0, 0, co.audio.shape[0], 48_000)  # not playing: the click must take the play branch
+    fake.state = (0, 0, 0, co.n_frames, 48_000)  # not playing: the click must take the play branch
     win._on_play_clip_clicked()
-    _arr, n, rate, ch = fake.bound
-    assert (n, rate, ch) == (co.audio.shape[0], co.sample_rate, co.channels)
+    assert fake.bound_checkout == (co.handle, 0, co.n_frames)
+    assert state.scrub_player.sample_rate == co.sample_rate
     assert [n_ for n_, _ in fake.calls if n_ == "fb_playback_play"] == ["fb_playback_play"]
     assert win._intending_playback is True
     assert win.clip_controls[0].text() == "STOP"
@@ -963,10 +966,10 @@ def test_update_playback_state_drives_the_playhead_from_the_native_cursor(qapp, 
     win._tick()
     seen = []
     monkeypatch.setattr(win.clip_panel.waveform, "set_playhead", seen.append)
-    fake.state = (1, 1, co.audio.shape[0] // 2, co.audio.shape[0], 48_000)
+    fake.state = (1, 1, co.n_frames // 2, co.n_frames, 48_000)
     win._update_clip_playback_state()
     assert seen[-1] == pytest.approx(0.5)
-    fake.state = (1, 0, co.audio.shape[0], co.audio.shape[0], 48_000)
+    fake.state = (1, 0, co.n_frames, co.n_frames, 48_000)
     win._update_clip_playback_state()
     assert seen[-1] is None
 
@@ -1034,3 +1037,54 @@ def test_loop_with_a_failing_device_warns_once_not_every_tick(qapp, state, monke
         win._update_clip_playback_state()
 
     assert len(warnings) == 1
+
+
+# ── Bins-from-handle, pin-on-select, bind_checkout (h10) ────────────────
+
+
+def test_selecting_a_clip_pins_it_and_bins_come_from_the_handle(qapp, state):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        a = mgr.create(duration_s=0.2)
+        b = mgr.create(duration_s=0.3)
+        win._refresh_clip_side(auto_select_newest=True)
+        assert mgr._pinned_id == b.id  # noqa: SLF001
+        win.clip_turntable.select_track(0)
+        win._refresh_clip_side()
+        assert mgr._pinned_id == a.id  # noqa: SLF001
+        assert win._clip_bins_cache[a.id]["panel_bins"].shape == (360, 2, state.channels)
+        assert win._clip_bins_cache[a.id]["ring_amp"].shape == (540,)
+    finally:
+        win.close()
+
+
+def test_play_with_a_trim_binds_the_trim_range(qapp, state, monkeypatch):
+    fake = _fake_player(monkeypatch, state)
+    win = TurntableWindow(state)
+    try:
+        co = _checkout(state)
+        state.checkout_manager.set_trim(co.id, 100, 300)
+        win._tick()
+        fake.state = (0, 0, 0, 0, 48_000)
+        win._on_play_clip_clicked()
+        assert fake.bound_checkout == (co.handle, 100, 200)
+    finally:
+        win.close()
+
+
+def test_buffer_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, monkeypatch, tmp_path):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.apply_checkout_caps(max_active=1)
+        win._export_pool_dir = tmp_path
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
+        win._on_buffer_drag_out(0.0, 0.5)
+        first = state.checkout_manager.list()[0].id
+        win._on_buffer_drag_out(0.0, 0.5)
+        cos = state.checkout_manager.list()
+        assert len(cos) == 1 and cos[0].id != first and cos[0].state == "saved"
+    finally:
+        win.close()
