@@ -595,6 +595,55 @@ test "waitLoad returns immediately on a parked .write; it only blocks on .load" 
     try std.testing.expectEqual(Checkout.Job.write, co.job); // still running: proof of the claim
 }
 
+/// Runs `Scratch.forget` on a spare thread, same shape as `WaitLoadCtx`
+/// above, so a test can bound-poll whether `forget` has returned instead
+/// of blocking the test thread itself on it.
+const ForgetCtx = struct {
+    scratch: *Scratch,
+    co: *Checkout,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *ForgetCtx) void {
+        self.scratch.forget(self.co);
+        self.done.store(true, .release);
+    }
+};
+
+test "forget's worker-running branch waits for an in-flight write before unlinking" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{1});
+    Recorder.reset();
+    Recorder.park.store(true, .release); // the write never finishes until unparked below
+    var s = Scratch.init(1 << 30);
+    s.write_fn = &Recorder.write;
+    var pb: [64]u8 = undefined;
+    const co = try testRoot(&tmp, &pb, "fg.wav", &ring, 1);
+    defer co.destroy();
+    try s.start();
+    s.submit(co, .write); // co.job == .write; the worker pops it and parks inside write_fn
+
+    var ctx = ForgetCtx{ .scratch = &s, .co = co };
+    const t = try std.Thread.spawn(.{}, ForgetCtx.run, .{&ctx});
+
+    // Bounded busy-wait for "still not done": a deterministic block (the
+    // parked write can only finish once we release it below), not a
+    // timing race, so this budget just needs to be generous enough for
+    // the forget thread to have had every chance to return wrongly.
+    var i: u32 = 0;
+    while (!ctx.done.load(.acquire) and i < 200_000) : (i += 1) {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(!ctx.done.load(.acquire)); // forget must still be blocked on the write
+
+    Recorder.park.store(false, .release); // let the parked write finish
+    try std.testing.expect(pollTrue(&ctx.done)); // forget now returns
+    t.join();
+    s.stop();
+}
+
 test "re-submitting the same checkout for another write does not double-count LRU bytes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -893,13 +942,45 @@ test "R-h4a: a failed write (job none, write_state failed) stays resident and un
     try std.testing.expect(p.a.frames != null); // a failed write is not lost to eviction
 }
 
+test "R-h4a companion: an adopted (write_state == .adopted) resident clip IS evicted at budget 0" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const in = [_]f32{ 5, 6, 7 };
+    const path = test_util.tmpPath(&pb, &tmp, "adopt-ev.wav");
+    try wav.writeFile(path, &in, 8_000, 1, .float32);
+    const co = try Checkout.adopt(std.testing.allocator, path, 0, 3, 8_000, 1);
+    defer co.destroy();
+    var s = Scratch.init(1 << 30); // high budget first: the load succeeds and links in
+    try s.start();
+    s.submit(co, .load);
+    s.waitLoad(co);
+    s.stop();
+    try std.testing.expectEqual(Checkout.WriteState.adopted, co.write_state.load(.acquire));
+    try std.testing.expect(co.frames != null);
+    s.setBudget(0); // adopted clips must be evictable, not permanently pinned like .failed
+    try std.testing.expectEqual(@as(?[]f32, null), co.frames);
+    try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
+    try std.testing.expectEqual(@as(?*Checkout, null), s.lru_head);
+}
+
 test "forget on an unstarted scratch dequeues the FIFO entry instead of hanging (R-h4b/R-h3f)" {
     var p: Pair = undefined;
     try p.init();
     defer p.deinit();
     var s = Scratch.init(1 << 30);
-    s.submit(p.a, .write); // no start(): thread stays null, nothing will ever pop this job
-    s.forget(p.a); // must return without a worker to run the job
+    s.submit(p.a, .write); // no start(): thread stays null, nothing will ever pop these jobs
+    s.submit(p.b, .write); // queue is now a -> b, tail == b
+
+    // Forget the TAIL first: dequeueLocked's non-head branch must walk
+    // from queue_head to find b's predecessor (a) and fix up queue_tail
+    // (which pointed at b) to point at a instead.
+    s.forget(p.b);
+    try std.testing.expectEqual(Checkout.Job.none, p.b.job);
+    try std.testing.expectEqual(@as(?*Checkout, p.a), s.queue_head);
+    try std.testing.expectEqual(@as(?*Checkout, p.a), s.queue_tail); // the tail fix-up ran
+
+    s.forget(p.a); // must also return without a worker to run its job
     try std.testing.expectEqual(Checkout.Job.none, p.a.job);
     try std.testing.expectEqual(@as(?*Checkout, null), s.queue_head);
     try std.testing.expectEqual(@as(?*Checkout, null), s.queue_tail);
