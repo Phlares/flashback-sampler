@@ -417,3 +417,15 @@ def test_create_from_abs_range_cleans_up_on_manifest_failure(scratch, tmp_path, 
             break
         time.sleep(0.02)
     assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.wav.part")) == []
+
+
+def test_cleanup_after_create_failure_does_not_mask_the_original_error(scratch, tmp_path, monkeypatch):
+    """h8 round 2: if checkout_destroy ITSELF raises while cleaning up
+    after a create failure, that must not replace the original error --
+    the caller still needs to know the manifest write (or whatever
+    actually failed) is what went wrong, not that cleanup also failed."""
+    mgr = _mgr(scratch, tmp_path)
+    monkeypatch.setattr(CheckoutManager, "_write_manifest", _boom)
+    monkeypatch.setattr(scratch, "checkout_destroy", _boom)
+    with pytest.raises(RuntimeError, match="could not create checkout"):
+        mgr.create(duration_s=0.1)
