@@ -8,6 +8,7 @@ const std = @import("std");
 const Backend = @import("Backend.zig");
 const FakeBackend = @import("FakeBackend.zig");
 const ErrorSlot = @import("ErrorSlot.zig");
+const wav = @import("wav.zig");
 const Playback = @This();
 
 pub const State = extern struct { running: u8, playing: u8, cursor: u64, clip_frames: u64, mix_rate: u32 };
@@ -81,14 +82,42 @@ fn currentSpec(self: *const Playback) Backend.Spec {
     return .{ .kind = .render, .device_id = self.id_buf[0..self.id_len], .rate = self.rate, .channels = self.channels };
 }
 
-/// Control thread. The ONLY place the clip is allocated or freed.
-/// `clip` is an OWNED slice: `dupe` allocates and copies, so the caller's
-/// `frames` may die the moment bind returns. The previous slice is handed
-/// back to the same allocator, never to a different one.
-pub fn bind(self: *Playback, frames: []const f32, rate: u32, channels: u16) !void {
+/// Where a clip comes from. `frames` is copied (the caller's slice may
+/// die the moment bind returns); `file` is read straight into the new
+/// clip buffer — one copy either way, never a second RAM copy of the
+/// clip. Checkout.source() picks the arm from its residency.
+pub const ClipSource = union(enum) {
+    frames: []const f32,
+    file: struct { path: []const u8, start_frame: u64, n_frames: u64 },
+};
+
+/// Control thread. The ONLY place the clip is allocated or freed. The
+/// previous clip survives a failed bind (a missing file, a short read):
+/// the new buffer is filled BEFORE the old one is released.
+pub fn bind(self: *Playback, src: ClipSource, rate: u32, channels: u16) !void {
+    // `f.n_frames * channels` arrives off a ClipSource that may trace
+    // back to a ctypes boundary — computed with std.math.mul so a
+    // hostile n_frames returns InvalidArgument instead of trapping the
+    // multiply, and BEFORE the @intCast so the cast never sees a wrapped
+    // value either.
     // Clause order is load-bearing: `channels == 0` must come first, or
     // the modulo below divides by zero.
-    if (channels == 0 or channels > 2 or rate == 0 or frames.len % channels != 0) return error.InvalidArgument;
+    if (channels == 0 or channels > 2 or rate == 0) return error.InvalidArgument;
+    const n_samples: usize = switch (src) {
+        .frames => |f| f.len,
+        .file => |f| @intCast(std.math.mul(u64, f.n_frames, channels) catch return error.InvalidArgument),
+    };
+    if (n_samples % channels != 0) return error.InvalidArgument;
+    const copy = try self.allocator.alloc(f32, n_samples);
+    errdefer self.allocator.free(copy);
+    switch (src) {
+        .frames => |f| @memcpy(copy, f),
+        .file => |f| {
+            var o = try wav.open(f.path);
+            defer o.file.close(wav.io);
+            try wav.readFrames(o.file, o.info, f.start_frame, copy);
+        },
+    }
     // Handshake with fill(): clear `playing`, then wait for any copy in
     // flight. fill() raises in_copy BEFORE it reads `playing`, so once we
     // observe in_copy == false after storing playing = false, no copy can
@@ -96,11 +125,10 @@ pub fn bind(self: *Playback, frames: []const f32, rate: u32, channels: u16) !voi
     // and two loads globally ordered (Dekker's pattern).
     self.playing.store(false, .seq_cst);
     while (self.in_copy.load(.seq_cst)) std.Thread.yield() catch {};
-    const copy = try self.allocator.dupe(f32, frames);
     self.allocator.free(self.clip);
     self.clip = copy;
     self.cursor.store(0, .release);
-    self.clip_frames.store(frames.len / channels, .release);
+    self.clip_frames.store(n_samples / channels, .release);
     if (rate != self.rate or channels != self.channels) {
         self.rate = rate;
         self.channels = channels;
@@ -308,7 +336,7 @@ test "partial tail zero-pads the last write and auto-stops with the cursor at cl
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const clip = ramp(6);
-    try pb.bind(&clip, 48_000, 2);
+    try pb.bind(.{ .frames = &clip }, 48_000, 2);
     try pb.play();
     try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
@@ -333,7 +361,7 @@ test "paused: writes are zeros and the cursor does not move" {
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const clip = ramp(100);
-    try pb.bind(&clip, 48_000, 2);
+    try pb.bind(.{ .frames = &clip }, 48_000, 2);
     try pb.play();
     try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
@@ -365,7 +393,7 @@ test "seek past end clamps to clip_frames; play at end rewinds to 0" {
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const clip = ramp(10);
-    try pb.bind(&clip, 48_000, 2);
+    try pb.bind(.{ .frames = &clip }, 48_000, 2);
     pb.seek(500);
     try std.testing.expectEqual(@as(u64, 10), pb.state().cursor);
     pb.seek(3);
@@ -386,7 +414,7 @@ test "bind while playing pauses, resets the cursor, and replaces the clip" {
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const a = ramp(1000);
-    try pb.bind(&a, 48_000, 2);
+    try pb.bind(.{ .frames = &a }, 48_000, 2);
     try pb.play();
     try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
@@ -394,7 +422,7 @@ test "bind while playing pauses, resets the cursor, and replaces the clip" {
         }
     }.f);
     const b = ramp(3);
-    try pb.bind(&b, 48_000, 2);
+    try pb.bind(.{ .frames = &b }, 48_000, 2);
     try std.testing.expectEqual(@as(u8, 0), pb.state().playing);
     try std.testing.expectEqual(@as(u64, 0), pb.state().cursor);
     try std.testing.expectEqual(@as(u64, 3), pb.state().clip_frames);
@@ -411,7 +439,7 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const a = ramp(4);
-    try pb.bind(&a, 48_000, 2);
+    try pb.bind(.{ .frames = &a }, 48_000, 2);
     try pb.play();
     try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
@@ -424,7 +452,7 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     // Written before the bind that requests the reopen: the render thread
     // reads it only inside openRender, and `reopen` orders the two.
     fake.mix_rate = 96_000;
-    try pb.bind(&a, 96_000, 2);
+    try pb.bind(.{ .frames = &a }, 96_000, 2);
     try waitFor(&fake, secondOpen);
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
     // The counter moves INSIDE openRender, so the publish that follows it
@@ -438,7 +466,7 @@ test "rebind at a new rate reopens the stream on the render thread with the new 
     try std.testing.expectEqual(@as(u32, 96_000), pb.state().mix_rate);
     try std.testing.expectEqual(@as(u32, 96_000), fake.last_render_spec.?.rate);
     // Same rate again: no reopen.
-    try pb.bind(&a, 96_000, 2);
+    try pb.bind(.{ .frames = &a }, 96_000, 2);
     try std.testing.expect(!pb.reopen.load(.acquire));
 }
 
@@ -454,7 +482,7 @@ test "bind mono at the same rate under a stereo stream reopens and never resizes
     // rescue a fill that reads self.channels.
     fake.render_hold = true;
     const stereo = ramp(1000);
-    try pb.bind(&stereo, 48_000, 2);
+    try pb.bind(.{ .frames = &stereo }, 48_000, 2);
     try pb.play();
     try waitFor(&fake, firstWait);
     try std.testing.expect(fake.render_waits.load(.acquire) == 1);
@@ -463,7 +491,7 @@ test "bind mono at the same rate under a stereo stream reopens and never resizes
     // (the stream's count); a fill() that read self.channels would hand
     // the stereo stream 4 * 1 samples and the fake rejects that write.
     const mono = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    try pb.bind(&mono, 48_000, 1);
+    try pb.bind(.{ .frames = &mono }, 48_000, 1);
     fake.release.store(true, .release);
     try waitFor(&fake, secondOpen);
     try std.testing.expectEqual(@as(u32, 2), fake.render_opens.load(.acquire));
@@ -484,7 +512,7 @@ test "a seek past the stream's channel bound outputs silence and keeps the seek 
     defer pb.deinit();
     fake.render_hold = true;
     const stereo = ramp(1000);
-    try pb.bind(&stereo, 48_000, 2);
+    try pb.bind(.{ .frames = &stereo }, 48_000, 2);
     try pb.play();
     try waitFor(&fake, firstWait);
     // 8 mono frames = 4 stereo frames. seek(8) is legal against
@@ -494,7 +522,7 @@ test "a seek past the stream's channel bound outputs silence and keeps the seek 
     // clip and panics, and a cursor CLAMPED to 4 and written back would
     // silently move the user's seek to the middle of the clip.
     const mono = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    try pb.bind(&mono, 48_000, 1);
+    try pb.bind(.{ .frames = &mono }, 48_000, 1);
     // play() before seek(): play() rewinds a cursor already at the end,
     // so seeking first would leave the cursor at 0 and prove nothing.
     try pb.play();
@@ -522,7 +550,7 @@ test "setDevice copies the id, sets reopen, and the new id reaches the backend" 
     pb.setDevice("{hp}");
     try std.testing.expect(pb.reopen.load(.acquire));
     const a = ramp(4);
-    try pb.bind(&a, 48_000, 2);
+    try pb.bind(.{ .frames = &a }, 48_000, 2);
     try pb.play();
     try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
@@ -539,7 +567,7 @@ test "available() == 0 does not spin into zero-length writes" {
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const a = ramp(4);
-    try pb.bind(&a, 48_000, 2);
+    try pb.bind(.{ .frames = &a }, 48_000, 2);
     try pb.play();
     try waitFor(&fake, struct {
         fn f(k: *FakeBackend) bool {
@@ -558,7 +586,7 @@ test "openRender failure lands in lastError, running stays false, and the next p
     var pb = Playback.init(std.testing.allocator, fake.backend(), test_spec);
     defer pb.deinit();
     const a = ramp(4);
-    try pb.bind(&a, 48_000, 2);
+    try pb.bind(.{ .frames = &a }, 48_000, 2);
     try pb.play();
     try waitFor(&pb, struct {
         fn f(p: *Playback) bool {
@@ -586,9 +614,39 @@ test "bind rejects a bad channel count, a zero channel count, a zero rate, and a
     // 6 samples divide evenly by 3, so only the `channels > 2` clause can
     // reject this one. A ragged length here would pass the test for the
     // wrong reason and leave that clause unpinned.
-    try std.testing.expectError(error.InvalidArgument, pb.bind(&[_]f32{ 1, 2, 3, 4, 5, 6 }, 48_000, 3));
-    try std.testing.expectError(error.InvalidArgument, pb.bind(&[_]f32{ 1, 2 }, 48_000, 0));
-    try std.testing.expectError(error.InvalidArgument, pb.bind(&a, 0, 2));
-    try std.testing.expectError(error.InvalidArgument, pb.bind(a[0..3], 48_000, 2));
+    try std.testing.expectError(error.InvalidArgument, pb.bind(.{ .frames = &[_]f32{ 1, 2, 3, 4, 5, 6 } }, 48_000, 3));
+    try std.testing.expectError(error.InvalidArgument, pb.bind(.{ .frames = &[_]f32{ 1, 2 } }, 48_000, 0));
+    try std.testing.expectError(error.InvalidArgument, pb.bind(.{ .frames = &a }, 0, 2));
+    try std.testing.expectError(error.InvalidArgument, pb.bind(.{ .frames = a[0..3] }, 48_000, 2));
     try std.testing.expectEqual(@as(u64, 0), pb.state().clip_frames);
+}
+
+test "bind from a file range reads the same clip as bind from frames" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    var in: [40]f32 = undefined; // 20 stereo frames
+    for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) * 0.01;
+    const path = std.fmt.bufPrint(&pb, ".zig-cache/tmp/{s}/clip.wav", .{tmp.sub_path}) catch unreachable;
+    try wav.writeFile(path, &in, 48_000, 2, .float32);
+
+    var fake = FakeBackend.init(&.{});
+    var p = Playback.init(std.testing.allocator, fake.backend(), test_spec);
+    defer p.deinit();
+    try p.bind(.{ .file = .{ .path = path, .start_frame = 5, .n_frames = 10 } }, 48_000, 2);
+    try std.testing.expectEqual(@as(u64, 10), p.clip_frames.load(.acquire));
+    try std.testing.expectEqualSlices(f32, in[10..30], p.clip);
+    try p.bind(.{ .frames = in[10..30] }, 48_000, 2);
+    try std.testing.expectEqualSlices(f32, in[10..30], p.clip);
+}
+
+test "bind from a missing file fails and keeps the previous clip" {
+    var fake = FakeBackend.init(&.{});
+    var p = Playback.init(std.testing.allocator, fake.backend(), test_spec);
+    defer p.deinit();
+    const in = [_]f32{ 1, 2, 3, 4 };
+    try p.bind(.{ .frames = &in }, 48_000, 2);
+    try std.testing.expectError(error.FileNotFound, p.bind(.{ .file = .{ .path = ".zig-cache/tmp/none.wav", .start_frame = 0, .n_frames = 2 } }, 48_000, 2));
+    try std.testing.expectEqualSlices(f32, &in, p.clip);
+    try std.testing.expectEqual(@as(u64, 2), p.clip_frames.load(.acquire));
 }

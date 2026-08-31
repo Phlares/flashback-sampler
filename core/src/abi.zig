@@ -619,9 +619,10 @@ export fn fb_playback_create(device_id: [*:0]const u8, rate: u32, channels: u16)
 
 export fn fb_playback_bind(pb: *Playback, frames: [*]const f32, n_frames: usize, rate: u32, channels: u16) FbStatus {
     if (channels == 0) return .invalid_arg;
-    pb.bind(frames[0 .. n_frames * channels], rate, channels) catch |e| return switch (e) {
+    pb.bind(.{ .frames = frames[0 .. n_frames * channels] }, rate, channels) catch |e| return switch (e) {
         error.InvalidArgument => .invalid_arg,
         error.OutOfMemory => .out_of_memory,
+        else => .io_error,
     };
     return .ok;
 }
