@@ -161,6 +161,8 @@ fn parseFmt(fb: []const u8) ParseError!Fmt {
     // channels (u16) * bytesPerSample (u8) peer-types to u16 and overflows
     // above 16383 float32 channels — widen to u32 first so a malformed
     // header returns Unsupported instead of an integer-overflow trap.
+    // With max_channels enforced above, this product fits u16 anyway;
+    // the widening stays as defence so the two guards remain independent.
     if (block_align != @as(u32, channels) * subtype.bytesPerSample()) return error.Unsupported;
     return .{ .channels = channels, .rate = rate, .block_align = block_align, .subtype = subtype };
 }
@@ -169,12 +171,16 @@ fn parseFmt(fb: []const u8) ParseError!Fmt {
 /// heap. 16384 float32 mono samples, 8192 stereo frames per iteration.
 pub const read_chunk_bytes = 16384 * 4;
 
-/// Cap on channels: every chunk loop (`copyRange`, `peaks.peakBinsFile`)
-/// sizes its f32 buffer as `read_chunk_bytes / 4` samples and divides by
-/// `channels` to get frames-per-chunk; above this cap that quotient is 0
-/// and the loop would never advance. Enforced at the two entry points
-/// (parseFmt, fb_wav_write) instead of in every loop.
-pub const max_channels: u16 = read_chunk_bytes / 4;
+/// Cap on channels: the tighter of two bounds. (1) `writeHeader`'s
+/// `block_align: u16 = @intCast(bps * channels)` must fit a u16 — for
+/// the widest subtype (float32, 4 bytes/sample) that caps channels at
+/// 65535 / 4 = 16383 (16384 already overflows: 4 * 16384 = 65536). (2)
+/// every chunk loop (`copyRange`, `peaks.peakBinsFile`) sizes its f32
+/// buffer as `read_chunk_bytes / 4` samples and divides by `channels` to
+/// get frames-per-chunk, which needs channels <= 16384 to stay >= 1.
+/// (1) is the tighter bound, so it sets the cap. Enforced at the two
+/// entry points (parseFmt, fb_wav_write) instead of in every loop.
+pub const max_channels: u16 = std.math.maxInt(u16) / 4;
 
 pub const ReadError = error{OutOfRange} || std.Io.File.ReadPositionalError;
 
