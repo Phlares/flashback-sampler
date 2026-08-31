@@ -15,6 +15,22 @@
 //! (`Checkout.load`'s own allocation) — a `.write` job allocates
 //! nothing.
 //!
+//! `self.thread` is written only by `start`/`stop` and read (without
+//! the mutex) by `start`'s own `AlreadyRunning` check and by
+//! `waitLoad`/`waitJob`'s no-worker early-out. All of `start`, `stop`,
+//! `submit`, `waitLoad`, `waitJob` assume ONE control thread — this
+//! module has no lock protecting `thread` itself, so concurrent calls
+//! into these from more than one control thread are unsupported.
+//! `waitLoad`/`waitJob` returning early because `thread == null` means
+//! quiescence was NOT reached — `co` may still be linked into the FIFO
+//! (and the LRU, for a `.write`) — so a caller must unlink it (`forget`,
+//! Task h4/h5) before freeing it in that case. h4 reads this block: its
+//! eviction routine relies on `Checkout.lru_bytes` (set under `mutex` at
+//! LRU-insert, snapshotting `residentBytes()` at that moment) as the
+//! exact figure to subtract from `resident_bytes` on removal — never a
+//! fresh `residentBytes()` recomputed at removal time, which can differ
+//! from what was added if `frames` changed size while linked.
+//!
 //! Zig 0.16: blocking primitives live under std.Io (`std.Io.Mutex`,
 //! `std.Io.Condition`) and take the Io they block on; the singleton
 //! `wav.io` is a real futex underneath (see abi.zig's note on the
@@ -82,7 +98,11 @@ fn submitLocked(self: *Scratch, co: *Checkout, job: Checkout.Job) void {
     co.queue_next = null;
     if (self.queue_tail) |t| t.queue_next = co else self.queue_head = co;
     self.queue_tail = co;
-    if (job == .write) self.lruInsertHeadLocked(co);
+    // Same guard doLoad uses: a re-write of a checkout that is already
+    // resident (still linked from an earlier write, never evicted) must
+    // not double-count its bytes or, worse, re-link an already-linked
+    // node onto itself.
+    if (job == .write and !self.lruLinkedLocked(co)) self.lruInsertHeadLocked(co);
     self.cond.broadcast(io);
 }
 
@@ -93,7 +113,9 @@ fn submitLocked(self: *Scratch, co: *Checkout, job: Checkout.Job) void {
 /// already stopped) would otherwise wait forever with nothing left to
 /// process it and broadcast — `self.thread` is written only by `start`/
 /// `stop` on this same control thread, so reading it here needs no
-/// separate lock.
+/// separate lock. With no worker running this returns WITHOUT
+/// quiescence: `co` may still be linked into the FIFO. See `waitJob`'s
+/// doc for the same caveat on destroying a checkout in that state.
 pub fn waitLoad(self: *Scratch, co: *Checkout) void {
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
@@ -101,7 +123,12 @@ pub fn waitLoad(self: *Scratch, co: *Checkout) void {
 }
 
 /// Block until `co` has no job at all. Tests and `forget` use it. Same
-/// no-worker early-out as `waitLoad` (ruling R-h4b).
+/// no-worker early-out as `waitLoad` (ruling R-h4b): with no worker
+/// running, this returns WITHOUT quiescence — `co` may still be linked
+/// into the FIFO and/or the LRU (nothing ran to unlink it). The caller
+/// must unlink the checkout (`forget`, Task h4/h5) before destroying it
+/// in that case; destroying a still-linked checkout leaves Scratch's
+/// list pointers dangling.
 pub fn waitJob(self: *Scratch, co: *Checkout) void {
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
@@ -156,10 +183,21 @@ fn doWrite(self: *Scratch, co: *Checkout) void {
         co.write_state.store(.failed, .release);
         return;
     };
-    std.Io.Dir.cwd().rename(part, std.Io.Dir.cwd(), co.path(), io) catch {
-        co.write_state.store(.failed, .release);
-        return;
-    };
+    // The rename below still walks `wav.io` (the same synchronous Io
+    // singleton `defaultWrite` locks `wav.write_mutex` around) via
+    // `Dir.rename`'s vtable call — wav.zig's own doc says concurrent use
+    // of that singleton is untraced, so this needs the same lock, taken
+    // here rather than folded into `defaultWrite` (a swappable write_fn,
+    // e.g. the test Recorder, never takes it): every write_fn, default
+    // or injected, gets the rename protected regardless.
+    {
+        wav.write_mutex.lockUncancelable(wav.io);
+        defer wav.write_mutex.unlock(wav.io);
+        std.Io.Dir.cwd().rename(part, std.Io.Dir.cwd(), co.path(), io) catch {
+            co.write_state.store(.failed, .release);
+            return;
+        };
+    }
     co.write_state.store(.written, .release);
 }
 
@@ -190,7 +228,13 @@ fn lruInsertHeadLocked(self: *Scratch, co: *Checkout) void {
     co.lru_next = self.lru_head;
     if (self.lru_head) |h| h.lru_prev = co else self.lru_tail = co;
     self.lru_head = co;
-    self.resident_bytes += co.residentBytes();
+    // Snapshot NOW: `co.residentBytes()` reads `frames.len`, which can
+    // change (a later evict, or a load onto a still-linked checkout —
+    // see doLoad's own linked-guard) while `co` stays in this list.
+    // `lruRemoveLocked` must undo exactly this many bytes, not whatever
+    // `frames` holds when it runs.
+    co.lru_bytes = co.residentBytes();
+    self.resident_bytes += co.lru_bytes;
 }
 
 fn lruRemoveLocked(self: *Scratch, co: *Checkout) void {
@@ -199,7 +243,14 @@ fn lruRemoveLocked(self: *Scratch, co: *Checkout) void {
     if (co.lru_next) |n| n.lru_prev = co.lru_prev else self.lru_tail = co.lru_prev;
     co.lru_prev = null;
     co.lru_next = null;
-    self.resident_bytes -= co.residentBytes();
+    // Subtract the snapshot taken at insert, not a fresh
+    // `co.residentBytes()` (see the insert-side comment). `@min` is the
+    // subtraction-guard idiom applied to running-total bookkeeping: it
+    // cannot underflow `resident_bytes` even if `lru_bytes` were ever
+    // larger than the tracked total (defensive; every insert should pair
+    // with exactly one remove of its own snapshot).
+    self.resident_bytes -= @min(self.resident_bytes, co.lru_bytes);
+    co.lru_bytes = 0;
 }
 
 fn evictOverBudgetLocked(self: *Scratch) void {
@@ -240,6 +291,35 @@ const Recorder = struct {
         try wav.writeFile(path, frames, rate, channels, .float32);
     }
 };
+
+/// Runs `Scratch.waitLoad` on a spare thread so a test can bound-poll
+/// whether it returned, instead of blocking the test thread itself (a
+/// mutated predicate must redden with a timeout, never an unattended
+/// hang).
+const WaitLoadCtx = struct {
+    scratch: *Scratch,
+    co: *Checkout,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *WaitLoadCtx) void {
+        self.scratch.waitLoad(self.co);
+        self.done.store(true, .release);
+    }
+};
+
+/// Poll `flag`, yielding the thread between checks, for a bounded number
+/// of iterations. Returns whether it became true in time — no `Io` is
+/// threaded through this test file, so this spins on `Thread.yield`
+/// rather than a timed sleep; the iteration cap still guarantees this
+/// never blocks unboundedly, so a caller can safely still stop/join
+/// after a "timeout" instead of wedging the test binary.
+fn pollTrue(flag: *std.atomic.Value(bool)) bool {
+    var i: u32 = 0;
+    while (!flag.load(.acquire) and i < 2_000_000) : (i += 1) {
+        std.Thread.yield() catch {};
+    }
+    return flag.load(.acquire);
+}
 
 test "a queued write lands as <path>: .part gone, written state, bytes intact" {
     var tmp = std.testing.tmpDir(.{});
@@ -317,11 +397,18 @@ test "a failing writer marks the checkout failed and keeps its frames" {
 }
 
 test "an unwritable path (missing directory) marks failed without a panic" {
+    // tmpDir creates its own directory; the "no-such-dir" component
+    // under it is never created, so this stays a real, guaranteed-
+    // missing directory rather than a bare cwd-relative path (ruling
+    // R-2: every test path routes through tmpDir + test_util.tmpPath).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
     var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
     defer ring.deinit();
     ring.write(&[_]f32{1});
     var s = Scratch.init(1 << 30);
-    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, 1, ".zig-cache/tmp/no-such-dir/x.wav");
+    var pb: [64]u8 = undefined;
+    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, 1, test_util.tmpPath(&pb, &tmp, "no-such-dir/x.wav"));
     defer co.destroy();
     try s.start();
     s.submit(co, .write);
@@ -366,4 +453,181 @@ test "submit ignores a checkout that is already queued; start twice is AlreadyRu
     try s.start();
     try std.testing.expectError(error.AlreadyRunning, s.start());
     s.stop();
+}
+
+test "waitLoad returns immediately on a parked .write; it only blocks on .load" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{1});
+    Recorder.reset();
+    Recorder.park.store(true, .release); // the write never finishes until unparked below
+    var s = Scratch.init(1 << 30);
+    s.write_fn = &Recorder.write;
+    var pb: [64]u8 = undefined;
+    const co = try testRoot(&tmp, &pb, "w.wav", &ring, 1);
+    defer co.destroy();
+    try s.start();
+    s.submit(co, .write);
+
+    var ctx = WaitLoadCtx{ .scratch = &s, .co = co };
+    const t = try std.Thread.spawn(.{}, WaitLoadCtx.run, .{&ctx});
+    defer {
+        Recorder.park.store(false, .release); // let the parked write finish so `t` can join
+        t.join();
+        s.stop();
+    }
+
+    try std.testing.expect(pollTrue(&ctx.done)); // must not need the parked write to finish
+    try std.testing.expectEqual(Checkout.Job.write, co.job); // still running: proof of the claim
+}
+
+test "re-submitting the same checkout for another write does not double-count LRU bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 1, 2 });
+    var s = Scratch.init(1 << 30);
+    var pb: [64]u8 = undefined;
+    const co = try testRoot(&tmp, &pb, "r.wav", &ring, 2);
+    defer co.destroy();
+    try s.start();
+    s.submit(co, .write);
+    s.waitJob(co);
+    const bytes_after_first = s.resident_bytes;
+    try std.testing.expectEqual(co.residentBytes(), bytes_after_first);
+
+    // The guard under test (submitLocked's LRU insert) runs
+    // synchronously inside `submit`, under `mutex`, before the worker
+    // ever touches this job — so it's already fully checkable right
+    // here, without waiting for this second write to finish. No second
+    // `waitJob`: this test must stay decoupled from whether the FIFO
+    // itself ever redelivers the job (a different guard, pinned by its
+    // own test) — call `stop` unconditionally after for cleanup, bounded
+    // regardless of that.
+    s.submit(co, .write); // re-write: co is already linked at the LRU head
+    defer s.stop();
+
+    try std.testing.expectEqual(bytes_after_first, s.resident_bytes); // unchanged, not doubled
+    try std.testing.expectEqual(@as(?*Checkout, null), co.lru_next); // still the sole entry: no self-loop
+    try std.testing.expectEqual(@as(?*Checkout, null), co.lru_prev);
+    try std.testing.expectEqual(@as(?*Checkout, co), s.lru_head);
+    try std.testing.expectEqual(@as(?*Checkout, co), s.lru_tail);
+}
+
+test "lruRemoveLocked subtracts the snapshot taken at insert, not a stale recompute" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 1, 2, 3, 4 });
+    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, 4, "snap.wav");
+    defer co.destroy();
+    var s = Scratch.init(1 << 30);
+    s.mutex.lockUncancelable(io);
+    s.lruInsertHeadLocked(co); // co.residentBytes() == 16 right now
+    s.mutex.unlock(io);
+    try std.testing.expectEqual(@as(u64, 16), s.resident_bytes);
+    try std.testing.expectEqual(@as(u64, 16), co.lru_bytes);
+
+    // Simulates the shape of h4's future eviction changing `frames`
+    // while `co` stays linked (h4 itself isn't built yet): evict
+    // directly, bypassing Scratch's own removal.
+    co.evict();
+    try std.testing.expectEqual(@as(u64, 0), co.residentBytes());
+
+    s.mutex.lockUncancelable(io);
+    s.lruRemoveLocked(co);
+    s.mutex.unlock(io);
+    // Correct: subtracted the 16-byte snapshot taken at insert, not a
+    // fresh residentBytes() (which reads 0 now that frames is null —
+    // that bug would leave resident_bytes wrongly stuck at 16).
+    try std.testing.expectEqual(@as(u64, 0), s.resident_bytes);
+}
+
+test "lruRemoveLocked's resident_bytes subtraction cannot underflow even if the snapshot exceeds the running total" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{1});
+    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, 1, "clamp.wav");
+    defer co.destroy();
+    var s = Scratch.init(1 << 30);
+    s.mutex.lockUncancelable(io);
+    s.lruInsertHeadLocked(co); // resident_bytes = co.lru_bytes = 4
+    s.resident_bytes = 1; // contrived: a running total smaller than this entry's own snapshot
+    s.lruRemoveLocked(co);
+    s.mutex.unlock(io);
+    try std.testing.expectEqual(@as(u64, 0), s.resident_bytes); // clamped, not wrapped to a huge u64
+}
+
+test "submit ignores job == .none: it never reaches the FIFO" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{1});
+    var s = Scratch.init(1 << 30);
+    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, 1, "none.wav");
+    defer co.destroy();
+    s.submit(co, .none);
+    try std.testing.expectEqual(Checkout.Job.none, co.job);
+    try std.testing.expectEqual(@as(?*Checkout, null), s.queue_head);
+}
+
+test "doWrite on a checkout with no resident frames fails without calling write_fn" {
+    Recorder.reset();
+    var s = Scratch.init(1 << 30);
+    s.write_fn = &Recorder.write;
+    const co = try Checkout.adopt(std.testing.allocator, "adopted-empty.wav", 0, 1, 8_000, 1);
+    defer co.destroy();
+    try s.start();
+    s.submit(co, .write);
+    s.waitJob(co);
+    s.stop();
+    try std.testing.expectEqual(Checkout.WriteState.failed, co.write_state.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), Recorder.count); // write_fn never called
+}
+
+test "a load job for a nonexistent file leaves the checkout unresident and unlinked" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    const co = try Checkout.adopt(std.testing.allocator, test_util.tmpPath(&pb, &tmp, "nope.wav"), 0, 1, 8_000, 1);
+    defer co.destroy();
+    var s = Scratch.init(1 << 30);
+    try s.start();
+    s.submit(co, .load);
+    s.waitLoad(co);
+    s.stop();
+    try std.testing.expectEqual(@as(?[]f32, null), co.frames);
+    try std.testing.expectEqual(@as(u64, 0), s.resident_bytes);
+    try std.testing.expectEqual(@as(?*Checkout, null), s.lru_head);
+}
+
+test "a submit after the queue fully drains is not lost to a stale tail pointer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 1, 2 });
+    var s = Scratch.init(1 << 30);
+    var p1: [64]u8 = undefined;
+    var p2: [64]u8 = undefined;
+    const a = try testRoot(&tmp, &p1, "d1.wav", &ring, 2);
+    defer a.destroy();
+    const b = try testRoot(&tmp, &p2, "d2.wav", &ring, 2);
+    defer b.destroy();
+    try s.start();
+    s.submit(a, .write);
+    s.waitJob(a); // drains the queue fully: queue_head/queue_tail both go back to null
+    s.submit(b, .write); // fresh submit after the drain
+    // `stop` is bounded even under the bug this pins: the worker still
+    // sees `stop_flag` and exits even if `b` never got linked to
+    // `queue_head` from the (buggy) stale tail.
+    s.stop();
+    try std.testing.expectEqual(Checkout.WriteState.written, b.write_state.load(.acquire));
+}
+
+test "stop before start is a safe no-op" {
+    var s = Scratch.init(1 << 30);
+    s.stop();
+    try std.testing.expect(s.thread == null);
 }
