@@ -491,7 +491,7 @@ the spike passes.
 |---|---|
 | Disk full / io error during the scratch write | `write_state = failed`; the checkout stays resident and unevictable; manifest `state` unchanged; status bar "Scratch write failed: <name>"; the clip works as today (RAM only). No automatic retry. |
 | Ring lapped during `createFromRing` | `overwritten` → the same `RuntimeError` the UI reports today. Nothing enqueued. |
-| Scratch dir not writable at launch | `fb_scratch_start` still runs; every create fails its write as above; the Preferences row shows the error. |
+| Scratch dir not writable at launch | AppState falls back to `config.default_scratch_dir()` and shows the failure in the status bar (F1); `fb_scratch_start` still runs against the fallback dir. |
 | Corrupt manifest / missing file at adoption | Skipped, logged, left on disk. |
 | `.part` with a header longer than the file | Adopted with the clamped frame count, `partial = true`. |
 | Cache miss during play with the file gone | `fb_playback_bind_checkout` → `io_error`; UI reports; the checkout is not destroyed. |

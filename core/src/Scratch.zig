@@ -837,8 +837,8 @@ const Pair = struct {
         var in: [10]f32 = undefined;
         for (&in, 0..) |*s, i| s.* = @floatFromInt(i);
         self.ring.write(&in);
-        self.a = try Checkout.createFromRing(std.testing.allocator, &self.ring, 0, 4, tmpPath(&self.pa, &self.tmp, "a.wav"));
-        self.b = try Checkout.createFromRing(std.testing.allocator, &self.ring, 4, 10, tmpPath(&self.pb, &self.tmp, "b.wav"));
+        self.a = try Checkout.createFromRing(std.testing.allocator, &self.ring, 0, 4, test_util.tmpPath(&self.pa, &self.tmp, "a.wav"));
+        self.b = try Checkout.createFromRing(std.testing.allocator, &self.ring, 4, 10, test_util.tmpPath(&self.pb, &self.tmp, "b.wav"));
     }
     fn writeBoth(self: *Pair, s: *Scratch) !void {
         try s.start();
@@ -853,7 +853,6 @@ const Pair = struct {
         self.tmp.cleanup();
     }
 };
-const tmpPath = test_util.tmpPath;
 
 test "budget 0 drops every written root after its write; bytes read 0" {
     var p: Pair = undefined;
@@ -1048,7 +1047,7 @@ test "the writer thread and a control-thread wav.writeFile serialise through wav
     var s = Scratch.init(1 << 30);
     var pa: [64]u8 = undefined;
     var pb: [64]u8 = undefined;
-    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, n, tmpPath(&pa, &tmp, "w.wav"));
+    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, n, test_util.tmpPath(&pa, &tmp, "w.wav"));
     defer co.destroy();
     try s.start();
     // `defer s.stop()` right after `start`, not a trailing explicit call:
@@ -1059,7 +1058,7 @@ test "the writer thread and a control-thread wav.writeFile serialise through wav
     // threading safety. `stop` is safe to call more than once, so this
     // costs nothing on the normal path either.
     defer s.stop();
-    const other = tmpPath(&pb, &tmp, "c.wav");
+    const other = test_util.tmpPath(&pb, &tmp, "c.wav");
     // Force the interleaving deterministically, not by scheduling luck:
     // take `write_mutex` BEFORE submitting the worker's job, so the
     // worker's `defaultWrite` (its `write_fn`) is guaranteed to block
@@ -1083,7 +1082,7 @@ test "the writer thread and a control-thread wav.writeFile serialise through wav
     try std.testing.expectEqual(Checkout.WriteState.written, co.write_state.load(.acquire));
     inline for (.{ "w.wav", "c.wav" }) |name| {
         var pp: [64]u8 = undefined;
-        var o = try wav.open(tmpPath(&pp, &tmp, name));
+        var o = try wav.open(test_util.tmpPath(&pp, &tmp, name));
         defer o.file.close(wav.io);
         try std.testing.expectEqual(@as(u64, n), o.info.frames);
         var tail: [4]f32 = undefined;

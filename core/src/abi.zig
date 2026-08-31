@@ -659,7 +659,8 @@ export fn fb_playback_create(device_id: [*:0]const u8, rate: u32, channels: u16)
 
 export fn fb_playback_bind(pb: *Playback, frames: [*]const f32, n_frames: usize, rate: u32, channels: u16) FbStatus {
     if (channels == 0) return .invalid_arg;
-    pb.bind(.{ .frames = frames[0 .. n_frames * channels] }, rate, channels) catch |e| return switch (e) {
+    const len = std.math.mul(usize, n_frames, channels) catch return .invalid_arg;
+    pb.bind(.{ .frames = frames[0..len] }, rate, channels) catch |e| return switch (e) {
         error.InvalidArgument => .invalid_arg,
         error.OutOfMemory => .out_of_memory,
         else => .io_error,
@@ -1215,6 +1216,13 @@ test "fb_mixer stats/last_error on a never-started mixer are zero/empty (Windows
 test "fb_playback_create rejects rate 0 and channels 3" {
     try std.testing.expectEqual(@as(?*Playback, null), fb_playback_create("", 0, 2));
     try std.testing.expectEqual(@as(?*Playback, null), fb_playback_create("", 48_000, 3));
+}
+
+test "fb_playback_bind rejects an n_frames * channels product that overflows usize" {
+    const pb = fb_playback_create("", 48_000, 2) orelse return error.CreateFailed;
+    defer fb_playback_destroy(pb);
+    const frames = [_]f32{0.0};
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_playback_bind(pb, &frames, std.math.maxInt(usize), 48_000, 2));
 }
 
 test "fb_playback bind/state/last_error on a never-played handle (Windows only)" {

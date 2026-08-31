@@ -58,7 +58,6 @@ class Checkout:
     id: str
     handle: int
     path: Path
-    created_at: float  # monotonic
     sample_rate: int
     channels: int
     n_frames: int
@@ -85,6 +84,26 @@ class Checkout:
         start = max(0, min(self.trim_in_samples, n))
         end = n if self.trim_out_samples <= 0 else max(start, min(self.trim_out_samples, n))
         return start, end - start
+
+
+def _destroy_quietly(scratch: NativeScratch, handle: Optional[int], path: Optional[Path] = None) -> None:
+    """Best-effort cleanup after a failed checkout create/adopt. Swallows
+    every error -- cleanup must not mask the original failure the caller
+    is about to raise. `path` is passed only by a caller that minted the
+    file itself (create_from_abs_range's freshly uuid4'd .wav); adopt_root
+    / adopt_slice pass None because the file is a pre-existing one they
+    do not own -- only the handle is theirs to release."""
+    if handle is not None:
+        try:
+            scratch.checkout_destroy(handle)
+        except Exception:
+            pass
+    if path is not None:
+        try:
+            path.unlink(missing_ok=True)
+            Path(f"{path}.part").unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 class CheckoutManager:
@@ -193,7 +212,7 @@ class CheckoutManager:
                 # further in h10.
                 handle = self._scratch.checkout_create(buf, int(abs_start), int(abs_end), path)
                 co = Checkout(
-                    id=cid, handle=handle, path=path, created_at=time.monotonic(),
+                    id=cid, handle=handle, path=path,
                     sample_rate=buf.sample_rate, channels=buf.channels,
                     n_frames=int(abs_end - abs_start), start_frame=0,
                     abs_sample_start=int(abs_start), abs_sample_end=int(abs_end),
@@ -209,15 +228,7 @@ class CheckoutManager:
                 # bins/manifest failure leaves a manifest-less .wav on
                 # disk forever -- adoption only scans *.json, so it would
                 # never be found or cleaned up.
-                if handle is not None:
-                    try:
-                        self._scratch.checkout_destroy(handle)
-                    except Exception:
-                        pass  # cleanup must not mask the original error
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass  # cleanup must not mask the original error
+                _destroy_quietly(self._scratch, handle, path)
                 raise RuntimeError(f"could not create checkout; {e}") from e
         return co
 
@@ -254,7 +265,7 @@ class CheckoutManager:
             handle = self._scratch.checkout_open(audio, 0, max(1, int(m.n_frames)))
             info = self._scratch.checkout_info(handle)
             co = Checkout(
-                id=m.id, handle=handle, path=Path(audio), created_at=time.monotonic(),
+                id=m.id, handle=handle, path=Path(audio),
                 sample_rate=int(info.rate), channels=int(info.channels),
                 n_frames=int(info.n_frames), start_frame=0,
                 abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
@@ -271,11 +282,7 @@ class CheckoutManager:
             # R-h8k/R-h8m: unlike create_from_abs_range, `audio` is a
             # PRE-EXISTING file this manager did not create -- only the
             # handle is ours to release on failure, never the file.
-            if handle is not None:
-                try:
-                    self._scratch.checkout_destroy(handle)
-                except Exception:
-                    pass  # cleanup must not mask the original error
+            _destroy_quietly(self._scratch, handle)
             raise RuntimeError(f"could not adopt root {audio}; {e}") from e
         return co
 
@@ -285,7 +292,7 @@ class CheckoutManager:
         try:
             handle = self._scratch.checkout_slice(parent.handle, int(m.start_frame), int(m.n_frames))
             co = Checkout(
-                id=m.id, handle=handle, path=parent.path, created_at=time.monotonic(),
+                id=m.id, handle=handle, path=parent.path,
                 sample_rate=parent.sample_rate, channels=parent.channels,
                 n_frames=int(m.n_frames), start_frame=int(m.start_frame),
                 abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
@@ -301,11 +308,7 @@ class CheckoutManager:
             # Same rule as adopt_root: `parent.path` is shared, owned by
             # the parent checkout's own refcount -- only this slice's
             # handle is ours to release.
-            if handle is not None:
-                try:
-                    self._scratch.checkout_destroy(handle)
-                except Exception:
-                    pass  # cleanup must not mask the original error
+            _destroy_quietly(self._scratch, handle)
             raise RuntimeError(f"could not adopt slice {m.id}; {e}") from e
         return co
 
