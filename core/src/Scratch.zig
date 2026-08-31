@@ -990,3 +990,80 @@ test "forget on an unstarted scratch dequeues the FIFO entry instead of hanging 
     try std.testing.expectEqual(@as(u64, 0), s.residentBytes());
     try std.testing.expectEqual(@as(?*Checkout, null), s.lru_head);
 }
+
+// ---- Task h5: the concurrency proof ----
+
+test "the writer thread and a control-thread wav.writeFile serialise through wav.write_mutex" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    // R-h5a: the brief's n = 40_000 makes `in` a 320 KiB stack object;
+    // 8_000 stereo frames (64 KiB) keeps the same intent (a real clip
+    // streamed through more than a trivial single write) at a safe
+    // stack size.
+    const n: usize = 8_000;
+    var in: [n * 2]f32 = undefined;
+    for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i % 1000)) / 1000.0;
+    ring.write(&in);
+    var s = Scratch.init(1 << 30);
+    var pa: [64]u8 = undefined;
+    var pb: [64]u8 = undefined;
+    const co = try Checkout.createFromRing(std.testing.allocator, &ring, 0, n, tmpPath(&pa, &tmp, "w.wav"));
+    defer co.destroy();
+    try s.start();
+    s.submit(co, .write);
+    // Race a second writer from this thread through the same mutex: the
+    // spec's "Risks" item about global_single_threaded from a second
+    // thread — this must serialise, not deadlock or corrupt either file.
+    const other = tmpPath(&pb, &tmp, "c.wav");
+    {
+        wav.write_mutex.lockUncancelable(wav.io);
+        defer wav.write_mutex.unlock(wav.io);
+        try wav.writeFile(other, in[0 .. n * 2], 48_000, 2, .float32);
+    }
+    s.waitJob(co);
+    s.stop();
+    try std.testing.expectEqual(Checkout.WriteState.written, co.write_state.load(.acquire));
+    inline for (.{ "w.wav", "c.wav" }) |name| {
+        var pp: [64]u8 = undefined;
+        var o = try wav.open(tmpPath(&pp, &tmp, name));
+        defer o.file.close(wav.io);
+        try std.testing.expectEqual(@as(u64, n), o.info.frames);
+        var tail: [4]f32 = undefined;
+        try wav.readFrames(o.file, o.info, n - 2, &tail);
+        try std.testing.expectEqualSlices(f32, in[n * 2 - 4 ..], &tail);
+    }
+}
+
+// R-h5a's companion pin: the eviction guard's `co.job != .none` clause
+// (evictOverBudgetLocked) is the ONLY thing protecting a checkout in one
+// real window — a re-submitted `.write` on a still-resident, already-
+// `.written` checkout, between `run` popping the job (co.job stays
+// `.write`, unchanged from submit) and `doWrite`'s first store of
+// `.writing`. That window is a handful of instructions in real
+// execution; it can't be hit by scheduling luck in a portable test. But
+// its state is fully reproducible by hand: finish a real write (worker
+// started, then stopped), then submit a second `.write` with NO worker
+// running to ever pick it up. `co.job` becomes `.write` and
+// `write_state` stays `.written` — exactly the window's shape — and
+// stays that way indefinitely, long enough to probe the guard directly.
+test "R-h5b: a re-submitted write on a still-written, resident checkout is not evicted (job != .none is the only guard in that window)" {
+    var p: Pair = undefined;
+    try p.init();
+    defer p.deinit();
+    var s = Scratch.init(1 << 30);
+    try p.writeBoth(&s); // both written, resident, linked; worker stopped after
+    try std.testing.expectEqual(Checkout.WriteState.written, p.a.write_state.load(.acquire));
+    try std.testing.expectEqual(Checkout.Job.none, p.a.job);
+
+    s.submit(p.a, .write); // no worker running: job becomes .write and stays there
+    try std.testing.expectEqual(Checkout.Job.write, p.a.job);
+    try std.testing.expectEqual(Checkout.WriteState.written, p.a.write_state.load(.acquire)); // ws did NOT move to .writing
+
+    s.setBudget(0); // over budget: only `co.job != .none` protects p.a here (write_state == .written passes the ws check too)
+    try std.testing.expect(p.a.frames != null); // must survive: a write is still (re-)pending on it
+
+    s.forget(p.a); // stranded job on an unstarted scratch: dequeue by hand before destroy
+    s.forget(p.b); // p.b was already evicted by setBudget(0); a harmless no-op
+}
