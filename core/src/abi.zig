@@ -31,35 +31,7 @@ pub const FbStatus = enum(c_int) {
     out_of_memory = 5,
 };
 
-// Serializes fb_wav_write. writeFile uses
-// std.Io.Threaded.global_single_threaded, which std documents
-// (std/Io/Threaded.zig) as not supporting concurrency, but that doc
-// comment is written against Io.async/Io.concurrent/task groups that
-// writeFile never uses — it has NOT been exhaustively traced against
-// every syscall wrapper writeFile calls (createFile,
-// writeStreamingAll, close) for other shared mutable state in the
-// singleton. Rather than leave "is concurrent writeFile safe?" as an
-// open question on a published C interface, this mutex makes the
-// question moot: fb_wav_write is an offline file-write path (never the
-// RT audio thread), so a lock held for the call's duration costs
-// nothing that matters. Ring.write's RT-safety (no locks, no
-// allocation, no error path) is completely untouched by this — the
-// mutex only ever guards wav.writeFile.
-//
-// Zig 0.16 moved blocking primitives (Mutex included) under std.Io —
-// there is no bare std.Thread.Mutex anymore. std.Io.Mutex needs an `Io`
-// implementation to block/wake on, so it reuses the SAME
-// global_single_threaded singleton wav.writeFile itself already reaches
-// for (see wav.zig's doc comment on writeFile for why that singleton is
-// the right "hardcode a synchronous Io" choice here). Despite the name,
-// its futex wait/wake underneath is a real OS primitive (WaitOnAddress
-// / futex), so this is genuine cross-OS-thread mutual exclusion, not a
-// same-thread-only stub. `lockUncancelable`/`unlock` (as opposed to the
-// cancelable `lock`) are used because this Io singleton has no
-// cancelation source to ever trigger — there is no error path to plumb
-// through an `export fn`.
-const wav_write_io = std.Io.Threaded.global_single_threaded.io();
-var wav_write_mutex: std.Io.Mutex = .init;
+// fb_wav_write serialises through wav.write_mutex — see wav.zig.
 
 test "abi round-trip: create, write, read, destroy" {
     const ring = fb_ring_create(48_000, 2, 1.0, null) orelse return error.CreateFailed;
@@ -330,11 +302,11 @@ export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usiz
     // [*:0] is a SENTINEL pointer: length is found by scanning for the
     // 0 terminator — exactly C's char*. std.mem.span turns it into a slice.
     //
-    // Locked for the call's duration — see the doc comment on
-    // wav_write_mutex above for why. This is the ONLY lock anywhere in
-    // this file; Ring.write and the rest of the ring path stay lock-free.
-    wav_write_mutex.lockUncancelable(wav_write_io);
-    defer wav_write_mutex.unlock(wav_write_io);
+    // Locked for the call's duration — see wav.write_mutex in wav.zig.
+    // This is the ONLY lock anywhere in this file; Ring.write and the
+    // rest of the ring path stay lock-free.
+    wav.write_mutex.lockUncancelable(wav.io);
+    defer wav.write_mutex.unlock(wav.io);
     wav.writeFile(std.mem.span(path), frames[0 .. n_frames * channels], rate, channels, st) catch |e| return switch (e) {
         error.TooLong => .invalid_arg,
         else => .io_error,

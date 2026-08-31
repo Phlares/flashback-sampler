@@ -67,6 +67,16 @@ pub const header_len = 44;
 /// under `abi.zig`'s `wav_write_mutex` (moving into this file in PR h).
 pub const io = std.Io.Threaded.global_single_threaded.io();
 
+/// Serialises every writer in this file (`writeFile`, `copyRange`).
+/// `global_single_threaded` is documented as not supporting concurrency
+/// (see `writeFile`'s doc comment); rather than trace every syscall
+/// wrapper for shared state, one lock makes the question moot. Callers
+/// lock it: `wav.write_mutex.lockUncancelable(wav.io)` /
+/// `defer wav.write_mutex.unlock(wav.io)`. Never taken on an audio
+/// thread. Lives here (not in abi.zig) because Scratch.zig must lock
+/// it too and Scratch must not import abi.
+pub var write_mutex: std.Io.Mutex = .init;
+
 /// What a reader needs to pull samples: format, count, and where the
 /// payload starts. `frames` is clamped to what the FILE holds, not what
 /// the `data` size claims — a `.part` left by a crash reads its true
