@@ -9,8 +9,10 @@ touching the audio core or the UI. This is the porting checklist.
 | Capability | Windows | macOS | Linux |
 |---|:---:|:---:|:---:|
 | System-audio **loopback** capture | ✅ WASAPI (Zig core) | ⬜ not yet | ⬜ not yet |
-| Per-process loopback | ✅ WASAPI (ctypes) | ⬜ | ⬜ |
+| Per-process loopback | ✅ WASAPI (Zig core) | ⬜ | ⬜ |
 | Mic / line-in capture | ✅ WASAPI (Zig core) | ⬜ not yet | ⬜ not yet |
+| Multi-source mixing | ✅ Zig core (`Mixer.zig`) | ⬜ | ⬜ |
+| Preview playback | ✅ WASAPI render (Zig core) | ⬜ not yet | ⬜ not yet |
 | System **tray** | ✅ | ✅¹ | ✅¹ |
 | Config / data paths | ✅ `%APPDATA%` | ✅ `~/Library` | ✅ `~/.config` |
 | Audio ring buffer + WAV encode | ✅ Zig core | ✅ Zig core | ✅ Zig core |
@@ -25,11 +27,16 @@ touching the audio core or the UI. This is the porting checklist.
 (`flashback_sampler/core/native.py`). Unlike loopback capture or global
 hotkeys, this code needs no per-OS backend: `zig build -Doptimize=ReleaseSafe`
 cross-compiles the same source to all three targets (see `.github/workflows/
-test.yml`'s cross-compile health check). `flashback_sampler/core/buffer.py`'s
-`make_ring_buffer()` picks the native implementation when the library for
-the current OS is present and falls back to a pure-Python implementation
-otherwise, so the app runs (with a slower buffer) even on a machine without
-a prebuilt native library.
+test.yml`'s cross-compile health check). The app requires the native
+library; there is no Python fallback (phase 2 PR f deleted it). Without
+it `NativeAudioCircularBuffer` raises `RuntimeError` at construction and
+the test session exits with the build instruction (`tests/conftest.py`).
+Capture, mixing, and playback need a `Backend` implementation
+(`core/src/Backend.zig`); `WasapiBackend.zig` is the only one, so those
+three are Windows-only today even though the library builds everywhere.
+Arming a slot reserves its whole ring up front (`seconds × rate ×
+channels × 4` bytes, committed at `fb_ring_create`), so a RAM shortfall
+surfaces at arm time, not mid-take.
 
 ## The seams (where platform code lives)
 
@@ -39,7 +46,7 @@ Everything OS-dependent is reachable from these files — see
 | Seam | File(s) | What a new platform must add |
 |---|---|---|
 | **Source listening** | `app/audio_devices.py` (`list_capture_devices`, `build_capture_source`) | enumerate the platform's loopback devices; map a new `CaptureDevice.kind` to a backend |
-| **Loopback backends** | `core/native_capture.py` + `core/WasapiBackend.zig` (system loopback, mic/line-in, and per-process loopback) | a `CaptureSource` impl (macOS: CoreAudio aggregate / ScreenCaptureKit; Linux: PulseAudio/PipeWire monitor) |
+| **Loopback backends** | `core/native_capture.py` + `core/WasapiBackend.zig`, `core/Mixer.zig`, `core/Playback.zig` (system loopback, mic/line-in, per-process loopback, mixing, and preview playback) | a `CaptureSource` impl (macOS: CoreAudio aggregate / ScreenCaptureKit; Linux: PulseAudio/PipeWire monitor) |
 | **System tray** | `platform/tray.py` | usually none — `QSystemTrayIcon` is cross-platform; tune behaviour only if needed |
 | **Global hotkeys** | `input/sources/global_hotkey.py` (`_win_register`), gated by `capabilities.global_hotkeys_supported()` | a register/unregister backend (macOS Carbon `RegisterEventHotKey`; Linux/X11 `XGrabKey` — Wayland needs a portal) |
 | **Config / data paths** | `app/config.py` (`config_dir`) | already `%APPDATA%` / `XDG` aware |
@@ -47,8 +54,8 @@ Everything OS-dependent is reachable from these files — see
 
 ## Adding a platform — checklist
 
-1. Add a loopback `CaptureSource` backend under `core/` (or a new `io/`
-   submodule) implementing `start/stop/is_running/xrun_count/last_error`.
+1. Add a `Backend` implementation in `core/src/` (`enumerate`, `open`,
+   `openRender` — the vtable in `Backend.zig`); Python needs no new code.
 2. Enumerate its devices in `audio_devices.list_capture_devices` and wire the
    backend in `build_capture_source`.
 3. Flip `capabilities.loopback_supported()` to include the OS.

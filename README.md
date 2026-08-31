@@ -5,7 +5,7 @@
 
 A standalone desktop applet that continuously captures the past several minutes of system audio into a circular ring buffer. Pull a slice of it out as a "checkout" — like lifting a record off a turntable while another keeps spinning — preview it, trim it, and decide whether to save it as a 32-bit-float WAV or discard it.
 
-The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt imports) so it can later be embedded in a DAW (VST) or OBS dock; the UI is PySide6 native rather than a webview for the same reason.
+The audio engine is a zero-dependency Zig library (`core/`): capture, mixing, playback, the ring, peaks, and WAV encoding run there. Python is a Qt shell that creates handles, starts and stops them, and reads numbers — so the engine can later sit inside a DAW plugin or an OBS dock unchanged.
 
 ## Install
 
@@ -26,6 +26,10 @@ CLI flags:
 - `--buffer-minutes N` — ring buffer length (default 5). Use `0.5` to force a rollover quickly when testing.
 - `--sample-rate N` — capture sample rate (default 48000). The **Add Source** dialog offers rates up to 192 kHz; when a device can't honestly deliver a requested rate (e.g. loopback is capped at the Windows output mix format), Flashback notifies you and captures at the device's true rate instead.
 - `--channels N` — 1 mono or 2 stereo (default 2).
+
+## Memory
+
+Arming a slot reserves its whole ring up front: `seconds × rate × channels × 4` bytes (the FULL preset — 900 s, 48 kHz, stereo — is 345.6 MB, the number the #17 soak recorded). The project RAM budget (Preferences; default 4096 MB, `DEFAULT_PROJECT_RAM_BUDGET_MB` in `state.py`) refuses a slot that would exceed it (`AppState.add_slot`, checked against `total_project_ram_bytes()`); a ring the OS cannot commit fails at `fb_ring_create` with `out_of_memory` (PR d, #41), which the UI reports as a MemoryError until #16 gives it a home.
 
 ## Using it
 
@@ -48,9 +52,8 @@ Checkouts survive after you stop capture — you can pull a clip from buffered a
 ```
 flashback_sampler/
   core/                  # ctypes shell over the Zig core — no Qt
-    buffer.py            # AudioCircularBuffer — seqlock non-blocking reads
     checkout.py          # Checkout + CheckoutManager (+ WAV save through `fb_wav_write`)
-    scrub_player.py      # ScrubPlayer — callback-driven preview engine
+    scrub_player.py      # NativeScrubPlayer — handle on the Zig Playback render thread
     native.py            # ctypes bindings for the Zig core
     native_capture.py    # NativeCaptureSource (Zig/WASAPI — loopback + mic / line-in) + NativeMixedSource (Zig mixer handle)
     capture_slot.py      # one buffer + its source(s) + checkout manager
@@ -61,6 +64,7 @@ flashback_sampler/
     turntable_window.py  # the main window
     theme.py             # Erebus palette + base QSS, Monaspace fonts
     widgets/             # custom-painted instruments (turntable, waveform, …)
+core/ (repo root)        # Zig engine: Ring, Summary, Capture, Mixer, Playback, WasapiBackend, wav
 tests/
   unit/                  # TDD suite — no real audio hardware
   fixtures/              # deterministic sine / ramp generators
