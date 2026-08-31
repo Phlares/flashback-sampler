@@ -352,18 +352,6 @@ class NativeAudioCircularBuffer:
         self.buffer.nbytes, which includes the guard band."""
         return self.buffer_size * self.channels * 4
 
-    def status(self) -> dict:
-        return {
-            "buffered_seconds": round(self.buffered_seconds, 1),
-            "buffer_capacity_seconds": self.duration,
-            "fill_percent": round(100 * self.buffered_seconds / self.duration, 1),
-            "write_pos": self.write_pos,
-            "total_written_samples": self.total_written,
-            "sample_rate": self.sample_rate,
-            "channels": self.channels,
-            "memory_mb": round(self.capacity_bytes / 1_048_576, 1),
-        }
-
     def write(self, frames: np.ndarray) -> None:
         frames = _frames2d(frames)
         # fb_ring_write trusts len(frames) and reads n_frames * self.channels
@@ -487,10 +475,12 @@ class NativeAudioCircularBuffer:
         """(n_bins, channels) RMS amplitude values from the pre-decimated
         summary ring. n_bins > 4096 raises ValueError (Summary.rmsBins's
         max_bins stack-scratch bound) -- unreachable today since the UI
-        never requests more than 360 bins."""
+        never requests more than 360 bins. Zeros for a closed handle."""
         if n_bins <= 0:
             raise ValueError("n_bins must be positive")
         out = np.zeros((n_bins, self.channels), dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
         n_samples = 0 if seconds is None else int(seconds * self.sample_rate)
         # fb_ring_summary_bins/Summary.rmsBins overload n_samples=0 as ITS
         # OWN sentinel for "all available" (mirroring get_summary_bins's

@@ -84,6 +84,8 @@ SELECTION_COLOR_CLIP = "#FF9500"     # orange
 def _peak_bins_from_audio(audio: np.ndarray, n_bins: int) -> np.ndarray:
     """Same shape as NativeAudioCircularBuffer.get_peak_bins but operating on
     a static (N, channels) array — used to render a checkout's fixed audio."""
+    # Bin edges must agree with Ring.binEdge (core/src/Ring.zig):
+    # trunc(float(i) * step), last edge = n.
     if audio.ndim == 1:
         audio = audio[:, np.newaxis]
     n = int(audio.shape[0])

@@ -4,10 +4,10 @@ implements.
 
 Lives in `core/` because it's the contract the ring buffer and the
 `CaptureSlot` multi-source refactor in M10.2+ depend on. The concrete
-backend is `core/native_capture.py` (`NativeCaptureSource`, one Zig
-`Capture` per source) and `native_capture` (`NativeMixedSource`, N
-sources into one ring). This module is import-cheap: no Qt, no
-ctypes, so unit tests can instantiate fake sources.
+backend is `core/native_capture.py`: `NativeCaptureSource` (one Zig
+`Capture` per source) and `NativeMixedSource` (N sources into one
+ring). This module is import-cheap: no Qt, no ctypes, so unit tests
+can instantiate fake sources.
 """
 
 from __future__ import annotations

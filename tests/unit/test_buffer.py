@@ -1,7 +1,7 @@
 """The ring buffer's behaviour contract, now served by the Zig core
 alone: NativeAudioCircularBuffer over Ring.zig. The `buffer_cls` fixture
-survives as a name so the 38 contract tests (37 collected; one is
-perf-marked) read unchanged."""
+survives as a name so the 37 contract tests (36 selected under
+-m "not perf"; one is perf-marked) read unchanged."""
 
 from __future__ import annotations
 
@@ -40,22 +40,6 @@ def test_empty_buffer_get_latest_returns_zero_length(buffer_cls):
     buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
     result = buf.get_latest(0.5)
     assert result.shape == (0, 2)
-
-
-def test_status_shape(buffer_cls):
-    buf = buffer_cls(duration_seconds=1.0, sample_rate=1000, channels=2)
-    s = buf.status()
-    for key in (
-        "buffered_seconds",
-        "buffer_capacity_seconds",
-        "fill_percent",
-        "write_pos",
-        "total_written_samples",
-        "sample_rate",
-        "channels",
-        "memory_mb",
-    ):
-        assert key in s
 
 
 def test_capacity_bytes_is_readable_capacity_not_physical_storage(buffer_cls):

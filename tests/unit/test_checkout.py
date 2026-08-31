@@ -478,9 +478,6 @@ def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     `fb_wav_write` and nothing else."""
     from flashback_sampler.core import native
 
-    if native.load() is None:
-        pytest.skip("flashback_core library not built")
-
     calls = []
     real = native.wav_write
     monkeypatch.setattr(

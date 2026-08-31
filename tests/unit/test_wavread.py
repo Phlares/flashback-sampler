@@ -6,12 +6,9 @@ from __future__ import annotations
 import struct
 
 import numpy as np
-import pytest
 
 from flashback_sampler.core import native
 from tests.fixtures.wavread import read_wav
-
-pytestmark = pytest.mark.skipif(native.load() is None, reason="flashback_core not built")
 
 
 def test_float32_round_trips_bit_exact(tmp_path):
