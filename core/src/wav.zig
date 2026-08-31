@@ -1,6 +1,6 @@
-//! Minimal RIFF/WAVE writer. FLOAT32 payload is the ring's bytes
-//! verbatim — a bit-perfect pull. 44-byte canonical header; libsndfile
-//! and every DAW read it. Parity is checked by
+//! Minimal RIFF/WAVE writer and reader. FLOAT32 payload is the ring's
+//! bytes verbatim — a bit-perfect pull. 44-byte canonical header;
+//! libsndfile and every DAW read it. Parity is checked by
 //! `tests/fixtures/wavread.py`, an independent stdlib reader:
 //! DECODE-equality (samples + format), not byte-equality (libsndfile
 //! adds PEAK/fact chunks we deliberately don't).
@@ -31,8 +31,9 @@ test "golden 44-byte header: 48k stereo float32, 4 frames" {
     try std.testing.expectEqual(@as(u32, 32), std.mem.readInt(u32, h[40..44], .little));
 }
 
-/// The sample formats this writer supports. Backed by `u8` so the wire
-/// value (used by Task 6's C ABI: 0/1/2) is stable across Zig versions.
+/// The sample formats this module supports (writer and reader). Backed
+/// by `u8` so the wire value (used by Task 6's C ABI: 0/1/2) is stable
+/// across Zig versions.
 pub const Subtype = enum(u8) {
     float32 = 0,
     pcm_24 = 1,
@@ -60,6 +61,10 @@ pub const header_len = 44;
 /// The one `std.Io` every wav call uses — the synchronous singleton
 /// `writeFile` also reaches for (see its doc comment for why). Public so
 /// callers that hold a `File` from `open` can close it with the same Io.
+/// `open`/`readPositionalAll` use no state of the `Threaded` singleton —
+/// the pinned std's `dirOpenFileWindows` and `fileReadPositional`
+/// discard it (`_ = t;`) — so readers take no lock; writers serialise
+/// under `abi.zig`'s `wav_write_mutex` (moving into this file in PR h).
 pub const io = std.Io.Threaded.global_single_threaded.io();
 
 /// What a reader needs to pull samples: format, count, and where the
