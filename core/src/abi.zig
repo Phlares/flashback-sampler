@@ -161,6 +161,19 @@ test "fb_ring_create rejects +Infinity seconds (does not satisfy seconds <= 0)" 
     try std.testing.expectEqual(@as(?*Ring, null), fb_ring_create(48_000, 2, std.math.inf(f64), null));
 }
 
+test "fb_wav_write rejects a channel count above max_channels instead of trapping in writeHeader" {
+    // subtype 0 (float32, 4 bytes/sample): writeHeader's block_align =
+    // @intCast(bps * channels) = 4 * 20000 = 80000, which overflows a
+    // u16 (max 65535) and panics before this guard exists — see the
+    // report for the captured panic line.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/never2.wav", .{tmp.sub_path}) catch unreachable;
+    const in = [_]f32{0.1};
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_write(path, &in, 1, 48_000, 20000, 0));
+}
+
 test "fb_wav_write round-trips a real file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -300,6 +313,10 @@ export fn fb_ring_rms(ring: *Ring, n_frames: u64, out: [*]f32) FbStatus {
 
 export fn fb_wav_write(path: [*:0]const u8, frames: [*]const f32, n_frames: usize, rate: u32, channels: u16, subtype: c_int) FbStatus {
     if (rate == 0 or channels == 0) return .invalid_arg;
+    // Also closes writeHeader's `@intCast(bps * channels)` u16 trap: a
+    // hostile channel count can overflow that cast before this guard
+    // existed (see the report's captured panic).
+    if (channels > wav.max_channels) return .invalid_arg;
     if (subtype < 0 or subtype > 2) return .invalid_arg;
     const st: wav.Subtype = @enumFromInt(@as(u8, @intCast(subtype)));
     // [*:0] is a SENTINEL pointer: length is found by scanning for the
@@ -375,6 +392,56 @@ test "fb_wav_info / fb_wav_read round-trip through the exports" {
     try std.testing.expectEqual(FbStatus.ok, fb_wav_read(path, 0, 2, &out));
     try std.testing.expectEqualSlices(f32, &in, &out);
     try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, 1, 2, &out));
+    // Subtraction-form guards (readFrames, peakBinsFile): `start_frame >
+    // info.frames` must short-circuit before `n_frames > info.frames -
+    // start_frame` ever subtracts — maxInt(u64) - frames does not trap
+    // here only because the `or` never evaluates the right side.
+    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_read(path, std.math.maxInt(u64), 1, &out));
+    var bins: [2]peaks.PeakBin = undefined; // stereo file: n_bins(1) * channels(2)
+    try std.testing.expectEqual(FbStatus.out_of_range, fb_wav_peak_bins(path, std.math.maxInt(u64), 1, 1, &bins));
+}
+
+test "fb_wav_peak_bins rejects a channel count above max_channels instead of hanging its chunk loop" {
+    // Same 20000-channel pcm16 image as wav.zig's max_channels test.
+    // Before wav.max_channels existed, parseFmt accepted this header
+    // (frames == 0, so open succeeded) and peaks.peakBinsFile's
+    // frames_per_chunk = read_chunk_bytes / (4 * channels) truncated to
+    // 0, hanging the chunk loop forever — so this test must only ever
+    // run with the parseFmt fix in place; see wav.zig's sibling test for
+    // the red evidence (open succeeding) this closes.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const fmt_body = [_]u8{
+        1, 0, // tag: PCM
+        32, 78, // channels: 20000
+        64, 31, 0, 0, // rate: 8000
+        0, 0, 0, 0, // byte rate, unchecked
+        64, 156, // block_align: 40000
+        16, 0, // bits: 16
+    };
+    var img: [64]u8 = undefined;
+    var w: usize = 0;
+    @memcpy(img[w .. w + 4], "RIFF");
+    w += 4;
+    std.mem.writeInt(u32, img[w..][0..4], @intCast(4 + 8 + fmt_body.len + 8), .little);
+    w += 4;
+    @memcpy(img[w .. w + 4], "WAVE");
+    w += 4;
+    @memcpy(img[w .. w + 4], "fmt ");
+    w += 4;
+    std.mem.writeInt(u32, img[w..][0..4], @intCast(fmt_body.len), .little);
+    w += 4;
+    @memcpy(img[w .. w + fmt_body.len], &fmt_body);
+    w += fmt_body.len;
+    @memcpy(img[w .. w + 4], "data");
+    w += 4;
+    std.mem.writeInt(u32, img[w..][0..4], 0, .little);
+    w += 4;
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/widechan.wav", .{tmp.sub_path}) catch unreachable;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "widechan.wav", .data = img[0..w] });
+    var out: [1]peaks.PeakBin = undefined;
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_wav_peak_bins(path, 0, 0, 1, &out));
 }
 
 test "fb_wav_info maps a missing file to io_error and junk to invalid_arg" {
@@ -710,6 +777,11 @@ test "fb_ring_peak_bins rejects n_bins == 0 and reduces a ramp" {
 test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(Ring.PeakBin));
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(Ring.PeakBin, "max"));
+}
+
+test "FbWavInfo layout matches native.py's FbWavInfo ctypes struct" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(FbWavInfo));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbWavInfo, "frames"));
 }
 
 test "fb_ring_rms reports per-channel RMS of the newest window" {
