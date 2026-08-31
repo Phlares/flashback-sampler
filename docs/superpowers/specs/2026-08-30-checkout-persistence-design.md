@@ -380,6 +380,17 @@ the smallest value that keeps the last two selected clips of that
 size resident. If from-file bind is within tolerance at
 every size, the default is 0 and RAM holds only in-flight clips.
 
+**Measured 2026-08-31 (owner's box, fast NVMe + DDR4; `tools/measure_reload.py`):**
+192 kHz × 900 s stereo (1,318 MB): copy from ring 453 ms, written after
+1,442 ms, preload 664 ms, bind from file 642 ms. 48 kHz × 180 s stereo
+(66 MB): copy 22 ms, written 67 ms, preload 39 ms, bind from file 31 ms.
+**Decision: `DEFAULT_CHECKOUT_CACHE_MB = 0.0`, tunable in Preferences.**
+The typical clip binds from file in ~31 ms — instant without a cache.
+The pathological clip is not instant either way: bind copies 1.3 GB
+regardless of source (RAM ≈ 453 ms vs file ≈ 642 ms), so the cache
+shaves ~200 ms only where the result still is not instant. Zero idle
+RAM held by checkouts matches the arm-time-RAM-surfacing philosophy.
+
 ### Tests (PR h)
 
 - Zig: `createFromRing` copies the span (ramp) and enqueues; a
@@ -568,5 +579,5 @@ the spike passes.
   rate/channels match no existing slot uses a 60 s ring — an arbitrary
   small default; the slot only holds adopted checkouts, never arms for
   capture.
-- `DEFAULT_CHECKOUT_CACHE_MB` stays `0.0` until the owner's Task h11
+- `DEFAULT_CHECKOUT_CACHE_MB` = `0.0` by decision (owner, 2026-08-31, Task h11
   select→playable measurement (see above) replaces it.
