@@ -925,6 +925,36 @@ def _checkout(state):
     return state.checkout_manager.create(duration_s=0.1)
 
 
+def test_display_clip_reads_write_state_before_pinning(qapp, state, monkeypatch):
+    """F2: pin() queues the checkout's async scratch load; write_state()
+    goes through fb_checkout_info, which calls waitLoad and blocks until
+    that load finishes. Reading write_state before pin() keeps clip
+    selection from freezing the UI thread on the load it just queued."""
+    from flashback_sampler.core.checkout import CheckoutManager
+
+    win = TurntableWindow(state)
+    co = _checkout(state)
+
+    calls: list[str] = []
+    real_pin = CheckoutManager.pin
+    real_write_state = CheckoutManager.write_state
+
+    def spy_pin(self, checkout_id):
+        calls.append("pin")
+        return real_pin(self, checkout_id)
+
+    def spy_write_state(self, checkout_id):
+        calls.append("write_state")
+        return real_write_state(self, checkout_id)
+
+    monkeypatch.setattr(CheckoutManager, "pin", spy_pin)
+    monkeypatch.setattr(CheckoutManager, "write_state", spy_write_state)
+
+    win._display_clip_in_panel(co, 0, 1)
+
+    assert calls == ["write_state", "pin"]
+
+
 def test_play_click_with_no_checkout_does_nothing(qapp, state, monkeypatch):
     fake = _fake_player(monkeypatch, state)
     win = TurntableWindow(state)

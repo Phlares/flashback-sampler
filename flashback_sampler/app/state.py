@@ -60,8 +60,23 @@ class AppState:
         # One per AppState; every slot's CheckoutManager writes through
         # it. Checkouts scratch to <scratch_dir>/<id>.wav on creation
         # (epic #53). Budget in bytes; 0 = only pinned/in-flight stay.
-        self.scratch_dir = Path(scratch_dir) if scratch_dir is not None else app_config.load_scratch_dir()
-        self.scratch_dir.mkdir(parents=True, exist_ok=True)
+        requested_scratch_dir = Path(scratch_dir) if scratch_dir is not None else app_config.load_scratch_dir()
+        # F1: an uncreatable configured scratch dir (bad drive letter, no
+        # permission, a stale removable-media path, ...) must not brick
+        # every launch. Fall back to the app-owned cache dir, which is
+        # always creatable, and record what happened so the window can
+        # tell the user instead of silently redirecting their scratch.
+        self.scratch_dir_error: Optional[str] = None
+        try:
+            requested_scratch_dir.mkdir(parents=True, exist_ok=True)
+            self.scratch_dir = requested_scratch_dir
+        except OSError as e:
+            self.scratch_dir = app_config.default_scratch_dir()
+            self.scratch_dir.mkdir(parents=True, exist_ok=True)
+            self.scratch_dir_error = (
+                f"Could not use scratch folder {requested_scratch_dir}: {e}. "
+                f"Using {self.scratch_dir} instead."
+            )
         cache_mb = app_config.load_checkout_cache_mb() if checkout_cache_mb is None else float(checkout_cache_mb)
         self.scratch = NativeScratch(budget_bytes=int(cache_mb * 1024 * 1024))
         self.scratch.start()
