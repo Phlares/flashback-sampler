@@ -64,7 +64,7 @@ pub const header_len = 44;
 /// `open`/`readPositionalAll` use no state of the `Threaded` singleton —
 /// the pinned std's `dirOpenFileWindows` and `fileReadPositional`
 /// discard it (`_ = t;`) — so readers take no lock; writers serialise
-/// under `abi.zig`'s `wav_write_mutex` (moving into this file in PR h).
+/// under `write_mutex`, defined below.
 pub const io = std.Io.Threaded.global_single_threaded.io();
 
 /// Serialises every writer in this file (`writeFile`, `copyRange`).
