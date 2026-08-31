@@ -135,3 +135,22 @@ def test_export_bit_depth_ignores_garbage_in_file(tmp_path):
     cfg = tmp_path / "config.json"
     save_config({EXPORT_BIT_DEPTH_KEY: "banana"}, cfg)
     assert load_export_bit_depth(cfg) == "FLOAT"
+
+
+def test_scratch_dir_defaults_under_user_cache_and_roundtrips(tmp_path):
+    from flashback_sampler.app import config
+    d = config.default_scratch_dir()
+    assert d.name == "scratch"
+    assert config.load_scratch_dir(tmp_path / "c.json") == d
+    config.save_scratch_dir(tmp_path / "s", tmp_path / "c.json")
+    assert config.load_scratch_dir(tmp_path / "c.json") == tmp_path / "s"
+
+
+def test_checkout_cache_mb_roundtrip_and_floor(tmp_path):
+    from flashback_sampler.app import config
+    p = tmp_path / "c.json"
+    assert config.load_checkout_cache_mb(p) == config.DEFAULT_CHECKOUT_CACHE_MB
+    config.save_checkout_cache_mb(512, p)
+    assert config.load_checkout_cache_mb(p) == 512.0
+    config.save_checkout_cache_mb(-3, p)
+    assert config.load_checkout_cache_mb(p) == 0.0
