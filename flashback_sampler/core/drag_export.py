@@ -57,14 +57,11 @@ def render_drag_file(
     only once the drop target has accepted the file.
     """
     co = manager.get(checkout_id)
-    audio = co.trimmed_audio() if trimmed else co.audio
-    duration_s = audio.shape[0] / co.sample_rate
+    start, n = co.trim_range() if trimmed else (0, co.n_frames)
+    duration_s = n / co.sample_rate
     when = now or datetime.now()
     pool = Path(pool_dir)
     pool.mkdir(parents=True, exist_ok=True)
     target = resolve_collision(pool / drag_filename(source_name, when, duration_s))
-    manager.save(
-        checkout_id, target, fmt="WAV",
-        trimmed=trimmed, subtype=bit_depth, mark_saved=False,
-    )
+    manager.export_range(checkout_id, target, start, n, bit_depth)
     return target
