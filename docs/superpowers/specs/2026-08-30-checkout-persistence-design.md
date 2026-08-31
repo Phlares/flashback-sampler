@@ -524,3 +524,24 @@ the spike passes.
   "source" abstraction for `bind`.
 - i: serialising RIFF sub-chunks, integer span arithmetic with
   clamps that fall out of one formula.
+
+## Deviations recorded by the plan (2026-08-30)
+
+- `wav.copyRange` ships in PR g without a `markers` parameter; PR i adds
+  it (plan P1).
+- The window's `_evict_oldest_saved_checkout` stays for the **count**
+  cap (16 per slot); only its RAM-cap branch dies (plan P5).
+- No `last_use` field: the LRU is an intrusive list with move-to-head
+  (plan P7).
+- Python owns the per-file refcount and every file deletion; Zig never
+  deletes (plan P8).
+- `export_span` is a pure Python function — policy, like `drag_filename`
+  (plan P9).
+- A slice is minted only after its parent's file is on disk
+  (`written`/`adopted`); a `failed` parent cannot be sliced (plan P13).
+- Buffer-deck drag mints a **root** = selection ± handles with the
+  selection as its trim (no slice); the clip-deck trimmed drag mints a
+  slice (plan PR i table).
+- A slot recreated for adopted checkouts gets a 60 s ring.
+- Quit with jobs queued blocks `shutdown` until the drain completes; the
+  ">500 ms" status message is deferred to the PR h hand-off.
