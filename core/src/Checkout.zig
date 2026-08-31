@@ -166,6 +166,16 @@ test "createFromRing reads a span longer than max_write_frames in pieces" {
     try std.testing.expectEqual(@as(f32, @floatFromInt(Ring.max_write_frames)), co.frames.?[@intCast(Ring.max_write_frames)]);
 }
 
+test "createFromRing: a span whose n * chans overflows usize is InvalidArgument, not a trap" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    // abs_end - abs_start = maxInt(u64); stereo (chans = 2) means
+    // n * chans wraps usize long before any read or allocation would
+    // run. std.testing.allocator also fails the test on any leak, so a
+    // pass here doubles as proof no allocation was attempted.
+    try std.testing.expectError(error.InvalidArgument, createFromRing(std.testing.allocator, &ring, 0, std.math.maxInt(u64), "huge.wav"));
+}
+
 test "createFromRing: an unwritten span is OutOfRange and leaks nothing" {
     var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
     defer ring.deinit();
