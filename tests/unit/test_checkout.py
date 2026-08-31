@@ -2,7 +2,7 @@
 Unit tests for the Checkout workflow.
 
 Checkout = pull an immutable snapshot of the live ring buffer, preserve it
-in RAM for scrubbing/preview, and optionally save to WAV or FLAC. The ring
+in RAM for scrubbing/preview, and optionally save to WAV. The ring
 buffer must keep writing throughout.
 """
 
@@ -328,25 +328,6 @@ def test_save_as_wav_writes_correct_samples(tmp_path: Path):
     assert co.state == "saved"
 
 
-def test_save_as_flac_round_trips(tmp_path: Path):
-    buf = AudioCircularBuffer(duration_seconds=0.5, sample_rate=48_000, channels=2)
-    buf.write(sine_block(0, 12000, freq_hz=440.0, sample_rate=48_000, channels=2))
-    mgr = CheckoutManager(buffer=buf)
-    co = mgr.create(duration_s=0.2)  # last 9600 samples
-    assert co.audio.shape == (9600, 2)
-
-    target = tmp_path / "clip.flac"
-    mgr.save(co.id, target, fmt="FLAC")
-    assert target.exists()
-    data, sr = sf.read(str(target), dtype="float32", always_2d=True)
-    assert sr == 48_000
-    assert data.shape == (9600, 2)
-    # FLAC is lossless for 16-bit and higher; float32 → FLAC round-trips
-    # exactly at the sample values we care about here.
-    assert np.allclose(data, co.audio, atol=1e-4)
-    assert co.state == "saved"
-
-
 def test_save_invalid_format_raises(tmp_path: Path):
     buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(ramp_block(0, 500, channels=1))
@@ -440,22 +421,26 @@ def _mgr_with_checkout(tmp_path=None):
     return mgr, co
 
 
+def test_save_rejects_flac(tmp_path):
+    mgr, co = _mgr_with_checkout()
+    with pytest.raises(ValueError):
+        mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
+
+
+def test_save_without_native_library_raises(tmp_path, monkeypatch):
+    """No soundfile fallback remains: a missing engine is an error, not a
+    silent detour through another encoder."""
+    from flashback_sampler.core import native
+    mgr, co = _mgr_with_checkout()
+    monkeypatch.setattr(native, "load", lambda: None)
+    with pytest.raises(RuntimeError):
+        mgr.save(co.id, tmp_path / "clip.wav")
+
+
 def test_save_wav_defaults_to_float32_subtype(tmp_path):
     mgr, co = _mgr_with_checkout()
     target = mgr.save(co.id, tmp_path / "clip.wav")
     assert sf.info(str(target)).subtype == "FLOAT"
-
-
-def test_save_flac_defaults_to_pcm_24(tmp_path):
-    mgr, co = _mgr_with_checkout()
-    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
-    assert sf.info(str(target)).subtype == "PCM_24"
-
-
-def test_save_flac_coerces_float_to_pcm_24(tmp_path):
-    mgr, co = _mgr_with_checkout()
-    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC", subtype="FLOAT")
-    assert sf.info(str(target)).subtype == "PCM_24"
 
 
 def test_save_explicit_pcm_16(tmp_path):
@@ -490,8 +475,7 @@ def test_mark_saved_sets_state():
 def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     """WAV saves must route through the Zig encoder when the native
     library is built (this machine) instead of always calling
-    soundfile.write -- FLAC always keeps its existing soundfile path
-    (native.py has no FLAC encoder)."""
+    soundfile.write."""
     from flashback_sampler.core import native
 
     if native.load() is None:
@@ -514,26 +498,6 @@ def test_wav_save_uses_native_encoder_when_available(tmp_path, monkeypatch):
     data, sr = sf.read(str(target), dtype="float32", always_2d=True)
     assert sr == co.sample_rate
     assert np.allclose(data, co.trimmed_audio(), atol=1e-7)
-
-
-def test_flac_save_does_not_use_native_encoder(tmp_path, monkeypatch):
-    """FLAC has no native encoder (native.SUBTYPE_INTS covers WAV subtypes
-    only) -- FLAC saves must keep going through soundfile regardless of
-    whether the native library is present."""
-    from flashback_sampler.core import native
-
-    calls = []
-    real = native.wav_write
-    monkeypatch.setattr(
-        native, "wav_write",
-        lambda *a, **k: (calls.append(a), real(*a, **k))[1],
-    )
-
-    mgr, co = _mgr_with_checkout()
-    target = mgr.save(co.id, tmp_path / "clip.flac", fmt="FLAC")
-
-    assert not calls, "FLAC save must never call the native WAV encoder"
-    assert target.exists()
 
 
 def test_mark_saved_unknown_id_raises():

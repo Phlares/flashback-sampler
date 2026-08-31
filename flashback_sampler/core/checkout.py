@@ -4,7 +4,7 @@ Checkout workflow — pull immutable snapshots of the live ring buffer.
 Mental model (user-provided): a DJ with one turntable still spinning,
 pulling a record off the rack to audition. The ring buffer keeps writing
 throughout. Each Checkout is a frozen, in-RAM copy of a slice of the ring.
-The user can scrub, trim, preview, then save to WAV/FLAC or discard.
+The user can scrub, trim, preview, then save to WAV or discard.
 """
 
 from __future__ import annotations
@@ -17,19 +17,17 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import numpy as np
-import soundfile as sf
 
 from .buffer import RingDerivedOps
 from flashback_sampler.core import native
 
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
-CheckoutFormat = Literal["WAV", "FLAC"]
+CheckoutFormat = Literal["WAV"]
 CheckoutSubtype = Literal["FLOAT", "PCM_24", "PCM_16"]
 
-# libsndfile's WAV default is PCM_16 — an explicit subtype keeps our
-# float32 buffers bit-perfect on disk. FLAC has no float subtype.
-_DEFAULT_SUBTYPE: dict[str, str] = {"WAV": "FLOAT", "FLAC": "PCM_24"}
+# FLOAT keeps the float32 ring bit-perfect on disk (fb_wav_write memcpy).
+_DEFAULT_SUBTYPE: dict[str, str] = {"WAV": "FLOAT"}
 _VALID_SUBTYPES: tuple[str, ...] = ("FLOAT", "PCM_24", "PCM_16")
 
 
@@ -85,7 +83,7 @@ class CheckoutManager:
     `discard`, `list`) are thread-safe.
     """
 
-    _VALID_FORMATS: tuple[str, ...] = ("WAV", "FLAC")
+    _VALID_FORMATS: tuple[str, ...] = ("WAV",)
 
     def __init__(
         self,
@@ -296,11 +294,10 @@ class CheckoutManager:
         the region between trim_in_samples / trim_out_samples; when False,
         the full untrimmed snapshot is written regardless of trim state.
 
-        `subtype` controls the bit depth: None (default) resolves to FLOAT
-        for WAV and PCM_24 for FLAC. FLAC + FLOAT coerces to PCM_24 (FLAC
-        has no float subtype). `mark_saved` controls whether the checkout
-        state is flipped to 'saved' (default True); when False, the caller
-        can write without affecting checkout state (used by drag-out flow).
+        `subtype` controls the bit depth; None resolves to FLOAT.
+        `mark_saved` controls whether the checkout state is flipped to
+        'saved' (default True); when False, the caller can write without
+        affecting checkout state (used by drag-out flow).
         """
         fmt = fmt.upper()  # type: ignore[assignment]
         if fmt not in self._VALID_FORMATS:
@@ -314,8 +311,6 @@ class CheckoutManager:
             raise ValueError(
                 f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}"
             )
-        if fmt == "FLAC" and subtype == "FLOAT":
-            subtype = "PCM_24"
 
         with self._lock:
             if checkout_id not in self._checkouts:
@@ -326,13 +321,9 @@ class CheckoutManager:
 
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        # WAV goes through the Zig encoder when the native library is
-        # built and the requested subtype is one it supports. FLAC always
-        # keeps the soundfile path -- native.py has no FLAC encoder.
-        if fmt == "WAV" and subtype in native.SUBTYPE_INTS and native.load() is not None:
-            native.wav_write(target, np.ascontiguousarray(audio, dtype=np.float32), sr, subtype)
-        else:
-            sf.write(str(target), audio, sr, format=fmt, subtype=subtype)
+        # The Zig encoder is the only write path; native.wav_write raises
+        # RuntimeError when the library is missing.
+        native.wav_write(target, np.ascontiguousarray(audio, dtype=np.float32), sr, subtype)
 
         if mark_saved:
             with self._lock:
