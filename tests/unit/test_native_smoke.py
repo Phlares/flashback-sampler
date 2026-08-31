@@ -113,22 +113,23 @@ def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
 
 
 def test_get_peak_bins_correct_past_capacity_before_physical_wrap():
-    """Pins _peak_bins_impl's split between `capacity` (the readable
-    window) and the ring's PHYSICAL modulus (native's storage_frames =
-    capacity + a 4096-frame guard band) -- native-only, because for the
-    Python implementation the two are always equal (len(buffer) ==
-    buffer_size), so this scenario cannot be constructed there.
+    """Pins `Ring.peakBins`'s split between `capacity` (the readable
+    window) and the ring's PHYSICAL modulus (`storage_frames` = capacity
+    + a 4096-frame guard band) -- native-only, because for the Python
+    implementation the two are always equal (len(buffer) == buffer_size),
+    so this scenario cannot be constructed there.
 
     total_written here (10,000) exceeds capacity (8000) but stays well
     under storage_frames (8000 + 4096 = 12096), so NO physical wrap has
-    happened yet -- if buffer.py's `modulus = len(ring)` were mutated to
-    `modulus = capacity` instead, this reads WRONG ring positions that
-    still hold real (but stale/out-of-window) samples from an earlier
-    physical offset, not zeros: measured under that exact mutation,
-    bins 3-4's maxes come back as 7994/1996 instead of the correct
-    8001/9996 -- plausible-looking, silently wrong data, which is why
-    this needs an explicit pin rather than relying on it to look broken
-    if it breaks. See the Task 7 fix report for the mutation record."""
+    happened yet -- if Ring.zig's `modulus = self.storage_frames` were
+    mutated to `modulus = self.capacity` instead, this reads WRONG ring
+    positions that still hold real (but stale/out-of-window) samples
+    from an earlier physical offset, not zeros: measured under that
+    exact mutation, bins 3-4's maxes come back as 7994/1996 instead of
+    the correct 8001/9996 -- plausible-looking, silently wrong data,
+    which is why this needs an explicit pin rather than relying on it to
+    look broken if it breaks. See the Task 1 fix report for the mutation
+    record."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8000, channels=1)
     ramp = np.arange(10_000, dtype=np.float32)[:, None]
     buf.write(ramp)

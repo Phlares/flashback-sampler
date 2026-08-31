@@ -283,6 +283,11 @@ band. A parity test runs the numpy implementation and the Zig one on
 the same ring contents before the numpy one is deleted; the parity
 test goes with it, and a Zig test pins the bin arithmetic directly.
 
+Deviation (PR f plan): `peakBins`/`fb_ring_peak_bins` take a window
+length `n_frames`, not `(abs_start, abs_end)` — the retry loop
+re-snapshots and re-clamps inside Zig, as `fb_ring_summary_bins`
+already does. `out` layout `[bin][channel]{min,max}`.
+
 ### Deletions
 
 - `AudioCircularBuffer`, `_peak_bins_impl`, `RingDerivedOps`,

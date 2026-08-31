@@ -15,8 +15,9 @@ Ring.zig's struct-level comment) that makes an accepted reader's span
 provably disjoint from whatever the writer might currently be mid-copy
 into. The zero-copy numpy view over fb_ring_storage MUST be shaped with
 storage_frames, and write_pos's modulo MUST wrap at storage_frames too --
-using capacity for either silently corrupts get_peak_bins, which walks
-the raw buffer directly.
+using capacity for either silently corrupts any host that walks the raw
+buffer directly (the Python host no longer does -- peaks come from
+fb_ring_peak_bins).
 """
 from __future__ import annotations
 
@@ -109,6 +110,10 @@ class FbPlaybackState(C.Structure):
                 ("clip_frames", C.c_uint64), ("mix_rate", C.c_uint32)]
 
 
+class FbPeakBin(C.Structure):
+    _fields_ = [("min", C.c_float), ("max", C.c_float)]
+
+
 def _declare(lib: C.CDLL) -> None:
     """Argument/return types mirroring core/include/flashback_core.h,
     export by export. A mismatch here is silent memory corruption, not
@@ -154,6 +159,9 @@ def _declare(lib: C.CDLL) -> None:
 
     lib.fb_ring_summary_bins.argtypes = [C.c_void_p, C.c_size_t, C.c_uint64, C.c_uint64, f32p]
     lib.fb_ring_summary_bins.restype = C.c_int
+
+    lib.fb_ring_peak_bins.argtypes = [C.c_void_p, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin)]
+    lib.fb_ring_peak_bins.restype = C.c_int
 
     lib.fb_wav_write.argtypes = [C.c_char_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16, C.c_int]
     lib.fb_wav_write.restype = C.c_int
@@ -418,12 +426,20 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         return np.zeros((0, self.channels), dtype=np.float32)
 
     def get_peak_bins(self, seconds: float, n_bins: int) -> np.ndarray:
-        return _peak_bins_impl(
-            self.buffer, self.buffer_size,
-            lambda: self.total_written,
-            lambda abs_start: self.total_written - abs_start <= self.buffer_size,
-            self.sample_rate, self.channels, seconds, n_bins,
+        """(n_bins, 2, channels) float32: [i, 0, c] = min, [i, 1, c] = max.
+        The engine fills PeakBin{min, max} per (bin, channel); the transpose
+        below is the only Python work. Zeros for an empty or torn window,
+        and for a closed handle."""
+        out = np.zeros((n_bins, self.channels, 2), dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
+        status = self._lib.fb_ring_peak_bins(
+            self._h, max(0, int(seconds * self.sample_rate)), n_bins,
+            out.ctypes.data_as(C.POINTER(FbPeakBin)),
         )
+        if status == _INVALID_ARG:
+            raise ValueError("n_bins must be positive")
+        return np.ascontiguousarray(out.transpose(0, 2, 1))
 
     def get_summary_bins(self, n_bins: int, seconds=None, bin_span_samples=None) -> np.ndarray:
         """See AudioCircularBuffer.get_summary_bins's docstring for the
