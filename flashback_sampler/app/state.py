@@ -22,9 +22,9 @@ from flashback_sampler.app.audio_devices import (
     default_capture_device,
     default_output_device,
 )
-from flashback_sampler.core.buffer import RingDerivedOps, make_ring_buffer
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import CheckoutManager
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
 
@@ -175,9 +175,9 @@ class AppState:
         total = 0
         for slot in self.slots:
             # capacity_bytes, not slot.buffer.buffer.nbytes -- the latter
-            # reads the raw storage array, which on NativeAudioCircularBuffer
-            # is larger than the readable window by a guard band (see
-            # buffer.py's RingDerivedOps.capacity_bytes docstring).
+            # reads the raw storage array, which is larger than the
+            # readable window by a guard band (see native.py's
+            # capacity_bytes docstring).
             total += slot.buffer.capacity_bytes
             for co in slot.checkout_manager.list():
                 total += co.ram_bytes
@@ -223,7 +223,7 @@ class AppState:
     # ------------------------------------------------------------------
 
     @property
-    def buffer(self) -> RingDerivedOps:
+    def buffer(self) -> NativeAudioCircularBuffer:
         return self.active_slot.buffer
 
     @property
@@ -388,7 +388,7 @@ class AppState:
                 pass
 
         old_buf = slot.buffer
-        new_buf = make_ring_buffer(
+        new_buf = NativeAudioCircularBuffer(
             duration_seconds=float(new_seconds),
             sample_rate=slot.sample_rate,
             channels=slot.channels,
@@ -401,8 +401,7 @@ class AppState:
         # Drop it so the caller rebuilds from state.build_capture().
         slot.capture_source = None
         # Release the old buffer's resources now rather than waiting on
-        # GC/__del__ -- a no-op for AudioCircularBuffer, but deterministic
-        # release of the Zig-owned handle for NativeAudioCircularBuffer.
+        # GC/__del__ -- deterministic release of the Zig-owned handle.
         # Safe here specifically: the writer was already stopped above
         # (stop_capture() joins/closes its stream before returning), and
         # rebuild_buffer runs entirely on the GUI thread, so nothing else

@@ -1,5 +1,6 @@
-"""Native library smoke: bindings load and round-trip. Skips (not fails)
-when the Zig library isn't built, so Zig-less dev environments stay green."""
+"""Native library smoke: bindings load and round-trip. The session
+requires the built library (tests/conftest.py); the skipif below is a
+per-file belt for direct invocation."""
 import numpy as np
 import pytest
 
@@ -30,16 +31,14 @@ def test_write_rejects_channel_count_mismatch(frames):
     confirmed by reproducing against the built DLL: writing a 4-element
     1-D (mono) array into a channels=2 ring returns 2 real frames
     followed by 2 frames of uninitialized heap (e.g. 8.19e+34), not a
-    clean error and not the value AudioCircularBuffer would produce.
+    clean error.
 
-    AudioCircularBuffer instead silently BROADCASTS a narrower array
-    across channels (e.g. the same 1-D input becomes [[0,0],[1,1],[2,2],
-    [3,3]]) -- a deliberate, documented parity divergence: broadcasting
-    masks a real caller bug by writing plausible-looking wrong audio,
-    which is exactly the "conflating shapes corrupts silently" failure
-    mode this phase exists to close off. Raising is the safer contract
-    even though no current app caller reaches this path (every capture
-    source already conforms its channel count before writing)."""
+    raising is deliberate: broadcasting would mask a caller bug by
+    writing plausible-looking wrong audio, which is exactly the
+    "conflating shapes corrupts silently" failure mode this phase
+    exists to close off, even though no current app caller reaches
+    this path (every capture source already conforms its channel
+    count before writing)."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=2)
     with pytest.raises(ValueError):
         buf.write(frames)
@@ -55,14 +54,12 @@ def test_zero_copy_storage_view_sees_writes():
 
 def test_get_segment_retries_on_transient_read_failure(monkeypatch):
     """native-impl internal: deterministically pins get_segment's 3-attempt
-    retry loop (matching get_latest's own, and Python's copy_abs_range).
+    retry loop (matching get_latest's own and copy_abs_range's).
     A live writer/reader race is inherently probabilistic -- pounding the
     buffer from a background thread does NOT reliably prove the retry
     loop matters, since most single-attempt reads still succeed by luck
-    even with zero retries (confirmed while fixing this: the concurrency
-    stress test in test_buffer.py passed 3/3 runs with the retry loop
-    removed entirely). Monkeypatching fb_ring_read to force exactly two
-    synthetic failures before succeeding makes the retry behavior
+    even with zero retries. Monkeypatching fb_ring_read to force exactly
+    two synthetic failures before succeeding makes the retry behavior
     deterministic instead of luck-dependent."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(np.arange(500, dtype=np.float32)[:, None])
@@ -91,8 +88,8 @@ def test_copy_abs_range_retries_on_transient_read_failure(monkeypatch):
     success). Without a retry, checkout.py's create_from_abs_range
     (drag-select) sees a torn read as a hard failure -- an empty array /
     RuntimeError -- on a request that would have succeeded a moment
-    later, a real behavior gap against AudioCircularBuffer.copy_abs_range's
-    3-attempt retry."""
+    later. Matches NativeAudioCircularBuffer.copy_abs_range's 3-attempt
+    retry."""
     buf = native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     buf.write(np.arange(500, dtype=np.float32)[:, None])
 
@@ -141,23 +138,16 @@ def test_get_peak_bins_correct_past_capacity_before_physical_wrap():
 
 
 def test_load_skips_a_candidate_that_exists_but_is_not_a_valid_library(tmp_path, monkeypatch):
-    """A bundled-but-broken library (architecture mismatch, missing
-    runtime dependency, a corrupted/truncated file) is the realistic
-    distribution failure this fallback exists for -- load()'s own
-    docstring promises None "if not built anywhere", and
-    make_ring_buffer()/PLATFORM.md both promise a graceful fallback to
-    the Python implementation, not a crash. Previously C.CDLL(...) was
-    unguarded: a candidate that EXISTS but is not a loadable library
-    raises OSError straight out of load() -> make_ring_buffer() ->
-    AppState.__init__, crashing app startup instead of skipping to the
-    next candidate (or falling back to Python if none work) exactly like
-    a MISSING candidate already does."""
+    """A bundled-but-broken library must not crash load(); it reports None
+    and the constructor raises a clear RuntimeError."""
     bad = tmp_path / "not_a_real_library.dll"
     bad.write_text("this is not a shared library")
     monkeypatch.setattr(native, "_candidates", lambda: [bad])
     monkeypatch.setattr(native, "_lib", None)
     monkeypatch.setattr(native, "_lib_tried", False)
     assert native.load() is None
+    with pytest.raises(RuntimeError):
+        native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=1)
 
 
 def test_wav_float32_round_trips_bit_exact(tmp_path):

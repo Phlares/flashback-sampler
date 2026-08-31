@@ -11,17 +11,19 @@ import numpy as np
 import pytest
 
 from flashback_sampler.app.state import AppState
-from flashback_sampler.core.buffer import RingDerivedOps
 from flashback_sampler.core.checkout import CheckoutManager
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
+
+
+def test_core_package_exports_nothing_from_a_python_buffer():
+    import flashback_sampler.core as core
+    assert not hasattr(core, "AudioCircularBuffer")
 
 
 def test_appstate_wires_core_objects_with_matching_sample_rate_and_channels():
     st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=2)
-    # RingDerivedOps, not AudioCircularBuffer specifically -- st.buffer is
-    # constructed via make_ring_buffer, which returns whichever ring
-    # implementation (Python or native) the machine has available.
-    assert isinstance(st.buffer, RingDerivedOps)
+    assert isinstance(st.buffer, NativeAudioCircularBuffer)
     assert isinstance(st.checkout_manager, CheckoutManager)
     assert isinstance(st.scrub_player, NativeScrubPlayer)
     assert st.sample_rate == 16_000
@@ -236,9 +238,9 @@ def test_total_project_ram_bytes_counts_every_slot():
 
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
     # Main slot ~1.92 MB (5s * 48k * 2 * 4). capacity_bytes, not
-    # .buffer.nbytes -- the latter is the raw storage array, which on
-    # NativeAudioCircularBuffer is larger than the readable window by a
-    # guard band (see buffer.py's RingDerivedOps.capacity_bytes docstring).
+    # .buffer.nbytes -- the latter is the raw storage array, which is
+    # larger than the readable window by a guard band (see native.py's
+    # capacity_bytes docstring).
     main_bytes = st.slots[0].buffer.capacity_bytes
     assert main_bytes == 5 * 48_000 * 2 * 4
 
@@ -460,9 +462,9 @@ def test_cli_mono_override():
 
 def test_rebuild_buffer_closes_the_old_buffer():
     """rebuild_buffer discards the active slot's ring buffer and builds a
-    fresh one via make_ring_buffer -- the OLD buffer's close() must be
-    called so a NativeAudioCircularBuffer's Zig-owned handle is released
-    deterministically instead of relying only on eventual GC/__del__."""
+    fresh NativeAudioCircularBuffer -- the OLD buffer's close() must be
+    called so its Zig-owned handle is released deterministically instead
+    of relying only on eventual GC/__del__."""
     from flashback_sampler.app.state import AppState
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     try:

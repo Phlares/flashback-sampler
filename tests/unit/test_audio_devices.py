@@ -5,7 +5,7 @@ a fixed expected set, so these tests focus on:
 
 1. Dataclass frozenness / immutability.
 2. build_capture_source() dispatch logic for loopback vs. input (using
-   a fake AudioCircularBuffer that records what it gets passed).
+   a fake ring buffer that records what it gets passed).
 3. That calling list_*_devices() doesn't raise.
 """
 

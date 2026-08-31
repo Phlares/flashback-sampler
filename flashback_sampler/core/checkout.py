@@ -18,8 +18,8 @@ from typing import Literal, Optional
 
 import numpy as np
 
-from .buffer import RingDerivedOps
 from flashback_sampler.core import native
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
@@ -87,7 +87,7 @@ class CheckoutManager:
 
     def __init__(
         self,
-        buffer: RingDerivedOps,
+        buffer: NativeAudioCircularBuffer,
         max_active_checkouts: int = 16,
         max_total_ram_mb: float = 1024.0,
     ):
@@ -152,10 +152,7 @@ class CheckoutManager:
                 start_ago=effective_offset_s + duration_s,
                 end_ago=effective_offset_s,
             )
-        # total_written is a single atomic read on both implementations
-        # (a GIL-protected int attribute on AudioCircularBuffer, an atomic
-        # ctypes call on NativeAudioCircularBuffer) — no lock needed, and
-        # NativeAudioCircularBuffer has no self._lock to reach for.
+        # total_written is one atomic read through the ABI.
         total = self._buffer.total_written
         abs_end = total - int(effective_offset_s * self._buffer.sample_rate)
         abs_start = abs_end - audio.shape[0]
@@ -212,8 +209,7 @@ class CheckoutManager:
             )
 
         # Check the range is still available in the ring. total_written is
-        # a single atomic read on both implementations — see create()'s
-        # comment above for why no lock is needed here.
+        # one atomic read through the ABI — no lock needed here.
         buf = self._buffer
         total = buf.total_written
         if abs_end > total:

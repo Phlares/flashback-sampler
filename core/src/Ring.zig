@@ -39,12 +39,8 @@ pub const Config = struct {
     sample_rate: u32,
     channels: u16,
     seconds: f64,
-    // Must equal Python's AudioCircularBuffer._SUMMARY_SLOT_SAMPLES
-    // (flashback_sampler/core/buffer.py) for get_summary_bins/rmsBins
-    // parity -- per-bin RMS of a constant-amplitude signal is the SAME
-    // number regardless of slot size, so the existing constant-amplitude
-    // parity test cannot detect the two constants drifting apart. A
-    // change to either number is a parity change; change both together.
+    // 4096 frames ≈ 85 ms at 48 kHz: fine enough for smooth rolling,
+    // coarse enough that the summary stays tiny (≈330 KB for 15 min).
     summary_slot_frames: u32 = 4096,
 };
 
@@ -372,12 +368,12 @@ pub const peak_bins_read_headroom: u64 = 4096;
 /// pairs per channel for the waveform display. `out.len == n_bins *
 /// channels`, laid out `out[bin * channels + ch]`.
 ///
-/// Port of Python's `_peak_bins_impl`: same window clamp and headroom,
-/// same bin edges (numpy `linspace` — `i * step` in f64, truncated), same
+/// Window clamp and headroom, bin edges (`i * step` in f64, truncated),
 /// stride grid anchored to ABSOLUTE frame indices (so rolling the window
-/// by a few frames does not re-pick a bin's samples), same physical
-/// modulus (`storage_frames`, never `capacity`). Two ported quirks stay:
-/// the stride branch reads `k` positions per bin regardless of the bin's
+/// by a few frames does not re-pick a bin's samples), and physical
+/// modulus (`storage_frames`, never `capacity`) all match the retired
+/// numpy prototype this was ported from. Two ported quirks stay: the
+/// stride branch reads `k` positions per bin regardless of the bin's
 /// end (it may overshoot into the next bin, or past `total_written` on
 /// the last bin), and NaN samples are ignored by `@min`/`@max` where
 /// numpy would propagate them.

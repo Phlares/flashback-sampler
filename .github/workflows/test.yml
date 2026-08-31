@@ -28,9 +28,9 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
-      # A missing/broken native build must turn CI red, not quietly skip
-      # the parity harness's native half (see tests/conftest.py). Unset
-      # for local dev runs, which stay green on Zig-less workstations.
+      # tests/conftest.py exits the session when the native library is
+      # missing; this variable is kept for older checkouts and is
+      # otherwise redundant.
       FLASHBACK_REQUIRE_NATIVE: "1"
 
     steps:

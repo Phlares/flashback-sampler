@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from flashback_sampler.core.buffer import RingDerivedOps
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import CheckoutManager
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.quality_presets import (
     PRESETS,
     default_preset,
@@ -28,9 +28,7 @@ def test_from_quality_preset_builds_buffer_and_manager():
     assert slot.channels == 1
     assert slot.buffer_seconds == 180.0
     assert slot.quality_preset == "SCRATCH"
-    # RingDerivedOps, not AudioCircularBuffer specifically -- the factory
-    # returns whichever ring implementation the machine has available.
-    assert isinstance(slot.buffer, RingDerivedOps)
+    assert isinstance(slot.buffer, NativeAudioCircularBuffer)
     assert slot.buffer.duration == 180.0
     assert slot.buffer.sample_rate == 16_000
     assert slot.buffer.channels == 1

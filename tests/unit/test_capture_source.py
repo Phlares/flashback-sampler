@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.capture_source import CaptureSource
 
 
-def _minimal_buffer() -> AudioCircularBuffer:
-    return AudioCircularBuffer(duration_seconds=0.5, sample_rate=1000, channels=1)
+def _minimal_buffer() -> NativeAudioCircularBuffer:
+    return NativeAudioCircularBuffer(duration_seconds=0.5, sample_rate=1000, channels=1)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ def test_fake_no_thread_start_stop_updates_is_running():
 
 def test_fake_no_thread_fill_writes_to_buffer():
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     src = FakeCaptureSourceNoThread(buf, sample_rate=1000, channels=1)
     src.start()
     src.fill(0.5)  # 500 samples
