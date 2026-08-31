@@ -57,6 +57,107 @@ pub const Subtype = enum(u8) {
 
 pub const header_len = 44;
 
+/// The one `std.Io` every wav call uses — the synchronous singleton
+/// `writeFile` already reaches for (see its doc comment). Public so
+/// callers that hold a `File` from `open` can close it with the same Io.
+pub const io = std.Io.Threaded.global_single_threaded.io();
+
+/// What a reader needs to pull samples: format, count, and where the
+/// payload starts. `frames` is clamped to what the FILE holds, not what
+/// the `data` size claims — a `.part` left by a crash reads its true
+/// prefix instead of failing.
+pub const Info = struct {
+    rate: u32,
+    channels: u16,
+    subtype: Subtype,
+    frames: u64,
+    data_offset: u64,
+
+    pub fn blockAlign(self: Info) u64 {
+        return @as(u64, self.channels) * self.subtype.bytesPerSample();
+    }
+};
+
+pub const ParseError = error{ NotWave, MissingFmt, MissingData, Unsupported };
+pub const OpenError = ParseError || std.Io.File.OpenError || std.Io.File.ReadPositionalError || std.Io.File.LengthError;
+pub const Opened = struct { file: std.Io.File, info: Info };
+
+/// Open `path` and walk its chunks to the `data` chunk. Positional reads
+/// (`readPositionalAll` takes an explicit offset, so no seek state is
+/// shared between threads). DAW-written files put `bext`, `iXML` and
+/// `LIST` chunks of kilobytes before `data`; the walk skips any chunk it
+/// does not know, honouring the RIFF word-alignment pad byte.
+pub fn open(path: []const u8) OpenError!Opened {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    errdefer file.close(io);
+    return .{ .file = file, .info = try scan(file) };
+}
+
+const Fmt = struct { channels: u16, rate: u32, block_align: u16, subtype: Subtype };
+
+fn scan(file: std.Io.File) OpenError!Info {
+    const len = try file.length(io);
+    var hdr: [12]u8 = undefined;
+    if (try file.readPositionalAll(io, &hdr, 0) != 12) return error.NotWave;
+    if (!std.mem.eql(u8, hdr[0..4], "RIFF") or !std.mem.eql(u8, hdr[8..12], "WAVE")) return error.NotWave;
+    var pos: u64 = 12;
+    var fmt: ?Fmt = null;
+    while (pos + 8 <= len) {
+        var ch: [8]u8 = undefined;
+        if (try file.readPositionalAll(io, &ch, pos) != 8) break;
+        const size: u64 = std.mem.readInt(u32, ch[4..8], .little);
+        const body = pos + 8;
+        if (std.mem.eql(u8, ch[0..4], "fmt ")) {
+            var fb: [40]u8 = undefined;
+            const want: usize = @intCast(@min(size, 40));
+            if (want < 16 or try file.readPositionalAll(io, fb[0..want], body) != want) return error.MissingFmt;
+            fmt = try parseFmt(fb[0..want]);
+        } else if (std.mem.eql(u8, ch[0..4], "data")) {
+            const f = fmt orelse return error.MissingFmt;
+            if (body > len) return error.MissingData;
+            const avail = @min(size, len - body);
+            return .{
+                .rate = f.rate,
+                .channels = f.channels,
+                .subtype = f.subtype,
+                .frames = avail / f.block_align,
+                .data_offset = body,
+            };
+        }
+        pos = body + size + (size & 1); // chunks are word-aligned
+    }
+    return if (fmt == null) error.MissingFmt else error.MissingData;
+}
+
+/// The fmt body. Plain: tag u16, channels u16, rate u32, byte rate u32,
+/// block align u16, bits u16. EXTENSIBLE (tag 0xFFFE): cbSize u16,
+/// valid bits u16, channel mask u32, then the 16-byte SubFormat GUID
+/// at offset 24 whose first two bytes carry the real tag. Same rule as
+/// tests/fixtures/wavread.py — the independent oracle.
+fn parseFmt(fb: []const u8) ParseError!Fmt {
+    var tag = std.mem.readInt(u16, fb[0..2], .little);
+    const channels = std.mem.readInt(u16, fb[2..4], .little);
+    const rate = std.mem.readInt(u32, fb[4..8], .little);
+    const block_align = std.mem.readInt(u16, fb[12..14], .little);
+    const bits = std.mem.readInt(u16, fb[14..16], .little);
+    if (tag == 0xFFFE) {
+        if (fb.len < 26) return error.Unsupported;
+        tag = std.mem.readInt(u16, fb[24..26], .little);
+    }
+    const subtype: Subtype = switch (tag) {
+        3 => if (bits == 32) Subtype.float32 else return error.Unsupported,
+        1 => switch (bits) {
+            16 => Subtype.pcm_16,
+            24 => Subtype.pcm_24,
+            else => return error.Unsupported,
+        },
+        else => return error.Unsupported,
+    };
+    if (channels == 0 or rate == 0) return error.Unsupported;
+    if (block_align != channels * subtype.bytesPerSample()) return error.Unsupported;
+    return .{ .channels = channels, .rate = rate, .block_align = block_align, .subtype = subtype };
+}
+
 /// Write a canonical 44-byte RIFF/WAVE header for `n_frames` frames of
 /// `channels`-channel audio at `rate` Hz in subtype `st`. A "frame" is
 /// one sample per channel, so the data chunk size is
@@ -171,7 +272,6 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
 pub fn writeFile(path: []const u8, samples: []const f32, rate: u32, channels: u16, st: Subtype) !void {
     const data_len_wide: u64 = @as(u64, samples.len) * st.bytesPerSample();
     if (data_len_wide > std.math.maxInt(u32) - header_len) return error.TooLong;
-    const io = std.Io.Threaded.global_single_threaded.io();
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     var header: [header_len]u8 = undefined;
@@ -324,4 +424,159 @@ test "pcm16/pcm24 negative extreme inputs share -1.0's quantized floor" {
     var out24: [6]u8 = undefined;
     _ = encodeSamples(.pcm_24, &[_]f32{ -1.0, -50.0 }, &out24);
     try std.testing.expectEqualSlices(u8, out24[0..3], out24[3..6]);
+}
+
+/// Test helper: a minimal RIFF/WAVE byte image. `fmt_body` is the raw
+/// fmt chunk body (16 bytes plain, 40 bytes EXTENSIBLE); `pre_data` is
+/// any chunk bytes to place between fmt and data; `data` is the payload.
+fn wavImage(buf: []u8, fmt_body: []const u8, pre_data: []const u8, data: []const u8) []const u8 {
+    var w: usize = 0;
+    @memcpy(buf[w .. w + 4], "RIFF");
+    w += 4;
+    const riff_len: u32 = @intCast(4 + 8 + fmt_body.len + pre_data.len + 8 + data.len);
+    std.mem.writeInt(u32, buf[w..][0..4], riff_len, .little);
+    w += 4;
+    @memcpy(buf[w .. w + 4], "WAVE");
+    w += 4;
+    @memcpy(buf[w .. w + 4], "fmt ");
+    w += 4;
+    std.mem.writeInt(u32, buf[w..][0..4], @intCast(fmt_body.len), .little);
+    w += 4;
+    @memcpy(buf[w .. w + fmt_body.len], fmt_body);
+    w += fmt_body.len;
+    @memcpy(buf[w .. w + pre_data.len], pre_data);
+    w += pre_data.len;
+    @memcpy(buf[w .. w + 4], "data");
+    w += 4;
+    std.mem.writeInt(u32, buf[w..][0..4], @intCast(data.len), .little);
+    w += 4;
+    @memcpy(buf[w .. w + data.len], data);
+    w += data.len;
+    return buf[0..w];
+}
+
+fn fmtPlain(tag: u16, channels: u16, rate: u32, bits: u16) [16]u8 {
+    var b: [16]u8 = undefined;
+    const block: u16 = channels * (bits / 8);
+    std.mem.writeInt(u16, b[0..2], tag, .little);
+    std.mem.writeInt(u16, b[2..4], channels, .little);
+    std.mem.writeInt(u32, b[4..8], rate, .little);
+    std.mem.writeInt(u32, b[8..12], rate * block, .little);
+    std.mem.writeInt(u16, b[12..14], block, .little);
+    std.mem.writeInt(u16, b[14..16], bits, .little);
+    return b;
+}
+
+/// WAVE_FORMAT_EXTENSIBLE: tag 0xFFFE, cbSize 22, validBits, channelMask,
+/// then a 16-byte SubFormat GUID whose first two bytes are the real tag.
+fn fmtExtensible(real_tag: u16, channels: u16, rate: u32, bits: u16) [40]u8 {
+    var b: [40]u8 = undefined;
+    const head = fmtPlain(0xFFFE, channels, rate, bits);
+    @memcpy(b[0..16], &head);
+    std.mem.writeInt(u16, b[16..18], 22, .little); // cbSize
+    std.mem.writeInt(u16, b[18..20], bits, .little); // valid bits
+    std.mem.writeInt(u32, b[20..24], 3, .little); // channel mask L|R
+    @memset(b[24..40], 0);
+    std.mem.writeInt(u16, b[24..26], real_tag, .little);
+    return b;
+}
+
+fn writeTmp(tmp: *const std.testing.TmpDir, name: []const u8, bytes: []const u8) !void {
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+}
+
+test "open: plain float32 header" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var img: [128]u8 = undefined;
+    const data = [_]u8{0} ** 32; // 4 stereo float frames
+    const bytes = wavImage(&img, &fmtPlain(3, 2, 48_000, 32), &.{}, &data);
+    try writeTmp(&tmp, "plain.wav", bytes);
+    var pb: [64]u8 = undefined;
+    var o = try open(tmpWritePath(&pb, &tmp, "plain.wav"));
+    defer o.file.close(io);
+    try std.testing.expectEqual(@as(u32, 48_000), o.info.rate);
+    try std.testing.expectEqual(@as(u16, 2), o.info.channels);
+    try std.testing.expectEqual(Subtype.float32, o.info.subtype);
+    try std.testing.expectEqual(@as(u64, 4), o.info.frames);
+    try std.testing.expectEqual(@as(u64, 44), o.info.data_offset);
+}
+
+test "open: EXTENSIBLE pcm24 takes the tag from the SubFormat GUID" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var img: [160]u8 = undefined;
+    const data = [_]u8{0} ** 18; // 3 stereo pcm24 frames
+    const bytes = wavImage(&img, &fmtExtensible(1, 2, 96_000, 24), &.{}, &data);
+    try writeTmp(&tmp, "ext.wav", bytes);
+    var pb: [64]u8 = undefined;
+    var o = try open(tmpWritePath(&pb, &tmp, "ext.wav"));
+    defer o.file.close(io);
+    try std.testing.expectEqual(Subtype.pcm_24, o.info.subtype);
+    try std.testing.expectEqual(@as(u64, 3), o.info.frames);
+    try std.testing.expectEqual(@as(u64, 12 + 8 + 40 + 8), o.info.data_offset);
+}
+
+test "open: an odd-sized unknown chunk before data is skipped with its pad byte" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var img: [160]u8 = undefined;
+    // 'junk' chunk of 3 bytes + 1 pad byte
+    const junk = [_]u8{ 'j', 'u', 'n', 'k', 3, 0, 0, 0, 1, 2, 3, 0 };
+    const data = [_]u8{0} ** 8; // 2 mono float frames
+    const bytes = wavImage(&img, &fmtPlain(3, 1, 44_100, 32), &junk, &data);
+    try writeTmp(&tmp, "junk.wav", bytes);
+    var pb: [64]u8 = undefined;
+    var o = try open(tmpWritePath(&pb, &tmp, "junk.wav"));
+    defer o.file.close(io);
+    try std.testing.expectEqual(@as(u64, 2), o.info.frames);
+    try std.testing.expectEqual(@as(u64, 44 + 12), o.info.data_offset);
+}
+
+test "open: data chunk longer than the file clamps frames (a crash-truncated .part)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var img: [128]u8 = undefined;
+    const data = [_]u8{0} ** 16; // header says 16 bytes ...
+    const bytes = wavImage(&img, &fmtPlain(3, 1, 8_000, 32), &.{}, &data);
+    // ... but write only 44 + 10 bytes: 2 whole frames + 2 stray bytes
+    try writeTmp(&tmp, "trunc.wav", bytes[0 .. 44 + 10]);
+    var pb: [64]u8 = undefined;
+    var o = try open(tmpWritePath(&pb, &tmp, "trunc.wav"));
+    defer o.file.close(io);
+    try std.testing.expectEqual(@as(u64, 2), o.info.frames);
+}
+
+test "open: not RIFF/WAVE, missing fmt, missing data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    try writeTmp(&tmp, "not.wav", "RIFX....WAVE");
+    try std.testing.expectError(error.NotWave, open(tmpWritePath(&pb, &tmp, "not.wav")));
+    // fmt absent: a 'junk' chunk then data
+    const no_fmt = "RIFF" ++ [_]u8{ 20, 0, 0, 0 } ++ "WAVE" ++ "data" ++ [_]u8{ 4, 0, 0, 0 } ++ [_]u8{ 0, 0, 0, 0 };
+    try writeTmp(&tmp, "nofmt.wav", no_fmt);
+    try std.testing.expectError(error.MissingFmt, open(tmpWritePath(&pb, &tmp, "nofmt.wav")));
+    // data absent
+    var img: [64]u8 = undefined;
+    const f = fmtPlain(3, 1, 8_000, 32);
+    const hdr_only = wavImage(&img, &f, &.{}, &.{});
+    try writeTmp(&tmp, "nodata.wav", hdr_only[0 .. hdr_only.len - 8]); // drop the data chunk header
+    try std.testing.expectError(error.MissingData, open(tmpWritePath(&pb, &tmp, "nodata.wav")));
+}
+
+test "open: pcm32 and float64 are Unsupported" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var img: [128]u8 = undefined;
+    var pb: [64]u8 = undefined;
+    const d = [_]u8{0} ** 8;
+    try writeTmp(&tmp, "p32.wav", wavImage(&img, &fmtPlain(1, 1, 8_000, 32), &.{}, &d));
+    try std.testing.expectError(error.Unsupported, open(tmpWritePath(&pb, &tmp, "p32.wav")));
+    try writeTmp(&tmp, "f64.wav", wavImage(&img, &fmtPlain(3, 1, 8_000, 64), &.{}, &d));
+    try std.testing.expectError(error.Unsupported, open(tmpWritePath(&pb, &tmp, "f64.wav")));
+}
+
+test "open: a missing file surfaces the OS error" {
+    try std.testing.expectError(error.FileNotFound, open(".zig-cache/tmp/does-not-exist.wav"));
 }
