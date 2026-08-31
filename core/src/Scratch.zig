@@ -627,6 +627,11 @@ test "forget's worker-running branch waits for an in-flight write before unlinki
 
     var ctx = ForgetCtx{ .scratch = &s, .co = co };
     const t = try std.Thread.spawn(.{}, ForgetCtx.run, .{&ctx});
+    defer {
+        Recorder.park.store(false, .release); // let the parked write finish so `t` can join
+        t.join();
+        s.stop();
+    }
 
     // Bounded busy-wait for "still not done": a deterministic block (the
     // parked write can only finish once we release it below), not a
@@ -640,8 +645,6 @@ test "forget's worker-running branch waits for an in-flight write before unlinki
 
     Recorder.park.store(false, .release); // let the parked write finish
     try std.testing.expect(pollTrue(&ctx.done)); // forget now returns
-    t.join();
-    s.stop();
 }
 
 test "re-submitting the same checkout for another write does not double-count LRU bytes" {
