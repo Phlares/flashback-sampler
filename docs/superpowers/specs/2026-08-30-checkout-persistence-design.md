@@ -468,7 +468,7 @@ at 192 kHz.
 
 | DAW | Markers on drop | Clip bounds from file | Container |
 |---|---|---|---|
-| Ableton Live | not from WAV cues (restores its own `.asd`) | spike | `.alc` (gzipped XML, sample reference) — spike |
+| Ableton Live | no clip markers; the `smpl` loop becomes the arrangement loop brace (tested 2026-09-01, Live 12) | no: the whole file drops as one clip | `.alc` yes (tested 2026-09-01): an unwarped clip opens at `Loop/LoopStart..LoopEnd` (seconds into the sample), the edge drags out to the whole sample, and an absolute `FileRef/Path` outside the User Library is honoured |
 | Reaper | `cue ` → project markers/regions (documented) | no | — |
 | Logic | `cue ` → markers (documented) | no | — |
 | Cubase | `cue ` → markers | no | — |
