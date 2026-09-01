@@ -162,3 +162,21 @@ def test_checkout_cache_mb_roundtrip_and_floor(tmp_path):
     assert config.load_checkout_cache_mb(p) == 0.0
     config.save_config({config.CHECKOUT_CACHE_MB_KEY: "banana"}, p)
     assert config.load_checkout_cache_mb(p) == config.DEFAULT_CHECKOUT_CACHE_MB
+
+
+def test_max_footprint_default_is_a_quarter_of_physical_ram():
+    from flashback_sampler.app import config
+    # 64 GiB box -> 16384 MB; the default is derived at load, never stored.
+    assert config.default_max_footprint_mb(64 * 1024 ** 3) == 16384.0
+
+
+def test_max_footprint_roundtrip_unset_means_default_and_zero_means_uncapped(tmp_path):
+    from flashback_sampler.app import config
+    p = tmp_path / "config.json"
+    assert config.load_max_footprint_mb(p, default=1234.0) == 1234.0  # unset -> default
+    config.save_max_footprint_mb(2048, p)
+    assert config.load_max_footprint_mb(p, default=1234.0) == 2048.0
+    config.save_max_footprint_mb(0, p)
+    assert config.load_max_footprint_mb(p, default=1234.0) == 0.0  # 0 = uncapped, kept
+    config.save_max_footprint_mb(-5, p)
+    assert config.load_max_footprint_mb(p, default=1234.0) == 0.0  # negative floors to uncapped

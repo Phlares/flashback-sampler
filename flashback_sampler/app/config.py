@@ -152,6 +152,32 @@ def save_scratch_dir(scratch_dir: Path | str, path: Path | None = None) -> None:
     set_pref(SCRATCH_DIR_KEY, str(scratch_dir), path)
 
 
+MAX_FOOTPRINT_MB_KEY = "max_footprint_mb"
+# Fraction of physical RAM the footprint check allows by default. A
+# safety line, not a reservation: the user raises it, or sets 0 for no
+# cap, in Preferences (#41).
+DEFAULT_FOOTPRINT_FRACTION = 0.25
+
+
+def default_max_footprint_mb(total_physical_bytes: int) -> float:
+    return float(total_physical_bytes) * DEFAULT_FOOTPRINT_FRACTION / (1024 * 1024)
+
+
+def load_max_footprint_mb(path: Path | None = None, *, default: float) -> float:
+    """Stored value, or `default` when unset. 0 = uncapped; negatives floor to 0."""
+    raw = get_pref(MAX_FOOTPRINT_MB_KEY, None, path)
+    if raw is None:
+        return float(default)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def save_max_footprint_mb(mb: float, path: Path | None = None) -> None:
+    set_pref(MAX_FOOTPRINT_MB_KEY, max(0.0, float(mb)), path)
+
+
 def load_checkout_cache_mb(path: Path | None = None) -> float:
     try:
         return max(0.0, float(get_pref(CHECKOUT_CACHE_MB_KEY, DEFAULT_CHECKOUT_CACHE_MB, path)))

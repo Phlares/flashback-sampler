@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
 )
 
@@ -37,6 +38,10 @@ class PreferencesDialog(QDialog):
         on_export_bit_depth_changed: Callable[[str], None] | None = None,
         scratch_dir: str = "",
         on_scratch_dir_changed: Callable[[str], None] | None = None,
+        max_footprint_mb: float = 0.0,
+        on_max_footprint_changed: Callable[[float], None] | None = None,
+        mem_total_mb: float = 0.0,
+        mem_free_mb: float = 0.0,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -140,6 +145,35 @@ class PreferencesDialog(QDialog):
         scratch_hint.setWordWrap(True)
         scratch_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
         root.addWidget(scratch_hint)
+
+        root.addSpacing(10)
+        root.addWidget(QLabel("<b>Memory</b>"))
+        footprint_row = QHBoxLayout()
+        footprint_row.addWidget(QLabel("Max footprint"))
+        self.footprint_spin = QSpinBox()
+        self.footprint_spin.setRange(0, 1 << 30)
+        self.footprint_spin.setSingleStep(1024)
+        self.footprint_spin.setSuffix(" MB")
+        self.footprint_spin.setSpecialValueText("no cap")  # shown at 0
+        self.footprint_spin.setValue(int(max_footprint_mb))
+
+        def _footprint_edited() -> None:
+            if on_max_footprint_changed is not None:
+                on_max_footprint_changed(float(self.footprint_spin.value()))
+
+        # editingFinished, not valueChanged: one callback per typed value,
+        # not one per keystroke.
+        self.footprint_spin.editingFinished.connect(_footprint_edited)
+        footprint_row.addWidget(self.footprint_spin, 1)
+        root.addLayout(footprint_row)
+        self.footprint_hint = QLabel(
+            "A safety line for the session's resident audio, not a reservation. "
+            "Default is 25 % of physical RAM; 0 = no cap. "
+            f"Physical RAM {mem_total_mb:,.0f} MB, free now {mem_free_mb:,.0f} MB."
+        )
+        self.footprint_hint.setWordWrap(True)
+        self.footprint_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
+        root.addWidget(self.footprint_hint)
 
         root.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)

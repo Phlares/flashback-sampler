@@ -97,3 +97,17 @@ def test_scratch_dir_row_reports_a_pick(qapp, monkeypatch):
                         staticmethod(lambda *a, **k: "C:/new"))
     dlg.scratch_dir_btn.click()
     assert seen == ["C:/new"] and dlg.scratch_dir_edit.text() == "C:/new"
+
+
+def test_memory_row_shows_the_footprint_and_reports_edits(qapp):
+    """#41: the max footprint is a live tunable; 0 means no cap. The hint
+    names physical and free RAM so the number has a reference."""
+    seen = []
+    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
+                            max_footprint_mb=16384.0, on_max_footprint_changed=seen.append,
+                            mem_total_mb=65536.0, mem_free_mb=40000.0)
+    assert dlg.footprint_spin.value() == 16384
+    assert "65,536" in dlg.footprint_hint.text() and "40,000" in dlg.footprint_hint.text()
+    dlg.footprint_spin.setValue(0)
+    dlg.footprint_spin.editingFinished.emit()
+    assert seen == [0.0]
