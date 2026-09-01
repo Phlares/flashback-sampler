@@ -179,9 +179,13 @@ fn run(self: *Mixer) void {
             var avail = tw -| s.cursor;
             if (avail > s.stage.capacity) {
                 // The stage lapped our cursor: we fell more than stage_seconds
-                // behind. Resume at the oldest frame still readable.
-                s.cursor = tw - s.stage.capacity;
-                avail = s.stage.capacity;
+                // behind. Resume a margin INSIDE the readable window, not at
+                // its oldest frame: that edge is exactly what Ring.read
+                // accepts, so one publish between this load and the read
+                // below would fail the tick and charge another xrun (#46).
+                const margin = lapMargin(s.stage.capacity);
+                s.cursor = tw - s.stage.capacity + margin;
+                avail = s.stage.capacity - margin;
                 _ = self.xruns.fetchAdd(1, .monotonic);
             }
             n = @min(n, avail);
@@ -206,6 +210,14 @@ fn run(self: *Mixer) void {
         for (self.sources[0..self.n_sources]) |*s| s.cursor += n;
         _ = self.frames_written.fetchAdd(n, .release);
     }
+}
+
+/// Frames given up after a lap so the writer cannot catch the cursor
+/// before the read: one publish (Ring.max_write_frames, the ring's own
+/// guard band) in real use, half the stage when a stage is smaller than
+/// that (test rates) — the same formula serves both ends.
+fn lapMargin(capacity: u64) u64 {
+    return @min(Ring.max_write_frames, capacity / 2);
 }
 
 fn waitUntil(m: *Mixer, comptime pred: fn (*Mixer) bool) !void {
@@ -303,11 +315,15 @@ test "the sum is clipped to [-1, 1]" {
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, -1.0 }, &out);
 }
 
-test "a stage that laps the cursor counts one xrun and resumes at the oldest readable frame" {
+test "a stage that laps the cursor counts one xrun and resumes a lap margin inside the readable window" {
     var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 10.0 });
     defer target.deinit();
     // 300 frames in ONE packet against a 200-frame stage (2 s at 100 Hz):
     // frames 0..99 are gone before the mixer's first tick can read them.
+    // The resume point is not the oldest readable frame (100) but
+    // lapMargin() = min(max_write_frames, capacity / 2) = 100 frames
+    // inside it (#46), so a publish landing between the total_written
+    // load and the read cannot fail the tick and charge a second xrun.
     var big: [300]f32 = undefined;
     for (&big, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i + 1)) / 1000.0;
     var src = FakeBackend.init(&.{&big});
@@ -317,16 +333,16 @@ test "a stage that laps the cursor counts one xrun and resumes at the oldest rea
     try m.start();
     try waitUntil(&m, struct {
         fn f(x: *Mixer) bool {
-            return x.frames_written.load(.acquire) == 200;
+            return x.frames_written.load(.acquire) == 100;
         }
     }.f);
     m.stop();
     try std.testing.expectEqual(@as(u32, 1), m.stats().xruns);
-    try std.testing.expectEqual(@as(u64, 300), m.sources[0].cursor); // 100 (oldest valid) + 200 read
-    try std.testing.expectEqual(@as(u64, 200), target.total_written.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 300), m.sources[0].cursor); // 200 (oldest valid + margin) + 100 read
+    try std.testing.expectEqual(@as(u64, 100), target.total_written.load(.acquire));
     var out: [1]f32 = undefined;
     try target.read(0, &out);
-    try std.testing.expectEqual(big[100], out[0]); // the target starts at stage frame 100, not 0
+    try std.testing.expectEqual(big[200], out[0]); // the target starts at stage frame 200, not 100
 }
 
 test "a flush during mixing is drained by the mixer even while the sources are idle; only post-flush frames remain" {
