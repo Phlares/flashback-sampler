@@ -81,6 +81,10 @@ typedef struct FbWavInfo { uint32_t rate; uint16_t channels; uint8_t subtype; ui
  * runs past the frames the FILE holds (a crash-truncated file reports its
  * true prefix, not the header's claim). FB_IO_ERROR: OS errors. */
 FbStatus fb_wav_info(const char *path, FbWavInfo *out);
+
+/* Physical memory: total and currently available bytes; 0 = unknown on this platform. */
+typedef struct FbMemInfo { uint64_t total; uint64_t available; } FbMemInfo;
+void       fb_mem_info(FbMemInfo *out);
 /* out holds n_frames * channels floats (channels from fb_wav_info).
  * out_len is the caller's own count of that buffer (n_frames * channels
  * as the CALLER computed it); FB_INVALID_ARG if it disagrees with the

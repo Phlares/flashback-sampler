@@ -1142,3 +1142,14 @@ def test_flush_confirm_names_the_action_not_a_stale_seconds_figure(qapp, state, 
     assert len(asked) == 1
     assert not any(c.isdigit() for c in asked[0]), asked[0]
     assert "all buffered audio" in asked[0]
+
+
+def test_set_max_footprint_applies_to_state_and_persists(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+
+    saved = []
+    monkeypatch.setattr(tw, "save_max_footprint_mb", saved.append)
+    win = TurntableWindow(state)
+    win._set_max_footprint_mb(0.0)
+    assert state.max_footprint_mb == 0.0
+    assert saved == [0.0]

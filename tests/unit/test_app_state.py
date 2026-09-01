@@ -269,32 +269,79 @@ def test_total_project_ram_includes_checkouts():
     assert st.scratch.resident_bytes == 500 * 4
 
 
-def test_add_slot_rejects_when_over_budget():
+def test_add_slot_rejects_when_over_the_max_footprint():
     from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
-    # Set a tight budget that only fits the initial slot
+    # A footprint that only fits the initial slot
     current = st.total_project_ram_mb()
-    st.set_project_ram_budget_mb(current + 1)  # tiny headroom
+    st.set_max_footprint_mb(current + 1)  # tiny headroom
 
-    with pytest.raises(RuntimeError, match="Project RAM budget exceeded"):
+    with pytest.raises(RuntimeError, match="Max footprint") as info:
         st.add_slot(preset_by_name("FULL"))
+    # The message carries both numbers the user needs to act.
+    assert f"{current + 1:.0f} MB" in str(info.value)
 
 
-def test_add_slot_succeeds_within_budget():
+def test_add_slot_succeeds_within_the_max_footprint():
     from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.set_project_ram_budget_mb(4096.0)
+    st.set_max_footprint_mb(4096.0)
     slot = st.add_slot(preset_by_name("CHAT"))
     assert slot is not None
     assert len(st.slots) == 2
 
 
-def test_set_project_ram_budget_enforces_minimum():
+def test_max_footprint_zero_means_uncapped(monkeypatch):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    import flashback_sampler.app.state as state_mod
+
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.set_project_ram_budget_mb(10)  # below 64 min
-    assert st.project_ram_budget_mb == 64.0
+    st.set_max_footprint_mb(0)
+    assert st.max_footprint_mb == 0.0
+    # Plenty of free memory reported: only the cap could refuse, and there is none.
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1 << 40))
+    assert st.add_slot(preset_by_name("FULL")) is not None
+
+
+def test_max_footprint_negative_floors_to_uncapped():
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_max_footprint_mb(-10)
+    assert st.max_footprint_mb == 0.0
+
+
+def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    import flashback_sampler.app.state as state_mod
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_max_footprint_mb(0)  # uncapped: only the free-memory clause can refuse
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1024 * 1024))  # 1 MB free
+    with pytest.raises(RuntimeError, match="free") as info:
+        st.add_slot(preset_by_name("FULL"))
+    assert "1 MB" in str(info.value)
+
+
+def test_free_memory_clause_is_skipped_when_the_platform_cannot_say(monkeypatch):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    import flashback_sampler.app.state as state_mod
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_max_footprint_mb(0)
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (0, 0))
+    assert st.add_slot(preset_by_name("CHAT")) is not None
+
+
+def test_default_max_footprint_is_a_quarter_of_physical_ram(monkeypatch, tmp_path):
+    import flashback_sampler.app.state as state_mod
+    import flashback_sampler.app.config as cfg
+
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (64 * 1024 ** 3, 32 * 1024 ** 3))
+    monkeypatch.setattr(cfg, "load_max_footprint_mb", lambda *a, **k: k["default"])  # unset pref
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert st.max_footprint_mb == 16384.0
+    st.shutdown()
 
 
 def test_effective_capture_spec_prefers_slot_override():
@@ -670,7 +717,7 @@ def test_adoption_survives_add_slot_refusing_a_foreign_rate(tmp_path, monkeypatc
     import flashback_sampler.app.state as state_mod
 
     def raising_add_slot(self, *a, **k):
-        raise RuntimeError("Project RAM budget exceeded")
+        raise RuntimeError("Max footprint exceeded")
 
     monkeypatch.setattr(state_mod.AppState, "add_slot", raising_add_slot)
     st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
