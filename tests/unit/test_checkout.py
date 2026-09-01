@@ -429,3 +429,58 @@ def test_cleanup_after_create_failure_does_not_mask_the_original_error(scratch, 
     monkeypatch.setattr(scratch, "checkout_destroy", _boom)
     with pytest.raises(RuntimeError, match="could not create checkout"):
         mgr.create(duration_s=0.1)
+
+
+def test_slice_references_the_parent_file_and_is_saved(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    parent = mgr.create(duration_s=0.5)
+    s = mgr.slice(parent.id, 100, 200)
+    assert (s.parent_id, s.path, s.start_frame, s.n_frames, s.state) == (parent.id, parent.path, 100, 200, "saved")
+    assert s.bins["360"].shape == (360, 2, 1)
+    # Bin 0 is empty (360 bins over 200 frames) and stays zero by the
+    # peaks.zig rule, so bin 1 is the first populated one. Both ends are
+    # pinned: bins over the WHOLE parent file would also start at 1100.
+    assert s.bins["360"][1, 0, 0] == pytest.approx(1100.0)  # slice frame 0 = parent frame 100
+    assert s.bins["360"][359, 1, 0] == pytest.approx(1299.0)  # slice frame 199 = parent frame 299
+    assert mgr.file_refcount(parent.path) == 2
+    m = read_manifest(manifest_path(tmp_path, s.id))
+    assert m.parent == parent.id and m.start_frame == 100
+    mgr.discard(parent.id)
+    assert parent.path.exists()
+    audio = native.wav_read(s.path, s.start_frame, s.n_frames)
+    assert audio[0, 0] == pytest.approx(1100.0)
+    mgr.discard(s.id)
+    assert not parent.path.exists()
+
+
+def test_slice_rejects_a_span_past_the_parent_and_a_failed_parent(scratch, tmp_path, monkeypatch):
+    mgr = _mgr(scratch, tmp_path)
+    parent = mgr.create(duration_s=0.5)
+    # `match` is load-bearing: the ENGINE also rejects an out-of-range
+    # span (as a bare ValueError "fb_checkout_slice: invalid_arg"), so an
+    # unmatched pytest.raises(ValueError) passes with Python's own guard
+    # deleted and pins nothing.
+    with pytest.raises(ValueError, match="outside the parent"):
+        mgr.slice(parent.id, 450, 100)
+    monkeypatch.setattr(mgr, "write_state", lambda cid: "failed")
+    with pytest.raises(RuntimeError, match="scratch write failed"):
+        mgr.slice(parent.id, 0, 10)
+
+
+def test_slice_rejects_a_parent_discarded_while_it_waited_for_the_write(scratch, tmp_path, monkeypatch):
+    """R-h8l: the P13 wait holds no lock, so a concurrent discard can
+    land under it. slice must re-look the parent up rather than reuse the
+    handle it fetched before the wait -- that one is freed."""
+    mgr = _mgr(scratch, tmp_path)
+    parent = mgr.create(duration_s=0.5)
+    real_write_state = mgr.write_state
+
+    def discard_under_the_wait(cid):
+        ws = real_write_state(cid)
+        if ws in ("written", "adopted") and cid in mgr._checkouts:
+            mgr.discard(cid)
+        return ws
+
+    monkeypatch.setattr(mgr, "write_state", discard_under_the_wait)
+    with pytest.raises(KeyError):
+        mgr.slice(parent.id, 0, 10)

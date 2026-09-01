@@ -133,6 +133,12 @@ CHECKOUT_CACHE_MB_KEY = "checkout_cache_mb"
 # stay resident; every written root drops to disk).
 DEFAULT_CHECKOUT_CACHE_MB = 0.0
 
+DRAG_HANDLE_MB_KEY = "drag_handle_mb"
+# Extra parent audio a slice drag carries around the slice, half each
+# side. On by default: a DAW user who nudges a marker wants audio there.
+# 0 = the slice alone, for constrained systems.
+DEFAULT_DRAG_HANDLE_MB = 200.0
+
 
 def default_scratch_dir() -> Path:
     """App-owned temp for scratch WAVs + manifests. Separate from the
@@ -192,3 +198,14 @@ def load_checkout_cache_mb(path: Path | None = None) -> float:
 
 def save_checkout_cache_mb(mb: float, path: Path | None = None) -> None:
     set_pref(CHECKOUT_CACHE_MB_KEY, max(0.0, float(mb)), path)
+
+
+def load_drag_handle_mb(path: Path | None = None) -> float:
+    try:
+        return max(0.0, float(get_pref(DRAG_HANDLE_MB_KEY, DEFAULT_DRAG_HANDLE_MB, path)))
+    except (TypeError, ValueError):
+        return DEFAULT_DRAG_HANDLE_MB
+
+
+def save_drag_handle_mb(mb: float, path: Path | None = None) -> None:
+    set_pref(DRAG_HANDLE_MB_KEY, max(0.0, float(mb)), path)

@@ -232,6 +232,58 @@ class CheckoutManager:
                 raise RuntimeError(f"could not create checkout; {e}") from e
         return co
 
+    def slice(self, parent_id: str, start: int, n: int) -> Checkout:
+        """A saved segment `(parent file, start, n)`. Waits for the
+        parent's file: a slice has no RAM copy, so its bins and audio
+        come from disk (plan P13). Raises when the parent's write failed."""
+        parent = self.get(parent_id)
+        if start < 0 or n <= 0 or start + n > parent.n_frames:
+            raise ValueError(f"slice {start}+{n} is outside the parent's {parent.n_frames} frames")
+        # P13, outside self._lock: write_state takes the lock itself and
+        # threading.Lock is not reentrant, and a wait under the lock
+        # would stall every other manager call for up to 30 s.
+        deadline = time.monotonic() + 30.0
+        while True:
+            ws = self.write_state(parent_id)
+            if ws in ("written", "adopted"):
+                break
+            if ws == "failed":
+                raise RuntimeError("scratch write failed for the parent; cannot slice")
+            if time.monotonic() > deadline:
+                raise RuntimeError("timed out waiting for the parent's scratch write")
+            time.sleep(0.005)
+        with self._lock:
+            # R-h8l: re-look the parent up under the lock before touching
+            # its handle. The wait above holds no lock for up to 30 s, so
+            # a concurrent discard() can have freed the handle the `get`
+            # before it returned -- using that is a Zig-side
+            # use-after-free (a crash, not a catchable exception).
+            if parent_id not in self._checkouts:
+                raise KeyError(parent_id)
+            parent = self._checkouts[parent_id]
+            if len(self._checkouts) >= self._max_active:
+                raise RuntimeError(f"Maximum active checkouts reached ({self._max_active})")
+            handle = None
+            try:
+                handle = self._scratch.checkout_slice(parent.handle, int(start), int(n))
+                co = Checkout(
+                    id=uuid.uuid4().hex[:12], handle=handle, path=parent.path,
+                    sample_rate=parent.sample_rate, channels=parent.channels,
+                    n_frames=int(n), start_frame=int(parent.start_frame + start),
+                    abs_sample_start=parent.abs_sample_start + int(start),
+                    abs_sample_end=parent.abs_sample_start + int(start + n),
+                    parent_id=parent.id, state="saved",
+                )
+                co.bins = {str(b): self._scratch.checkout_peak_bins(handle, b) for b in BIN_COUNTS}
+                self._register(co)
+            except (RuntimeError, OSError) as e:
+                # Same rule as adopt_slice: `parent.path` is shared, owned
+                # by the parent checkout's own refcount -- only this
+                # slice's handle is ours to release.
+                _destroy_quietly(self._scratch, handle, None)
+                raise RuntimeError(f"could not slice checkout {parent_id}; {e}") from e
+        return co
+
     def _register(self, co: Checkout) -> None:
         """Lock held. Write the manifest FIRST, then commit to the
         tracking dicts -- if the manifest write raises (a disk error),

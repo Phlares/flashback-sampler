@@ -1,21 +1,36 @@
 """
 Render a checkout into the export pool for an OS drag-out.
 
-Pure Python — no Qt; the write goes through CheckoutManager.save and
-fb_wav_write. The app layer decides when to render (drag-start) and
-what to do afterward (mark saved on drop, delete on cancel); this
-module only owns naming.
+Pure Python — no Qt; the write goes through CheckoutManager and the Zig
+exporter. The app layer decides when to render (drag-start) and what to
+do afterward (mark saved on drop, delete on cancel); this module owns
+naming, the export span policy, and which checkout the drop commits.
+
+Two renderers: `render_root_drag` writes the whole checkout (markers at
+its trim on request, nothing minted); `render_slice_drag` mints a saved
+slice of a trimmed clip and writes the slice plus handle audio around
+it, markers at the slice.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from .checkout import CheckoutManager, CheckoutSubtype
 
 _MAX_COLLISION_SUFFIX = 999
+
+BYTES_PER_SAMPLE = {"FLOAT": 4, "PCM_24": 3, "PCM_16": 2}
+
+
+@dataclass(frozen=True)
+class DragRender:
+    path: Path
+    checkout_id: str  # the checkout the drop commits (a minted slice, or the clip itself)
+    minted: bool      # True when the render created a slice checkout
 
 
 def sanitize_source_name(name: str) -> str:
@@ -41,27 +56,76 @@ def resolve_collision(target: Path) -> Path:
     raise FileExistsError(f"no free collision suffix for {target}")
 
 
-def render_drag_file(
+def export_span(
+    parent_frames: int,
+    slice_start: int,
+    slice_end: int,
+    channels: int,
+    bytes_per_sample: int,
+    handle_mb: float,
+) -> tuple[int, int]:
+    """The parent span to export around a slice: the WHOLE slice plus up
+    to `handle_mb` of extra parent audio, half before and half after,
+    clamped to the parent. The slice is never truncated. 0 = the slice
+    alone; ∞ = the whole parent. A clamp at one edge does not move the
+    other (the file just gets smaller)."""
+    if handle_mb <= 0:
+        return slice_start, slice_end
+    half = (int(handle_mb * 2**20) // (channels * bytes_per_sample)) // 2
+    return max(0, slice_start - half), min(parent_frames, slice_end + half)
+
+
+def _target(pool_dir: Path | str, source_name: str, duration_s: float, now: datetime | None) -> Path:
+    pool = Path(pool_dir)
+    pool.mkdir(parents=True, exist_ok=True)
+    return resolve_collision(pool / drag_filename(source_name, now or datetime.now(), duration_s))
+
+
+def render_root_drag(
     manager: CheckoutManager,
     checkout_id: str,
     pool_dir: Path | str,
     source_name: str,
     *,
     bit_depth: CheckoutSubtype = "FLOAT",
-    trimmed: bool = True,
+    markers_at_trim: bool = False,
     now: datetime | None = None,
-) -> Path:
-    """
-    Write the checkout's (trimmed) audio to the export pool and return
-    the path. Does NOT mark the checkout saved — the caller commits that
-    only once the drop target has accepted the file.
-    """
+) -> DragRender:
+    """The whole checkout, optionally with markers at its trim (the
+    buffer-deck drag: the root IS the segment, its trim the slice).
+    Does NOT mark the checkout saved — the caller commits that only once
+    the drop target has accepted the file."""
     co = manager.get(checkout_id)
-    start, n = co.trim_range() if trimmed else (0, co.n_frames)
-    duration_s = n / co.sample_rate
-    when = now or datetime.now()
-    pool = Path(pool_dir)
-    pool.mkdir(parents=True, exist_ok=True)
-    target = resolve_collision(pool / drag_filename(source_name, when, duration_s))
-    manager.export_range(checkout_id, target, start, n, bit_depth)
-    return target
+    markers = None
+    if markers_at_trim and co.has_trim():
+        start, n = co.trim_range()
+        markers = (start, start + n)
+    target = _target(pool_dir, source_name, co.duration_seconds, now)
+    manager.export_range(checkout_id, target, 0, co.n_frames, bit_depth, markers=markers)
+    return DragRender(target, checkout_id, False)
+
+
+def render_slice_drag(
+    manager: CheckoutManager,
+    checkout_id: str,
+    pool_dir: Path | str,
+    source_name: str,
+    *,
+    bit_depth: CheckoutSubtype = "FLOAT",
+    handle_mb: float = 0.0,
+    now: datetime | None = None,
+) -> DragRender:
+    """The clip-deck drag of a trimmed band: mint a saved slice, export
+    the whole slice plus up to handle_mb of parent audio around it, with
+    markers at the slice. An untrimmed clip has no slice to mint: the
+    whole clip goes."""
+    co = manager.get(checkout_id)
+    if not co.has_trim():
+        return render_root_drag(manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, now=now)
+    start, n = co.trim_range()
+    s = manager.slice(checkout_id, start, n)
+    lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
+    target = _target(pool_dir, source_name, n / co.sample_rate, now)
+    # Markers are relative to the EXPORTED file, so rebase by lo.
+    manager.export_range(checkout_id, target, lo, hi - lo, bit_depth, markers=(start - lo, start + n - lo))
+    return DragRender(target, s.id, True)

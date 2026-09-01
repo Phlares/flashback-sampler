@@ -180,3 +180,13 @@ def test_max_footprint_roundtrip_unset_means_default_and_zero_means_uncapped(tmp
     assert config.load_max_footprint_mb(p, default=1234.0) == 0.0  # 0 = uncapped, kept
     config.save_max_footprint_mb(-5, p)
     assert config.load_max_footprint_mb(p, default=1234.0) == 0.0  # negative floors to uncapped
+
+
+def test_drag_handle_mb_defaults_200_and_floors_at_zero(tmp_path):
+    from flashback_sampler.app import config
+    p = tmp_path / "c.json"
+    assert config.load_drag_handle_mb(p) == 200.0  # on by default (best out-of-the-box UX); a tunable for constrained systems
+    config.save_drag_handle_mb(0, p)
+    assert config.load_drag_handle_mb(p) == 0.0
+    config.save_drag_handle_mb(-1, p)
+    assert config.load_drag_handle_mb(p) == 0.0
