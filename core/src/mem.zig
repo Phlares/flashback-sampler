@@ -62,10 +62,13 @@ fn queryLinux() Info {
 
 test "query reports a total and an available count that fits inside it" {
     const m = query();
-    try std.testing.expect(m.total > 0);
     try std.testing.expect(m.available <= m.total);
-    // The two platforms with a free-memory source must report one.
-    if (builtin.os.tag == .windows or builtin.os.tag == .linux) try std.testing.expect(m.available > 0);
+    // The two platforms this file queries directly must report both;
+    // elsewhere total comes from std and 0 (unknown) is a legal answer.
+    if (builtin.os.tag == .windows or builtin.os.tag == .linux) {
+        try std.testing.expect(m.total > 0);
+        try std.testing.expect(m.available > 0);
+    }
 }
 
 test "MEMORYSTATUSEX is 64 bytes, the size Win32 versions the call on" {
