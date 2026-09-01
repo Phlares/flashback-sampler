@@ -213,3 +213,38 @@ def test_render_slice_drag_cleans_up_the_wav_and_the_slice_when_the_sidecar_fail
     assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.alc")) == []
     assert [c.id for c in mgr.list()] == [co.id]
     assert co.path.exists()
+
+
+def test_render_root_drag_unlinks_the_wav_when_the_export_fails(scratch, tmp_path, monkeypatch):
+    """A reported failure must leave nothing in the pool: a part-written
+    WAV is a file the caller was never told about and cannot delete."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    pool = tmp_path / "pool"
+
+    def boom(checkout_id, target, *a, **kw):
+        target.write_bytes(b"RIFF part")
+        raise RuntimeError("could not export checkout; the disk is full")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        render_root_drag(mgr, co.id, pool, "x", now=WHEN)
+    assert list(pool.glob("*")) == []
+
+
+def test_export_touches_no_sidecar_path_when_the_pref_is_off(scratch, tmp_path, monkeypatch):
+    """With alc off there is no sidecar to write or clean up, so a
+    failing export must not go near a .alc path at all."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    # A pre-existing .alc that a blanket cleanup would delete.
+    bystander = pool / "x_20260715-130509_0.5s.alc"
+    bystander.write_bytes(b"someone else's clip")
+
+    def boom(*a, **kw):
+        raise RuntimeError("could not export checkout; the disk is full")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        render_root_drag(mgr, co.id, pool, "x", now=WHEN)
+    assert bystander.exists()

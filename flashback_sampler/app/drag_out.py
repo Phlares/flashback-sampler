@@ -9,6 +9,7 @@ checkout state) lives in the window controller.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -20,8 +21,11 @@ from PySide6.QtWidgets import QWidget
 def _as_paths(file_path: Path | str | Iterable[Path | str]) -> list[Path]:
     """One path or several. A drag can carry more than one file (a WAV
     plus its Ableton sidecar) and every call site that offers one should
-    not have to wrap it."""
-    if isinstance(file_path, (str, Path)):
+    not have to wrap it. `os.PathLike` covers Path and any other
+    `__fspath__` object -- without it a scalar that is not a str or a
+    Path falls through to the iterable branch and is read one character
+    at a time."""
+    if isinstance(file_path, (str, os.PathLike)):
         return [Path(file_path)]
     return [Path(p) for p in file_path]
 

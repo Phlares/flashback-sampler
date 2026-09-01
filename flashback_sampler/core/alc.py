@@ -77,10 +77,15 @@ def _attr(text: str) -> str:
 
 
 def _num(value: float) -> str:
-    """Live writes whole numbers without a decimal point; `repr` matches
-    the precision the capture shows for the rest."""
+    """Live writes whole numbers without a decimal point and everything
+    else as a plain decimal -- the capture holds no exponent anywhere, so
+    `repr` is wrong for small values (a one-frame offset at 48 kHz is
+    `2.0833333333333333e-05`). 15 decimal places reproduce the capture's
+    own `10.666666666666666` and `10.0146484375` exactly."""
     f = float(value)
-    return str(int(f)) if f.is_integer() else repr(f)
+    if f.is_integer():
+        return str(int(f))
+    return f"{f:.15f}".rstrip("0").rstrip(".")
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -152,6 +157,12 @@ def write_alc(
         rate=int(rate),
         size=wav_path.stat().st_size,
     )
-    with gzip.open(target, "wb") as fh:
-        fh.write(xml.encode("utf-8"))
+    try:
+        with gzip.open(target, "wb") as fh:
+            fh.write(xml.encode("utf-8"))
+    except BaseException:
+        # Own the file this function created: a truncated .alc left for
+        # the drag to offer is worse than no sidecar at all.
+        target.unlink(missing_ok=True)
+        raise
     return target

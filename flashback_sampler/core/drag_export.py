@@ -95,19 +95,22 @@ def _export(
     """Write the WAV, then the `.alc` sidecar when one was asked for and
     there are markers to put in it. Returns the sidecar path or None.
 
-    Any failure unlinks both files before re-raising: the caller is told
-    the render failed and never receives a DragRender, so anything left
-    in the pool is a file nobody owns. `markers` are frames into the
-    EXPORTED file; the sidecar wants them in seconds."""
-    sidecar = target.with_suffix(".alc")
+    A failure unlinks the WAV before re-raising: the caller is told the
+    render failed and never receives a DragRender, so anything left in
+    the pool is a file nobody owns. The sidecar cleans up after itself
+    (`write_alc`), so this never deletes a `.alc` it did not write.
+    `markers` are frames into the EXPORTED file; the sidecar wants them
+    in seconds."""
     try:
         manager.export_range(checkout_id, target, lo, n, bit_depth, markers=markers)
         if not (alc and markers):
             return None
-        return write_alc(sidecar, target, markers[0] / rate, markers[1] / rate, frames=n, rate=rate)
+        return write_alc(
+            target.with_suffix(".alc"), target,
+            markers[0] / rate, markers[1] / rate, frames=n, rate=rate,
+        )
     except BaseException:
         target.unlink(missing_ok=True)
-        sidecar.unlink(missing_ok=True)
         raise
 
 

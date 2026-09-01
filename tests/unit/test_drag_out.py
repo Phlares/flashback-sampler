@@ -69,3 +69,17 @@ def test_perform_file_drag_forwards_a_list(qapp, tmp_path):
 
     assert perform_file_drag(QWidget(), [wav, alc], exec_fn=fake_exec) is True
     assert len(seen["urls"]) == 2
+
+
+def test_build_file_drag_mime_accepts_any_path_like(qapp, tmp_path):
+    """A scalar that is not a str or a Path (an os.PathLike wrapper) must
+    be taken as ONE path, not iterated character by character."""
+    f = tmp_path / "slice.wav"
+    f.write_bytes(b"")
+
+    class Wrapper:
+        def __fspath__(self):
+            return str(f)
+
+    urls = build_file_drag_mime(Wrapper()).urls()
+    assert [Path(u.toLocalFile()) for u in urls] == [f.resolve()]
