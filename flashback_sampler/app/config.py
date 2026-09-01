@@ -160,6 +160,11 @@ DEFAULT_FOOTPRINT_FRACTION = 0.25
 
 
 def default_max_footprint_mb(total_physical_bytes: int) -> float:
+    """25 % of physical RAM. A platform that cannot report its RAM passes
+    0 and gets 0 = no cap, deliberately: with no number to reason from,
+    the engine's own out_of_memory at ring creation is the only honest
+    guard, and a made-up floor would refuse machines it knows nothing
+    about."""
     return float(total_physical_bytes) * DEFAULT_FOOTPRINT_FRACTION / (1024 * 1024)
 
 

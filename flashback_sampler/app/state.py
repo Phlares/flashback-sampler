@@ -217,7 +217,7 @@ class AppState:
         capture into); a slice goes where its parent went. Anything
         unreadable, without audio, or that fails anywhere in adoption
         (a corrupt-but-parseable manifest, a locked `.part` rename, a
-        RAM-budget refusal for a new slot, ...) is skipped and left on
+        max-footprint refusal for a new slot, ...) is skipped and left on
         disk -- no on-disk artefact may abort a launch. Crash and quit
         take this same path."""
         adopted: list[Checkout] = []
