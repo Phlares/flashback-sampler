@@ -4,7 +4,7 @@ WaveformView — the recessed "glass screen" that shows peak-bin data.
 Paints directly via QPainter so we get pixel-perfect hairlines and an
 inset recess effect that QSS box-shadow can't emulate in Qt. Consumes
 the (n_bins, 2, channels) ndarray produced by
-AudioCircularBuffer.get_peak_bins().
+NativeAudioCircularBuffer.get_peak_bins().
 """
 
 from __future__ import annotations

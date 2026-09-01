@@ -1,21 +1,21 @@
 """
 CaptureSource Protocol conformance tests.
 
-Verifies that the existing AudioCapture / LoopbackCapture classes
-structurally satisfy the Protocol, and that the fake capture sources
-under tests/fixtures/fake_capture.py also conform.
+Verifies that NativeCaptureSource structurally satisfies the Protocol,
+and that the fake capture sources under tests/fixtures/fake_capture.py
+also conform.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.capture_source import CaptureSource
 
 
-def _minimal_buffer() -> AudioCircularBuffer:
-    return AudioCircularBuffer(duration_seconds=0.5, sample_rate=1000, channels=1)
+def _minimal_buffer() -> NativeAudioCircularBuffer:
+    return NativeAudioCircularBuffer(duration_seconds=0.5, sample_rate=1000, channels=1)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ def test_fake_no_thread_start_stop_updates_is_running():
 
 def test_fake_no_thread_fill_writes_to_buffer():
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
-    buf = AudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
+    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     src = FakeCaptureSourceNoThread(buf, sample_rate=1000, channels=1)
     src.start()
     src.fill(0.5)  # 500 samples
@@ -69,27 +69,19 @@ def test_fake_no_thread_xrun_counter_starts_at_zero_and_increments():
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_audio_capture_conforms_without_starting():
-    """
-    We don't start() the stream — that would touch PortAudio. We only
-    verify the class has all the required protocol members.
-    """
-    from flashback_sampler.core.capture import AudioCapture
+def test_native_capture_source_conforms_without_starting(monkeypatch):
+    from flashback_sampler.core import native
+    from flashback_sampler.core.native_capture import NativeCaptureSource
 
-    src = AudioCapture(_minimal_buffer(), sample_rate=1000, channels=1)
+    class _Lib:
+        def __getattr__(self, name):
+            return lambda *a: 1 if name == "fb_capture_create" else None
+
+    monkeypatch.setattr(native, "_lib", _Lib())
+    monkeypatch.setattr(native, "_lib_tried", True)
+
+    class _Buf:
+        _h = 1
+
+    src = NativeCaptureSource(_Buf(), kind="loopback")
     assert isinstance(src, CaptureSource)
-    assert src.is_running() is False
-    assert src.xrun_count() == 0
-
-
-def test_loopback_capture_conforms_without_starting():
-    """
-    Importing LoopbackCapture pulls in `soundcard` lazily. We only
-    construct it, we don't start it.
-    """
-    from flashback_sampler.core.loopback_capture import LoopbackCapture
-
-    src = LoopbackCapture(_minimal_buffer(), sample_rate=1000, channels=1)
-    assert isinstance(src, CaptureSource)
-    assert src.is_running() is False
-    assert src.xrun_count() == 0

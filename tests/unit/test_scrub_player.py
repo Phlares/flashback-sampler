@@ -1,300 +1,203 @@
-"""
-Unit tests for ScrubPlayer — the callback-driven preview player used to
-audition checked-out clips.
-
-These tests drive the audio callback directly with numpy buffers; no real
-audio device is opened. The `open()` / `close()` wrappers that create an
-actual sounddevice OutputStream are covered only by the opt-in audio_hw
-integration tests.
-"""
-
-from __future__ import annotations
-
-import threading
-import time
+"""NativeScrubPlayer over a FAKE ctypes library. No DLL, no device: every
+fb_playback_* symbol is a Python stub that records calls and serves a
+scripted state. The fill logic lives in Zig (core/src/Playback.zig) and
+is tested there."""
+import ctypes as C
 
 import numpy as np
 import pytest
 
-from flashback_sampler.core.scrub_player import ScrubPlayer
+from flashback_sampler.core import native
+from flashback_sampler.core.scrub_player import NativeScrubPlayer
 
 
-def _ramp(n: int, channels: int = 1, start: float = 0.0) -> np.ndarray:
-    """Monotonic float ramp — each sample equals its absolute index."""
-    arr = np.arange(start, start + n, dtype=np.float32)
-    return np.tile(arr[:, None], (1, channels))
+class _FakePlaybackLib:
+    def __init__(self):
+        self.calls = []
+        self.state = (0, 0, 0, 0, 0)  # running, playing, cursor, clip_frames, mix_rate
+        self.bind_status = 0
+        self.play_status = 0
+        self.err = b""
+        self.bound = None  # (frames ndarray copy, n_frames, rate, channels)
+        self.bound_checkout = None  # (checkout_handle, start, n)
+
+    def __getattr__(self, name):
+        def _fn(*a):
+            self.calls.append((name, a))
+            if name == "fb_playback_create":
+                return 0xF00D
+            if name == "fb_playback_bind_checkout":
+                _h, _s, co, start, n = a
+                assert _h is not None, "fb_playback_bind_checkout called with a closed/None handle"
+                self.bound_checkout = (co, start, n)
+                if self.bind_status == 0:
+                    self.state = self.state[:3] + (n, self.state[4])
+                return self.bind_status
+            if name == "fb_playback_bind":
+                _h, ptr, n, rate, ch = a
+                assert _h is not None, "fb_playback_bind called with a closed/None handle"
+                arr = np.ctypeslib.as_array(ptr, shape=(n * ch,)).copy() if n else np.zeros(0, np.float32)
+                self.bound = (arr, n, rate, ch)
+                if self.bind_status == 0:
+                    self.state = self.state[:3] + (n, self.state[4])
+                return self.bind_status
+            if name == "fb_playback_play":
+                if self.play_status == 0:
+                    self.state = (1, 1) + self.state[2:]  # a real play() spawns and sets playing
+                return self.play_status
+            if name == "fb_playback_state":
+                st = a[1]._obj if hasattr(a[1], "_obj") else a[1]
+                st.running, st.playing, st.cursor, st.clip_frames, st.mix_rate = self.state
+            if name == "fb_playback_last_error":
+                return self.err
+            return None
+        return _fn
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# Empty / idle states
-# ─────────────────────────────────────────────────────────────────────────
+@pytest.fixture
+def lib(monkeypatch):
+    fake = _FakePlaybackLib()
+    monkeypatch.setattr(native, "_lib", fake)
+    monkeypatch.setattr(native, "_lib_tried", True)
+    return fake
 
 
-def test_new_player_has_no_source_and_is_not_playing():
-    sp = ScrubPlayer(sample_rate=1000, channels=2)
-    assert sp.cursor_samples == 0
-    assert sp.is_playing is False
+def _calls(lib, name):
+    return [a for n, a in lib.calls if n == name]
 
 
-def test_callback_with_no_source_zero_fills_output():
-    sp = ScrubPlayer(sample_rate=1000, channels=2)
-    out = np.ones((128, 2), dtype=np.float32)
-    sp._audio_callback(out, 128, None, None)
-    assert np.all(out == 0.0)
+def test_create_is_lazy_and_first_bind_passes_rate_channels_and_device(lib):
+    p = NativeScrubPlayer(44_100, 1, device="{hp}")
+    assert not _calls(lib, "fb_playback_create")
+    p.bind(np.zeros(4, dtype=np.float32), 44_100)
+    assert _calls(lib, "fb_playback_create") == [(b"{hp}", 44_100, 1)]
+    p.bind(np.zeros(4, dtype=np.float32), 44_100)
+    assert len(_calls(lib, "fb_playback_create")) == 1  # created once, reused
 
 
-def test_callback_while_paused_zero_fills_and_does_not_advance():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(500, channels=1))
-    # bind() leaves the player paused by default
-    out = np.ones((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)
-    assert np.all(out == 0.0)
-    assert sp.cursor_samples == 0
+def test_construct_without_library_is_silent_and_the_first_native_call_raises(monkeypatch):
+    """AppState builds a player at startup before any clip exists, so
+    construction must not touch the native library; only a call that
+    needs the handle may raise."""
+    monkeypatch.setattr(native, "_lib", None)
+    monkeypatch.setattr(native, "_lib_tried", True)
+    p = NativeScrubPlayer()
+    with pytest.raises(RuntimeError):
+        p.bind(np.zeros(4, dtype=np.float32), 48_000)
+    with pytest.raises(RuntimeError):
+        p.play()
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# Normal playback
-# ─────────────────────────────────────────────────────────────────────────
+def test_bind_passes_frames_rate_channels_and_updates_attributes(lib):
+    p = NativeScrubPlayer(48_000, 2)
+    audio = np.arange(6, dtype=np.float32).reshape(3, 2)
+    p.bind(audio, 96_000)
+    arr, n, rate, ch = lib.bound
+    assert (n, rate, ch) == (3, 96_000, 2)
+    np.testing.assert_array_equal(arr, audio.ravel())
+    assert p.sample_rate == 96_000 and p.channels == 2
+    assert p.source_length_samples == 3
 
 
-def test_callback_fills_from_cursor_and_advances():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(1000, channels=1))
-    sp.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)
-    assert np.array_equal(out[:, 0], np.arange(100, dtype=np.float32))
-    assert sp.cursor_samples == 100
+def test_bind_reshapes_mono_1d_to_one_channel(lib):
+    p = NativeScrubPlayer(48_000, 2)
+    p.bind(np.zeros(4, dtype=np.float32), 48_000)
+    assert lib.bound[1:] == (4, 48_000, 1)
+    assert p.channels == 1
 
 
-def test_successive_callbacks_stream_contiguous_audio():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(1000, channels=1))
-    sp.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)
-    first = out.copy()
-    sp._audio_callback(out, 100, None, None)
-    second = out.copy()
-    assert np.array_equal(first[:, 0], np.arange(0, 100, dtype=np.float32))
-    assert np.array_equal(second[:, 0], np.arange(100, 200, dtype=np.float32))
-    assert sp.cursor_samples == 200
-
-
-def test_stereo_playback_passes_through_both_channels():
-    sp = ScrubPlayer(sample_rate=1000, channels=2)
-    src = _ramp(500, channels=2)
-    sp.bind(src)
-    sp.play()
-    out = np.zeros((50, 2), dtype=np.float32)
-    sp._audio_callback(out, 50, None, None)
-    assert np.array_equal(out, src[:50])
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# End-of-source behavior (auto-stop, no loop)
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def test_callback_at_exact_end_fills_nothing_and_stops():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(100, channels=1))
-    sp.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)  # drains source exactly
-    # Request more — should zero-fill and not be playing
-    out2 = np.ones((50, 1), dtype=np.float32)
-    sp._audio_callback(out2, 50, None, None)
-    assert np.all(out2 == 0.0)
-    assert sp.is_playing is False
-    assert sp.cursor_samples == 100
-
-
-def test_partial_final_callback_fills_remaining_zero_pads_rest_and_stops():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(110, channels=1))
-    sp.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)  # cursor at 100
-    out2 = np.zeros((50, 1), dtype=np.float32)
-    sp._audio_callback(out2, 50, None, None)  # 10 real + 40 zero-padded
-    assert np.array_equal(out2[:10, 0], np.arange(100, 110, dtype=np.float32))
-    assert np.all(out2[10:] == 0.0)
-    assert sp.is_playing is False
-    assert sp.cursor_samples == 110
-
-
-def test_play_after_drain_rewinds_to_zero():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(100, channels=1))
-    sp.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)
-    assert sp.cursor_samples == 100
-    # Auto-stopped at end; user hits play again
-    sp.play()
-    assert sp.cursor_samples == 0
-    assert sp.is_playing is True
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Seek / scrub
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def test_seek_samples_jumps_cursor_and_next_callback_starts_there():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(1000, channels=1))
-    sp.play()
-    sp.seek_samples(500)
-    out = np.zeros((50, 1), dtype=np.float32)
-    sp._audio_callback(out, 50, None, None)
-    assert np.array_equal(out[:, 0], np.arange(500, 550, dtype=np.float32))
-    assert sp.cursor_samples == 550
-
-
-def test_seek_seconds_is_samples_times_sample_rate():
-    sp = ScrubPlayer(sample_rate=48_000, channels=1)
-    sp.bind(_ramp(48_000, channels=1))
-    sp.seek(0.25)  # 25% of a 1-second clip
-    assert sp.cursor_samples == 12_000
-
-
-def test_seek_clamped_to_source_bounds():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(500, channels=1))
-    sp.seek_samples(-100)
-    assert sp.cursor_samples == 0
-    sp.seek_samples(9999)
-    assert sp.cursor_samples == 500
-
-
-def test_cursor_seconds_property():
-    sp = ScrubPlayer(sample_rate=48_000, channels=1)
-    sp.bind(_ramp(48_000, channels=1))
-    sp.seek_samples(24_000)
-    assert sp.cursor_seconds == pytest.approx(0.5)
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Bind / stop — source lifecycle
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def test_bind_resets_cursor_and_pauses():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(1000, channels=1))
-    sp.play()
-    out = np.zeros((100, 1), dtype=np.float32)
-    sp._audio_callback(out, 100, None, None)
-    assert sp.cursor_samples == 100
-    # Bind a new source — cursor resets and player pauses
-    sp.bind(np.full((500, 1), 7.0, dtype=np.float32))
-    assert sp.cursor_samples == 0
-    assert sp.is_playing is False
-    # Next callback yields zeros until play() is called again
-    out2 = np.ones((50, 1), dtype=np.float32)
-    sp._audio_callback(out2, 50, None, None)
-    assert np.all(out2 == 0.0)
-    sp.play()
-    sp._audio_callback(out2, 50, None, None)
-    assert np.all(out2 == 7.0)
-
-
-def test_stop_zero_fills_and_clears_source():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    sp.bind(_ramp(500, channels=1))
-    sp.play()
-    sp.stop()
-    assert sp.is_playing is False
-    assert sp.cursor_samples == 0
-    out = np.ones((50, 1), dtype=np.float32)
-    sp._audio_callback(out, 50, None, None)
-    assert np.all(out == 0.0)
-
-
-def test_channel_mismatch_raises():
-    sp = ScrubPlayer(sample_rate=1000, channels=2)
-    mono = _ramp(500, channels=1)
-    with pytest.raises(ValueError, match="channels"):
-        sp.bind(mono)
-
-
-def test_1d_input_raises():
-    sp = ScrubPlayer(sample_rate=1000, channels=1)
-    flat = np.arange(500, dtype=np.float32)
+def test_bind_status_invalid_arg_raises_value_error(lib):
+    lib.bind_status = native._INVALID_ARG
     with pytest.raises(ValueError):
-        sp.bind(flat)
+        NativeScrubPlayer().bind(np.zeros((2, 3), dtype=np.float32), 48_000)
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# Concurrency — seek and callback on different threads
-# ─────────────────────────────────────────────────────────────────────────
+def test_bind_status_out_of_memory_raises_memory_error(lib):
+    lib.bind_status = native._OUT_OF_MEMORY
+    with pytest.raises(MemoryError):
+        NativeScrubPlayer().bind(np.zeros((2, 2), dtype=np.float32), 48_000)
 
 
-def test_set_device_updates_attribute():
-    sp = ScrubPlayer(sample_rate=48_000, channels=2)
-    assert sp.device is None
-    sp.set_device(7)
-    assert sp.device == 7
-    # Idempotent: setting to same value is a no-op
-    sp.set_device(7)
-    assert sp.device == 7
-    # None is valid (means "default device")
-    sp.set_device(None)
-    assert sp.device is None
+def test_play_pause_forward_and_play_failure_raises(lib):
+    p = NativeScrubPlayer()
+    p.play()
+    p.pause()
+    assert [n for n, _ in lib.calls[-2:]] == ["fb_playback_play", "fb_playback_pause"]
+    lib.play_status = native._IO_ERROR
+    lib.err = b"open failed: DeviceNotFound"
+    with pytest.raises(RuntimeError, match="DeviceNotFound"):
+        p.play()
 
 
-def test_set_device_does_not_require_open_stream():
-    """
-    Changing the device on a ScrubPlayer that never opened its
-    sounddevice stream should be a pure attribute update — no error.
-    """
-    sp = ScrubPlayer(sample_rate=48_000, channels=2)
-    source = np.zeros((1000, 2), dtype=np.float32)
-    sp.bind(source)
-    sp.play()
-    sp.set_device(3)  # no real stream to close
-    assert sp.device == 3
-    # Internal state is consistent — source still bound
-    assert sp.source_length_samples == 1000
+def test_stop_is_pause_then_seek_zero(lib):
+    p = NativeScrubPlayer()
+    p.play()  # materialize the handle; pause/seek are inert without one
+    p.stop()
+    assert [(n, a[1:]) for n, a in lib.calls[-2:]] == [("fb_playback_pause", ()), ("fb_playback_seek", (0,))]
 
 
-@pytest.mark.timeout(5)
-def test_concurrent_seek_during_callback_is_safe():
-    sp = ScrubPlayer(sample_rate=48_000, channels=2)
-    src = np.zeros((48_000 * 5, 2), dtype=np.float32)
-    # Mark each sample with its index so we can verify contiguous reads
-    src[:, 0] = np.arange(len(src), dtype=np.float32)
-    src[:, 1] = np.arange(len(src), dtype=np.float32)
-    sp.bind(src)
-    sp.play()
+def test_seek_samples_clamps_negative_to_zero_and_passes_through(lib):
+    p = NativeScrubPlayer()
+    p.play()  # materialize the handle
+    p.seek_samples(-5)
+    p.seek_samples(123)
+    assert [a[1] for a in _calls(lib, "fb_playback_seek")] == [0, 123]
 
-    stop = threading.Event()
-    errors: list[BaseException] = []
 
-    def callback_loop():
-        out = np.zeros((1024, 2), dtype=np.float32)
-        try:
-            while not stop.is_set():
-                sp._audio_callback(out, 1024, None, None)
-                if not sp.is_playing:
-                    sp.play()
-        except BaseException as e:  # pragma: no cover
-            errors.append(e)
+def test_seek_seconds_uses_the_bound_rate(lib):
+    p = NativeScrubPlayer(48_000, 2)
+    p.bind(np.zeros((10, 2), dtype=np.float32), 1_000)
+    p.seek(0.25)
+    assert _calls(lib, "fb_playback_seek")[-1][1] == 250
 
-    t = threading.Thread(target=callback_loop, daemon=True)
-    t.start()
 
-    rng = np.random.default_rng(42)
-    deadline = time.monotonic() + 0.3
-    seeks = 0
-    while time.monotonic() < deadline:
-        sp.seek_samples(int(rng.integers(0, 48_000 * 4)))
-        seeks += 1
+def test_state_properties_read_native_state(lib):
+    p = NativeScrubPlayer(48_000, 2)
+    p.bind(np.zeros((500, 2), dtype=np.float32), 1_000)
+    lib.state = (1, 1, 250, 500, 48_000)
+    assert p.is_playing is True
+    assert p.cursor_samples == 250
+    assert p.cursor_seconds == 0.25
+    assert p.source_length_samples == 500
+    lib.state = (1, 0, 500, 500, 48_000)
+    assert p.is_playing is False
 
-    stop.set()
-    t.join(timeout=1.0)
-    assert errors == []
-    assert seeks > 100
+
+def test_set_device_before_the_handle_reaches_create_and_after_it_forwards(lib):
+    p = NativeScrubPlayer()
+    p.set_device("{spk}")  # AppState does this at startup, before any play
+    assert p.device == "{spk}"
+    assert not _calls(lib, "fb_playback_set_device")
+    p.play()
+    assert _calls(lib, "fb_playback_create") == [(b"{spk}", 48_000, 2)]
+    p.set_device("{hp}")
+    assert _calls(lib, "fb_playback_set_device") == [(0xF00D, b"{hp}")]
+
+
+def test_last_error_none_when_empty(lib):
+    p = NativeScrubPlayer()
+    p.play()  # materialize the handle
+    assert p.last_error() is None
+    lib.err = b"stream failed: ActivationFailed"
+    assert p.last_error() == "stream failed: ActivationFailed"
+
+
+def test_close_destroys_once_and_is_inert_after(lib):
+    p = NativeScrubPlayer()
+    p.play()  # materialize the handle
+    p.close()
+    p.close()
+    assert len(_calls(lib, "fb_playback_destroy")) == 1
+    p.pause()  # inert, no call
+    assert not _calls(lib, "fb_playback_pause")
+    assert p.is_playing is False and p.cursor_samples == 0
+
+
+def test_bind_after_close_is_inert_and_never_recreates_the_handle(lib):
+    p = NativeScrubPlayer()
+    p.play()  # materialize the handle
+    p.close()
+    p.bind(np.zeros((4, 1), dtype=np.float32), 48_000)  # neither crashes nor reaches the fake
+    assert not _calls(lib, "fb_playback_bind")
+    # Lazy creation must not resurrect a closed player.
+    assert len(_calls(lib, "fb_playback_create")) == 1

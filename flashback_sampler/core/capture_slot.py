@@ -24,7 +24,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .buffer import RingDerivedOps, make_ring_buffer
+from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
+
 from .capture_source import CaptureSource
 from .checkout import CheckoutManager
 from .quality_presets import (
@@ -41,8 +42,7 @@ class CaptureSlot:
       - a named identity (id, user-given label)
       - the resolved audio shape (sample_rate, channels, buffer_seconds,
         quality_preset name)
-      - its own ring buffer (AudioCircularBuffer or NativeAudioCircularBuffer,
-        whichever make_ring_buffer's factory returns) + CheckoutManager
+      - its own ring buffer (NativeAudioCircularBuffer) + CheckoutManager
       - an optional live CaptureSource (None until start_capture is
         called by the app layer)
       - per-slot transport state so each slot remembers its own anchor
@@ -62,14 +62,14 @@ class CaptureSlot:
     channels: int
     buffer_seconds: float
     quality_preset: str  # name of the QualityPreset used (for display / presets)
-    buffer: RingDerivedOps
+    buffer: NativeAudioCircularBuffer
     checkout_manager: CheckoutManager
     capture_source: Optional[CaptureSource] = None
     # Per-slot capture routing. `capture_specs` is the canonical list:
     # empty means follow AppState's global spec; one entry means a
-    # standard single-source route; two-or-more entries means the slot
-    # should be built as a MixedCaptureSource so all listed inputs mix
-    # into the same buffer (RAM-efficient multi-source capture).
+    # standard single-source route; two-or-more entries are passed to
+    # one Zig mixer (`NativeMixedSource`) that sums them into the same
+    # buffer (RAM-efficient multi-source capture).
     capture_specs: list = field(default_factory=list)
     anchor_offset_s: float = 0.0
     duration_preset_idx: int = 4  # default 3:00 on the 8-preset cluster
@@ -113,7 +113,9 @@ class CaptureSlot:
         preset: QualityPreset,
         name: str = "",
         max_active_checkouts: int = 16,
-        max_total_ram_mb: float = 1024.0,
+        *,
+        scratch: NativeScratch,
+        scratch_dir,
     ) -> "CaptureSlot":
         """
         Build a new slot from a QualityPreset. The ring buffer and
@@ -121,15 +123,17 @@ class CaptureSlot:
         source is left None (the app layer attaches one when the user
         picks a device).
         """
-        buf = make_ring_buffer(
+        buf = NativeAudioCircularBuffer(
             duration_seconds=preset.buffer_seconds,
             sample_rate=preset.sample_rate,
             channels=preset.channels,
         )
         mgr = CheckoutManager(
             buffer=buf,
+            scratch=scratch,
+            scratch_dir=scratch_dir,
+            slot_name=name or preset.name,
             max_active_checkouts=max_active_checkouts,
-            max_total_ram_mb=max_total_ram_mb,
         )
         return cls(
             id=uuid.uuid4().hex[:12],
@@ -202,8 +206,8 @@ class CaptureSlot:
 
     def ram_bytes(self) -> int:
         """
-        RAM held by THIS slot's ring buffer (excluding checkouts —
-        those are tracked separately by the CheckoutManager's cap).
+        RAM held by THIS slot's ring buffer (excluding checkouts — the
+        scratch cache accounts for those).
         """
         return compute_ram_bytes(
             self.sample_rate, self.channels, self.buffer_seconds

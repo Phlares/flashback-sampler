@@ -3,7 +3,7 @@ Fake CaptureSource implementations for unit tests.
 
 These satisfy `flashback_sampler.core.capture_source.CaptureSource`
 structurally — they have the right methods and attributes — so tests
-can inject them without pulling in soundcard / sounddevice.
+can inject them without touching the Zig capture backend.
 """
 
 from __future__ import annotations
@@ -13,19 +13,17 @@ import time
 
 import numpy as np
 
-from flashback_sampler.core.buffer import AudioCircularBuffer
-
 
 class SilenceCaptureSource:
     """
-    Background thread that writes zero-filled frames into an
-    AudioCircularBuffer at a simulated real-time rate. Useful for
-    running the rest of the pipeline headless without any signal.
+    Background thread that writes zero-filled frames into any ring with
+    `write(frames)` at a simulated real-time rate. Useful for running
+    the rest of the pipeline headless without any signal.
     """
 
     def __init__(
         self,
-        buffer: AudioCircularBuffer,
+        buffer,
         sample_rate: int = 48_000,
         channels: int = 2,
         blocksize: int = 512,
@@ -88,7 +86,7 @@ class FakeCaptureSourceNoThread:
 
     def __init__(
         self,
-        buffer: AudioCircularBuffer,
+        buffer,
         sample_rate: int = 48_000,
         channels: int = 2,
     ):

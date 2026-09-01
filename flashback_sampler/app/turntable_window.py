@@ -33,10 +33,12 @@ from flashback_sampler.app.config import (
     load_export_bit_depth,
     load_export_pool_dir,
     load_global_hotkeys_enabled,
+    load_scratch_dir,
     load_show_notifications,
     save_export_bit_depth,
     save_export_pool_dir,
     save_global_hotkeys_enabled,
+    save_scratch_dir,
     save_show_notifications,
 )
 from flashback_sampler.app.drag_out import perform_file_drag
@@ -79,29 +81,6 @@ _SILENCE_MAG = 10.0 ** (SILENCE_DBFS / 20.0)
 
 SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
 SELECTION_COLOR_CLIP = "#FF9500"     # orange
-
-
-def _peak_bins_from_audio(audio: np.ndarray, n_bins: int) -> np.ndarray:
-    """Same shape as AudioCircularBuffer.get_peak_bins but operating on
-    a static (N, channels) array — used to render a checkout's fixed audio."""
-    if audio.ndim == 1:
-        audio = audio[:, np.newaxis]
-    n = int(audio.shape[0])
-    channels = int(audio.shape[1])
-    out = np.zeros((n_bins, 2, channels), dtype=np.float32)
-    if n == 0:
-        return out
-    edges = np.linspace(0, n, n_bins + 1, dtype=np.int64)
-    for i in range(n_bins):
-        a, b = int(edges[i]), int(edges[i + 1])
-        if b <= a:
-            if i > 0:
-                out[i] = out[i - 1]
-            continue
-        chunk = audio[a:b]
-        out[i, 0] = chunk.min(axis=0)
-        out[i, 1] = chunk.max(axis=0)
-    return out
 
 
 class TurntableWindow(QMainWindow):
@@ -248,6 +227,13 @@ class TurntableWindow(QMainWindow):
         # explicitly (False). LOOP only auto-restarts while this is
         # True, so pressing STOP while LOOP is on actually stops.
         self._intending_playback: bool = False
+        # Last native last_error() string shown to the user as a
+        # playback-failed dialog. The native player opens its device
+        # lazily on the Zig render thread, so an open failure surfaces
+        # later — as last_error() plus playing flipping back to 0 — not
+        # as an exception at the play() call. This remembers what was
+        # already shown so the ~100ms tick doesn't re-pop the dialog.
+        self._last_playback_error_shown: str | None = None
 
         # FREEZE state: when True, the buffer panel's waveform + time
         # labels + timeline are held at the snapshot taken when freeze
@@ -325,13 +311,24 @@ class TurntableWindow(QMainWindow):
         self._export_pool_dir: Path = load_export_pool_dir()
         self._export_bit_depth: str = load_export_bit_depth()
 
+        # Scratch dir pref — display-only here; AppState already adopted
+        # the scratch dir it was constructed with, so a change here takes
+        # effect at next launch, not live.
+        self._scratch_dir_pref: str = str(load_scratch_dir())
+
         # Global hotkeys (fire while minimized) — opt-in, Windows-only for now.
         self._global_hotkeys_enabled = load_global_hotkeys_enabled()
         self._global_hotkeys: GlobalHotkeySource | None = None
         self._apply_global_hotkeys(self._global_hotkeys_enabled)
 
-        # Lazy-create status bar for surfacing non-modal messages.
-        self.statusBar().showMessage("Ready", 0)
+        # Lazy-create status bar for surfacing non-modal messages. F1: a
+        # scratch dir that fell back to the default at launch takes
+        # priority over "Ready" — the user needs to see it, not just the
+        # log.
+        if state.scratch_dir_error:
+            self.statusBar().showMessage(state.scratch_dir_error, 15000)
+        else:
+            self.statusBar().showMessage("Ready", 0)
 
         # ── System tray ──────────────────────────────────────────────
         # Gated on availability (off under headless/offscreen Qt). When a
@@ -540,6 +537,11 @@ class TurntableWindow(QMainWindow):
         self._export_bit_depth = depth
         save_export_bit_depth(depth)
 
+    def _set_scratch_dir(self, path_str: str) -> None:
+        save_scratch_dir(path_str)
+        self._scratch_dir_pref = path_str
+        self.statusBar().showMessage("Scratch folder applies at next launch", 4000)
+
     def _open_preferences_dialog(self) -> None:
         dlg = PreferencesDialog(
             show_notifications=self._show_notifications,
@@ -551,6 +553,8 @@ class TurntableWindow(QMainWindow):
             on_export_pool_dir_changed=self._set_export_pool_dir,
             export_bit_depth=self._export_bit_depth,
             on_export_bit_depth_changed=self._set_export_bit_depth,
+            scratch_dir=self._scratch_dir_pref,
+            on_scratch_dir_changed=self._set_scratch_dir,
             parent=self,
         )
         dlg.exec()
@@ -594,17 +598,17 @@ class TurntableWindow(QMainWindow):
             if co is None or end <= start:
                 return
             self._clip_trim_fracs[co.id] = (float(start), float(end))
-            n = int(co.audio.shape[0])
-            co.trim_in_samples = max(0, int(start * n))
-            co.trim_out_samples = max(co.trim_in_samples, int(end * n))
+            n = co.n_frames
+            self._state.active_slot.checkout_manager.set_trim(
+                co.id, max(0, int(start * n)), max(int(start * n), int(end * n))
+            )
 
         def on_clip_clear() -> None:
             co = self._currently_displayed_checkout()
             if co is None:
                 return
             self._clip_trim_fracs.pop(co.id, None)
-            co.trim_in_samples = 0
-            co.trim_out_samples = 0
+            self._state.active_slot.checkout_manager.set_trim(co.id, 0, 0)
 
         self.buffer_panel.waveform.manualSelectionChanged.connect(on_buffer_sel)
         self.buffer_panel.waveform.manualSelectionCleared.connect(on_buffer_clear)
@@ -801,13 +805,7 @@ class TurntableWindow(QMainWindow):
     def _checkout_has_trim(co) -> bool:
         """True if the checkout has a non-trivial trim window (either
         in-marker past 0 or out-marker before end)."""
-        return (
-            co.trim_in_samples > 0
-            or (
-                co.trim_out_samples > 0
-                and co.trim_out_samples < co.audio.shape[0]
-            )
-        )
+        return co.has_trim()
 
     def _reset_buffer_selection_to_default(self) -> None:
         """Clear any user-dragged buffer selection so the next tick
@@ -914,10 +912,9 @@ class TurntableWindow(QMainWindow):
         if co is None:
             return
         has_trim = self._checkout_has_trim(co)
-        audio = co.trimmed_audio() if has_trim else co.audio
+        start, n = co.trim_range() if has_trim else (0, co.n_frames)
         try:
-            player.bind(audio)
-            player.open()
+            player.bind_checkout(self._state.scratch, co.handle, start, n, co.sample_rate, co.channels)
             player.play()
         except Exception as e:
             QMessageBox.warning(
@@ -925,6 +922,12 @@ class TurntableWindow(QMainWindow):
             )
             return
         self._intending_playback = True
+        # Arm the "was playing" edge here, not on the next tick: the
+        # render thread's open failure lands before the 33 ms tick that
+        # would otherwise set this, and _update_clip_playback_state()
+        # only reads last_error() on that edge.
+        self._was_playing_last_tick = True
+        self._last_playback_error_shown = None  # fresh attempt: allow re-showing a repeat error
         self._refresh_play_button()
 
     def _refresh_play_button(self) -> None:
@@ -937,7 +940,7 @@ class TurntableWindow(QMainWindow):
         """− (delta=-0.05): tighten the trim around its centre.
         + (delta=+0.05): loosen it outward. Clamped to [0, 1]."""
         co = self._currently_displayed_checkout()
-        if co is None or co.audio.shape[0] == 0:
+        if co is None or co.n_frames == 0:
             return
         fracs = self._clip_trim_fracs.get(co.id)
         start, end = fracs if fracs is not None else (0.0, 1.0)
@@ -953,7 +956,7 @@ class TurntableWindow(QMainWindow):
         delta_frac, preserving its width. Hits the edges rather than
         wrapping."""
         co = self._currently_displayed_checkout()
-        if co is None or co.audio.shape[0] == 0:
+        if co is None or co.n_frames == 0:
             return
         fracs = self._clip_trim_fracs.get(co.id)
         if fracs is None:
@@ -968,9 +971,10 @@ class TurntableWindow(QMainWindow):
         """Persist a new trim range for the given checkout and reflect
         it in both the panel waveform and the ring selection arc."""
         self._clip_trim_fracs[co.id] = (start, end)
-        n = int(co.audio.shape[0])
-        co.trim_in_samples = max(0, int(start * n))
-        co.trim_out_samples = max(co.trim_in_samples, int(end * n))
+        n = co.n_frames
+        self._state.active_slot.checkout_manager.set_trim(
+            co.id, max(0, int(start * n)), max(int(start * n), int(end * n))
+        )
         self.clip_panel.waveform.blockSignals(True)
         self.clip_panel.waveform.set_manual_selection(start, end)
         self.clip_panel.waveform.blockSignals(False)
@@ -1091,6 +1095,7 @@ class TurntableWindow(QMainWindow):
 
         if n == 0:
             # Nothing to render; force a repaint so cleared rings show.
+            slot.checkout_manager.pin(None)
             self.clip_turntable.update()
             self.clip_panel.waveform.set_data(
                 np.zeros((1, 2, 1), dtype=np.float32)
@@ -1106,7 +1111,7 @@ class TurntableWindow(QMainWindow):
             entry = self._clip_bins_cache.setdefault(co.id, {})
             amp = entry.get("ring_amp")
             if amp is None:
-                bins = _peak_bins_from_audio(co.audio, n_bins=540)
+                bins = co.bins["540"]
                 amp = (
                     (bins[:, 1, :].max(axis=1) - bins[:, 0, :].min(axis=1)) / 2.0
                 ).astype(np.float32)
@@ -1127,7 +1132,7 @@ class TurntableWindow(QMainWindow):
         entry = self._clip_bins_cache.setdefault(co.id, {})
         bins = entry.get("panel_bins")
         if bins is None:
-            bins = _peak_bins_from_audio(co.audio, n_bins=360)
+            bins = co.bins["360"]
             entry["panel_bins"] = bins
         self.clip_panel.waveform.set_data(bins)
         # Clip timeline = fixed clip duration; lets the selection band
@@ -1144,6 +1149,19 @@ class TurntableWindow(QMainWindow):
         )
         self.clip_panel.set_duration_text(f"{co.duration_seconds:.1f}s")
         self.clip_panel.set_clip_id(co.id[:6].upper())
+        mgr = self._state.active_slot.checkout_manager
+        # F2: read write_state BEFORE pin -- load-bearing order. pin()
+        # queues the checkout's async scratch load; write_state() goes
+        # through fb_checkout_info, which calls waitLoad and BLOCKS the
+        # UI thread until that load finishes. Reading state first means
+        # no load has been queued yet, so waitLoad returns immediately
+        # instead of freezing clip selection. `failed` clips are never
+        # evicted, so this reorder does not change which clips report it.
+        if mgr.write_state(co.id) == "failed":
+            self.statusBar().showMessage(
+                f"Scratch write failed: {co.id[:6].upper()} (clip kept in RAM)", 6000
+            )
+        mgr.pin(co.id)
         self.clip_panel.set_times("0:00.00", f"{co.duration_seconds:.2f}s")
         # Restore any saved trim selection for this clip so the band stays
         # anchored to the audio when switching clips or reopening the app.
@@ -1175,7 +1193,7 @@ class TurntableWindow(QMainWindow):
     def _default_clip_save_dir(self):
         return Path.home() / "Documents"
 
-    def _save_current_clip(self, fmt: str | None = None, trimmed: bool = True) -> None:
+    def _save_current_clip(self, trimmed: bool = True) -> None:
         """Prompt for a target path and save the clip currently shown in
         the clip panel. When `trimmed` is True, uses the stored trim
         fracs (set via drag on the clip waveform)."""
@@ -1185,30 +1203,20 @@ class TurntableWindow(QMainWindow):
             return
         slot = self._state.active_slot
         suffix = "trim" if trimmed and self._clip_trim_fracs.get(co.id) else ""
-        default_ext = ".flac" if fmt == "FLAC" else ".wav"
-        filter_spec = (
-            "WAV audio (*.wav);;FLAC audio (*.flac)" if fmt is None
-            else ("WAV audio (*.wav)" if fmt == "WAV" else "FLAC audio (*.flac)")
-        )
+        default_ext = ".wav"
+        filter_spec = "WAV audio (*.wav)"
         default_path = str(
             self._default_clip_save_dir()
             / f"{self._suggested_clip_filename(slot, co, suffix)}{default_ext}"
         )
-        target, selected = QFileDialog.getSaveFileName(
+        target, _ = QFileDialog.getSaveFileName(
             self, "Save clip", default_path, filter_spec
         )
         if not target:
             return
-        # Resolve format from filter choice or file extension
-        if fmt is None:
-            resolved = "FLAC" if (
-                selected.startswith("FLAC") or target.lower().endswith(".flac")
-            ) else "WAV"
-        else:
-            resolved = fmt
         try:
             slot.checkout_manager.save(
-                co.id, Path(target), fmt=resolved, trimmed=trimmed
+                co.id, Path(target), fmt="WAV", trimmed=trimmed
             )
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
@@ -1309,13 +1317,10 @@ class TurntableWindow(QMainWindow):
             try:
                 co = slot.checkout_manager.create_from_abs_range(*sel_abs)
             except (RuntimeError, ValueError) as e:
-                # At the active-checkout / RAM cap, make room by evicting
-                # the oldest `saved` clip — its pool file is the durable
+                # At the active-checkout cap, make room by evicting the
+                # oldest `saved` clip — its pool file is the durable
                 # record. Any other failure (range lapped, etc.) reports.
-                at_cap = (
-                    "Maximum active checkouts" in str(e)
-                    or "RAM cap" in str(e)
-                )
+                at_cap = "Maximum active checkouts" in str(e)
                 if not (at_cap and self._evict_oldest_saved_checkout(slot)):
                     self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
                     return
@@ -1363,28 +1368,20 @@ class TurntableWindow(QMainWindow):
             "Save trimmed as WAV…" if has_trim else "Save as WAV…", self
         )
         act_save_wav.triggered.connect(
-            lambda: self._save_current_clip(fmt="WAV", trimmed=has_trim)
+            lambda: self._save_current_clip(trimmed=has_trim)
         )
         menu.addAction(act_save_wav)
-        act_save_flac = QAction(
-            "Save trimmed as FLAC…" if has_trim else "Save as FLAC…", self
-        )
-        act_save_flac.triggered.connect(
-            lambda: self._save_current_clip(fmt="FLAC", trimmed=has_trim)
-        )
-        menu.addAction(act_save_flac)
         if has_trim:
             menu.addSeparator()
             act_save_full_wav = QAction("Save full clip as WAV…", self)
             act_save_full_wav.triggered.connect(
-                lambda: self._save_current_clip(fmt="WAV", trimmed=False)
+                lambda: self._save_current_clip(trimmed=False)
             )
             menu.addAction(act_save_full_wav)
             act_clear_trim = QAction("Clear trim selection", self)
             def _clear():
                 self._clip_trim_fracs.pop(co.id, None)
-                co.trim_in_samples = 0
-                co.trim_out_samples = 0
+                self._state.active_slot.checkout_manager.set_trim(co.id, 0, 0)
                 self.clip_panel.waveform.clear_manual_selection()
                 self._update_selection_display()
             act_clear_trim.triggered.connect(_clear)
@@ -1703,29 +1700,45 @@ class TurntableWindow(QMainWindow):
         if (
             co is not None
             and player.is_playing
-            and co.audio.shape[0] > 0
+            and co.n_frames > 0
         ):
             cursor_samples = int(player.cursor_samples)
             has_trim = self._checkout_has_trim(co)
             base_offset = co.trim_in_samples if has_trim else 0
             abs_sample = base_offset + cursor_samples
             frac = max(
-                0.0, min(1.0, abs_sample / float(co.audio.shape[0]))
+                0.0, min(1.0, abs_sample / float(co.n_frames))
             )
             self.clip_panel.waveform.set_playhead(frac)
         else:
             self.clip_panel.waveform.set_playhead(None)
+            just_stopped = (
+                co is not None
+                and not player.is_playing
+                and getattr(self, "_was_playing_last_tick", False)
+            )
+            if just_stopped:
+                # The native player opens its output device lazily on
+                # the Zig render thread: an open failure never raises
+                # here, it arrives later as last_error() plus playing
+                # flipping back to 0. Show it once per distinct error —
+                # this method runs every tick and would otherwise pop
+                # the same dialog every ~100ms.
+                err = player.last_error()
+                if err and err != self._last_playback_error_shown:
+                    self._last_playback_error_shown = err
+                    QMessageBox.warning(
+                        self, "Playback failed", f"Could not start playback:\n\n{err}"
+                    )
             # LOOP: if checked, the user hasn't explicitly stopped,
             # a clip is bound, and playback just drained, restart.
             # Gating on _intending_playback keeps STOP-while-LOOPing
             # from immediately re-triggering playback.
-            if (
-                self.loop_btn.isChecked()
-                and self._intending_playback
-                and co is not None
-                and not player.is_playing
-                and getattr(self, "_was_playing_last_tick", False)
-            ):
+            # The once-guard is NOT re-armed here: a LOOP restart against
+            # a failing device drains every tick, and clearing the guard
+            # would pop the same dialog every ~33 ms. Only the explicit
+            # user click above re-arms it.
+            if self.loop_btn.isChecked() and self._intending_playback and just_stopped:
                 try:
                     player.play()
                 except Exception:

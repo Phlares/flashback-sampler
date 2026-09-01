@@ -1,39 +1,37 @@
 """
 ctypes bindings for the Zig core (core/ -> flashback_core shared library).
 
-Mirrors core/include/flashback_core.h. NativeAudioCircularBuffer is a
-drop-in for AudioCircularBuffer: Zig owns the memory, the write path,
-span reads, summary aggregation, and WAV encoding; Python keeps the
-visualization readers over a ZERO-COPY numpy view of Zig-owned storage
-(same seqlock verify, no lock -- the atomics are on the Zig side).
+Mirrors core/include/flashback_core.h. NativeAudioCircularBuffer is the
+app's ring buffer: Zig owns the memory, the write path, span reads,
+peaks (fb_ring_peak_bins), RMS (fb_ring_rms), summary aggregation, and
+WAV encoding. Python holds the handle and converts units (dB <-> linear,
+frames <-> seconds); self.buffer is a zero-copy numpy view kept for
+tests only -- no production reader remains.
 
 TWO SIZES, not one: fb_ring_capacity() is the READABLE window (what
-Python's buffer_size reports, what get_latest/get_segment clamp against).
+buffer_size reports, what get_latest/get_segment clamp against).
 fb_ring_storage_frames() is the PHYSICAL frame count backing
 fb_ring_storage -- capacity plus a guard band (see flashback_core.h and
 Ring.zig's struct-level comment) that makes an accepted reader's span
 provably disjoint from whatever the writer might currently be mid-copy
-into. The zero-copy numpy view over fb_ring_storage MUST be shaped with
-storage_frames, and write_pos's modulo MUST wrap at storage_frames too --
-using capacity for either silently corrupts get_peak_bins, which walks
-the raw buffer directly.
+into. self.buffer MUST be shaped with storage_frames, and write_pos's
+modulo MUST wrap at storage_frames too -- using capacity for either
+silently corrupts any host that walks the raw buffer directly.
 """
 from __future__ import annotations
 
 import ctypes as C
+import math
 import sys
 from pathlib import Path
 
 import numpy as np
 
-from flashback_sampler.core.buffer import RingDerivedOps, _peak_bins_impl
+from flashback_sampler.core.source_status import dbfs
 
-_OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG = range(5)
+_OK, _OVERWRITTEN, _OUT_OF_RANGE, _IO_ERROR, _INVALID_ARG, _OUT_OF_MEMORY = range(6)
 # Public: mirrors flashback_core.h's FbSubtype and checkout.py's
-# CheckoutSubtype strings. checkout.py's save() routes a WAV write here
-# only when the requested subtype is a key of this dict AND the native
-# library is loaded; any subtype absent from this dict (or a non-WAV
-# format, or no native library) falls back to soundfile.
+# CheckoutSubtype strings.
 SUBTYPE_INTS = {"FLOAT": 0, "PCM_24": 1, "PCM_16": 2}
 
 _lib: C.CDLL | None = None
@@ -68,15 +66,65 @@ def load() -> C.CDLL | None:
             # runtime dependency, or a corrupted/truncated file -- the
             # realistic way a BUNDLED library breaks (a dev-build path
             # that exists but is empty/garbage would hit this too). This
-            # is the bundled-but-broken case load()'s own docstring and
-            # make_ring_buffer()'s fallback contract promise to handle
-            # the same as a missing candidate: skip it and keep looking,
-            # never let a crash here take down app startup.
+            # is the bundled-but-broken case load()'s own docstring
+            # promises to handle the same as a missing candidate: skip
+            # it and keep looking. The library is required --
+            # NativeAudioCircularBuffer raises RuntimeError without it --
+            # but a crash here, mid-scan, must not take down app startup.
             continue
         _declare(lib)
         _lib = lib
         break
     return _lib
+
+
+KIND_INTS = {"loopback": 0, "input": 1, "process": 2, "render": 3}
+_KIND_NAMES = {v: k for k, v in KIND_INTS.items()}
+
+MAX_MIXER_SOURCES = 8  # Mixer.max_sources
+
+
+class FbDevice(C.Structure):
+    _fields_ = [("kind", C.c_uint8), ("is_default", C.c_uint8), ("mix_rate", C.c_uint32),
+                ("mix_channels", C.c_uint16), ("id", C.c_char * 128), ("name", C.c_char * 128)]
+
+
+class FbCaptureSpec(C.Structure):
+    _fields_ = [("kind", C.c_uint8), ("pid", C.c_uint32), ("rate", C.c_uint32),
+                ("channels", C.c_uint16), ("device_id", C.c_char_p)]
+
+
+class FbCaptureStats(C.Structure):
+    _fields_ = [("running", C.c_uint8), ("frames_written", C.c_uint64),
+                ("xruns", C.c_uint32), ("mix_rate", C.c_uint32)]
+
+
+class FbProcess(C.Structure):
+    _fields_ = [("pid", C.c_uint32), ("ppid", C.c_uint32), ("name", C.c_char * 128)]
+
+
+class FbPlaybackState(C.Structure):
+    _fields_ = [("running", C.c_uint8), ("playing", C.c_uint8), ("cursor", C.c_uint64),
+                ("clip_frames", C.c_uint64), ("mix_rate", C.c_uint32)]
+
+
+class FbPeakBin(C.Structure):
+    _fields_ = [("min", C.c_float), ("max", C.c_float)]
+
+
+class FbWavInfo(C.Structure):
+    _fields_ = [("rate", C.c_uint32), ("channels", C.c_uint16), ("subtype", C.c_uint8), ("frames", C.c_uint64)]
+
+
+class FbCheckoutInfo(C.Structure):
+    _fields_ = [
+        ("rate", C.c_uint32), ("channels", C.c_uint16), ("write_state", C.c_uint8),
+        ("n_frames", C.c_uint64), ("start_frame", C.c_uint64), ("resident_bytes", C.c_uint64),
+    ]
+
+
+# Mirrors Checkout.WriteState in core/src/Checkout.zig.
+WRITE_STATES = {0: "queued", 1: "writing", 2: "written", 3: "failed", 4: "adopted"}
 
 
 def _declare(lib: C.CDLL) -> None:
@@ -85,7 +133,7 @@ def _declare(lib: C.CDLL) -> None:
     an error -- ctypes trusts these declarations completely."""
     f32p = C.POINTER(C.c_float)
 
-    lib.fb_ring_create.argtypes = [C.c_uint32, C.c_uint16, C.c_double]
+    lib.fb_ring_create.argtypes = [C.c_uint32, C.c_uint16, C.c_double, C.POINTER(C.c_int)]
     lib.fb_ring_create.restype = C.c_void_p
 
     lib.fb_ring_destroy.argtypes = [C.c_void_p]
@@ -125,24 +173,144 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_ring_summary_bins.argtypes = [C.c_void_p, C.c_size_t, C.c_uint64, C.c_uint64, f32p]
     lib.fb_ring_summary_bins.restype = C.c_int
 
+    lib.fb_ring_peak_bins.argtypes = [C.c_void_p, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin)]
+    lib.fb_ring_peak_bins.restype = C.c_int
+
+    lib.fb_ring_rms.argtypes = [C.c_void_p, C.c_uint64, f32p]
+    lib.fb_ring_rms.restype = C.c_int
+
     lib.fb_wav_write.argtypes = [C.c_char_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16, C.c_int]
     lib.fb_wav_write.restype = C.c_int
+
+    lib.fb_wav_info.argtypes = [C.c_char_p, C.POINTER(FbWavInfo)]
+    lib.fb_wav_info.restype = C.c_int
+    # out_len (R-h6a): the callee validates this against its own
+    # derived length instead of trusting a re-derived caller size.
+    lib.fb_wav_read.argtypes = [C.c_char_p, C.c_uint64, C.c_size_t, f32p, C.c_size_t]
+    lib.fb_wav_read.restype = C.c_int
+    lib.fb_wav_peak_bins.argtypes = [C.c_char_p, C.c_uint64, C.c_uint64, C.c_size_t, C.POINTER(FbPeakBin), C.c_size_t]
+    lib.fb_wav_peak_bins.restype = C.c_int
+
+    lib.fb_devices_list.argtypes = [C.POINTER(FbDevice), C.c_size_t]
+    lib.fb_devices_list.restype = C.c_size_t
+    lib.fb_capture_create.argtypes = [C.c_void_p, C.POINTER(FbCaptureSpec)]
+    lib.fb_capture_create.restype = C.c_void_p
+    lib.fb_capture_start.argtypes = [C.c_void_p]
+    lib.fb_capture_start.restype = C.c_int
+    lib.fb_capture_stop.argtypes = [C.c_void_p]
+    lib.fb_capture_stop.restype = None
+    lib.fb_capture_destroy.argtypes = [C.c_void_p]
+    lib.fb_capture_destroy.restype = None
+    lib.fb_capture_stats.argtypes = [C.c_void_p, C.POINTER(FbCaptureStats)]
+    lib.fb_capture_stats.restype = None
+    lib.fb_capture_last_error.argtypes = [C.c_void_p]
+    lib.fb_capture_last_error.restype = C.c_char_p
+
+    lib.fb_mixer_create.argtypes = [C.c_void_p, C.POINTER(FbCaptureSpec), C.c_size_t]
+    lib.fb_mixer_create.restype = C.c_void_p
+    lib.fb_mixer_start.argtypes = [C.c_void_p]
+    lib.fb_mixer_start.restype = C.c_int
+    lib.fb_mixer_stop.argtypes = [C.c_void_p]
+    lib.fb_mixer_stop.restype = None
+    lib.fb_mixer_destroy.argtypes = [C.c_void_p]
+    lib.fb_mixer_destroy.restype = None
+    lib.fb_mixer_stats.argtypes = [C.c_void_p, C.POINTER(FbCaptureStats)]
+    lib.fb_mixer_stats.restype = None
+    lib.fb_mixer_last_error.argtypes = [C.c_void_p]
+    lib.fb_mixer_last_error.restype = C.c_char_p
+
+    lib.fb_processes_list.argtypes = [C.POINTER(FbProcess), C.c_size_t]
+    lib.fb_processes_list.restype = C.c_size_t
+
+    lib.fb_playback_create.argtypes = [C.c_char_p, C.c_uint32, C.c_uint16]
+    lib.fb_playback_create.restype = C.c_void_p
+    lib.fb_playback_bind.argtypes = [C.c_void_p, f32p, C.c_size_t, C.c_uint32, C.c_uint16]
+    lib.fb_playback_bind.restype = C.c_int
+    lib.fb_playback_play.argtypes = [C.c_void_p]
+    lib.fb_playback_play.restype = C.c_int
+    lib.fb_playback_pause.argtypes = [C.c_void_p]
+    lib.fb_playback_pause.restype = None
+    lib.fb_playback_seek.argtypes = [C.c_void_p, C.c_uint64]
+    lib.fb_playback_seek.restype = None
+    lib.fb_playback_set_device.argtypes = [C.c_void_p, C.c_char_p]
+    lib.fb_playback_set_device.restype = None
+    lib.fb_playback_state.argtypes = [C.c_void_p, C.POINTER(FbPlaybackState)]
+    lib.fb_playback_state.restype = None
+    lib.fb_playback_last_error.argtypes = [C.c_void_p]
+    lib.fb_playback_last_error.restype = C.c_char_p
+    lib.fb_playback_destroy.argtypes = [C.c_void_p]
+    lib.fb_playback_destroy.restype = None
+
+    u64, vp = C.c_uint64, C.c_void_p
+    lib.fb_scratch_create.argtypes = [u64, C.POINTER(C.c_int)]
+    lib.fb_scratch_create.restype = vp
+    lib.fb_scratch_start.argtypes = [vp]
+    lib.fb_scratch_start.restype = C.c_int
+    lib.fb_scratch_stop.argtypes = [vp]
+    lib.fb_scratch_stop.restype = None
+    lib.fb_scratch_destroy.argtypes = [vp]
+    lib.fb_scratch_destroy.restype = None
+    lib.fb_scratch_set_budget.argtypes = [vp, u64]
+    lib.fb_scratch_set_budget.restype = None
+    lib.fb_scratch_resident_bytes.argtypes = [vp]
+    lib.fb_scratch_resident_bytes.restype = u64
+    lib.fb_checkout_create.argtypes = [vp, vp, u64, u64, C.c_char_p, C.POINTER(C.c_int)]
+    lib.fb_checkout_create.restype = vp
+    lib.fb_checkout_slice.argtypes = [vp, vp, u64, u64, C.POINTER(C.c_int)]
+    lib.fb_checkout_slice.restype = vp
+    lib.fb_checkout_open.argtypes = [vp, C.c_char_p, u64, u64, C.POINTER(C.c_int)]
+    lib.fb_checkout_open.restype = vp
+    lib.fb_checkout_info.argtypes = [vp, vp, C.POINTER(FbCheckoutInfo)]
+    lib.fb_checkout_info.restype = None
+    # out_len (R-h6a), same rule as fb_wav_peak_bins above.
+    lib.fb_checkout_peak_bins.argtypes = [vp, vp, C.c_size_t, C.POINTER(FbPeakBin), C.c_size_t]
+    lib.fb_checkout_peak_bins.restype = C.c_int
+    lib.fb_checkout_pin.argtypes = [vp, vp, C.c_uint8]
+    lib.fb_checkout_pin.restype = None
+    lib.fb_checkout_export.argtypes = [vp, vp, C.c_char_p, u64, u64, C.c_int]
+    lib.fb_checkout_export.restype = C.c_int
+    lib.fb_checkout_destroy.argtypes = [vp, vp]
+    lib.fb_checkout_destroy.restype = None
+    lib.fb_playback_bind_checkout.argtypes = [vp, vp, vp, u64, u64]
+    lib.fb_playback_bind_checkout.restype = C.c_int
+
+
+def list_devices(max_devices: int = 128) -> list[dict]:
+    """Every active WASAPI endpoint: capture endpoints as kind="loopback"
+    or kind="input", render endpoints appear twice: as kind="loopback"
+    (capture candidate) and kind="render" (playback output). Empty when
+    the library is missing or the OS has no backend."""
+    lib = load()
+    if lib is None:
+        return []
+    arr = (FbDevice * max_devices)()
+    n = int(lib.fb_devices_list(arr, max_devices))
+    return [
+        {"kind": _KIND_NAMES.get(d.kind, "input"), "is_default": bool(d.is_default),
+         "mix_rate": int(d.mix_rate), "mix_channels": int(d.mix_channels),
+         "id": d.id.decode("utf-8", "replace"), "name": d.name.decode("utf-8", "replace")}
+        for d in arr[:n]
+    ]
 
 
 def _as_f32p(a: np.ndarray):
     return a.ctypes.data_as(C.POINTER(C.c_float))
 
 
+def _frames2d(a: np.ndarray) -> np.ndarray:
+    """The frame layout every fb_* call takes: C-contiguous float32
+    [N, channels]. Mono 1-D input is reshaped to [N, 1] so `shape`
+    unpacks into two names; the contiguous float32 layout is what makes
+    the pointer safe to read n_frames * channels floats from."""
+    if a.ndim == 1:
+        a = a[:, np.newaxis]
+    return np.ascontiguousarray(a, dtype=np.float32)
+
+
 def wav_write(path, audio: np.ndarray, sample_rate: int, subtype: str) -> None:
-    """Write `audio` [N, channels] float32 via the Zig encoder. Mono 1-D
-    input is reshaped to [N, 1], matching NativeAudioCircularBuffer.write's
-    own mono handling -- audio.shape would otherwise fail to unpack below."""
-    lib = load()
-    if lib is None:
-        raise RuntimeError("flashback_core library not available")
-    if audio.ndim == 1:
-        audio = audio[:, np.newaxis]
-    audio = np.ascontiguousarray(audio, dtype=np.float32)
+    """Write `audio` [N, channels] float32 via the Zig encoder."""
+    lib = _require_lib()
+    audio = _frames2d(audio)
     n_frames, channels = audio.shape
     status = lib.fb_wav_write(
         str(path).encode("utf-8"), _as_f32p(audio), n_frames,
@@ -152,37 +320,106 @@ def wav_write(path, audio: np.ndarray, sample_rate: int, subtype: str) -> None:
         raise RuntimeError(f"fb_wav_write failed with status {status}")
 
 
-class NativeAudioCircularBuffer(RingDerivedOps):
-    """AudioCircularBuffer's public surface over the Zig core."""
+def _wav_raise(status: int, path) -> None:
+    """One status → exception rule for the three readers."""
+    if status == _OK:
+        return
+    if status == _IO_ERROR:
+        raise FileNotFoundError(f"cannot open {path}")
+    if status == _INVALID_ARG:
+        raise ValueError(f"not a supported WAV file: {path}")
+    if status == _OUT_OF_RANGE:
+        raise ValueError(f"span runs past the end of {path}")
+    raise RuntimeError(f"wav reader failed with status {status} on {path}")
+
+
+def _require_lib() -> C.CDLL:
+    lib = load()
+    if lib is None:
+        raise RuntimeError("flashback_core library not available")
+    return lib
+
+
+def wav_info(path) -> FbWavInfo:
+    lib = _require_lib()
+    info = FbWavInfo()
+    _wav_raise(lib.fb_wav_info(str(path).encode("utf-8"), C.byref(info)), path)
+    return info
+
+
+def wav_read(path, start_frame: int, n_frames: int) -> np.ndarray:
+    """(n_frames, channels) float32 decoded by the Zig reader."""
+    lib = _require_lib()
+    info = wav_info(path)
+    out = np.zeros((int(n_frames), int(info.channels)), dtype=np.float32)
+    # out.size is the real float count of this buffer (R-h6a): the
+    # callee re-derives its own length from the file and rejects a
+    # mismatch, so this must be the buffer's ACTUAL size, never a value
+    # separately recomputed from n_frames/info.channels.
+    _wav_raise(lib.fb_wav_read(str(path).encode("utf-8"), int(start_frame), int(n_frames), _as_f32p(out), out.size), path)
+    return out
+
+
+def wav_peak_bins(path, start_frame: int, n_frames: int, n_bins: int) -> np.ndarray:
+    """(n_bins, 2, channels) float32 — the get_peak_bins layout, from a file."""
+    lib = _require_lib()
+    info = wav_info(path)
+    out = np.zeros((int(n_bins), int(info.channels), 2), dtype=np.float32)
+    # The wire buffer is FbPeakBin-typed (2 floats each), so its real
+    # length in THAT unit is out.size // 2, i.e. n_bins * channels — not
+    # out.size itself (R-h6a: must be the buffer's actual struct count).
+    out_len = out.size // 2
+    _wav_raise(lib.fb_wav_peak_bins(
+        str(path).encode("utf-8"), int(start_frame), int(n_frames), int(n_bins),
+        out.ctypes.data_as(C.POINTER(FbPeakBin)), out_len,
+    ), path)
+    return np.ascontiguousarray(out.transpose(0, 2, 1))
+
+
+class NativeAudioCircularBuffer:
+    """The app's ring buffer: a handle on a Zig `Ring`."""
 
     def __init__(self, duration_seconds: float = 900.0, sample_rate: int = 48_000, channels: int = 2):
-        lib = load()
-        if lib is None:
-            raise RuntimeError("flashback_core library not available")
-        self._lib = lib
+        self._lib = _require_lib()
         self.sample_rate = sample_rate
         self.channels = channels
         self.duration = duration_seconds
-        self._h = lib.fb_ring_create(sample_rate, channels, duration_seconds)
+        status = C.c_int(_OK)
+        self._h = self._lib.fb_ring_create(sample_rate, channels, duration_seconds, C.byref(status))
         if not self._h:
-            raise MemoryError("fb_ring_create failed")
+            if status.value == _OUT_OF_MEMORY:
+                # The readable window's payload; the guard band and the
+                # summary ring add a little on top (see Ring.init).
+                requested = int(duration_seconds * sample_rate) * channels * 4
+                raise MemoryError(
+                    f"fb_ring_create: could not reserve {requested:,} bytes "
+                    f"for a {duration_seconds:g} s ring at {sample_rate} Hz x {channels} ch"
+                )
+            raise ValueError(
+                f"fb_ring_create rejected rate={sample_rate} channels={channels} seconds={duration_seconds}"
+            )
         # capacity == the READABLE window -- every clamp of "how much audio
         # can I get back" (buffered_seconds, is_full, status, get_latest /
         # get_segment availability) uses THIS.
-        self.buffer_size = int(lib.fb_ring_capacity(self._h))
+        self.buffer_size = int(self._lib.fb_ring_capacity(self._h))
         # storage_frames == the PHYSICAL frame count -- shapes the
         # zero-copy view and is what write_pos actually wraps at. Larger
         # than buffer_size by the guard band; see the module docstring.
-        storage_frames = int(lib.fb_ring_storage_frames(self._h))
+        storage_frames = int(self._lib.fb_ring_storage_frames(self._h))
         self._storage_frames = storage_frames
         # Zero-copy view of Zig-owned storage. Read-only by convention;
-        # valid until close(). Visualization readers (get_peak_bins)
-        # iterate this directly -- no copies at 30 Hz. Shaped with
+        # valid until close(). No production reader -- tests pin flush
+        # zeroing and the physical layout through it. Shaped with
         # storage_frames, NOT buffer_size -- see the module docstring.
-        storage = lib.fb_ring_storage(self._h)
+        storage = self._lib.fb_ring_storage(self._h)
         self.buffer = np.ctypeslib.as_array(storage, shape=(storage_frames, channels))
 
     # -- primitives -----------------------------------------------------
+
+    @property
+    def handle(self):
+        """The raw Zig pointer, for calls that take the ring as an argument."""
+        return self._h
 
     @property
     def total_written(self) -> int:
@@ -204,24 +441,44 @@ class NativeAudioCircularBuffer(RingDerivedOps):
     def gain(self, value: float) -> None:
         self._lib.fb_ring_set_gain(self._h, float(value))
 
+    @property
+    def gain_db(self) -> float:
+        """Record gain in dB; -inf when muted."""
+        return dbfs(self.gain)
+
+    @gain_db.setter
+    def gain_db(self, db: float) -> None:
+        self.gain = 0.0 if db == -math.inf else float(10.0 ** (db / 20.0))
+
+    @property
+    def buffered_seconds(self) -> float:
+        return min(self.total_written, self.buffer_size) / self.sample_rate
+
+    @property
+    def is_full(self) -> bool:
+        return self.total_written >= self.buffer_size
+
+    @property
+    def capacity_bytes(self) -> int:
+        """Bytes of the READABLE window (buffer_size x channels x 4) -- the
+        RAM-accounting number (AppState.total_project_ram_bytes). Not
+        self.buffer.nbytes, which includes the guard band."""
+        return self.buffer_size * self.channels * 4
+
     def write(self, frames: np.ndarray) -> None:
-        if frames.ndim == 1:
-            frames = frames[:, np.newaxis]
+        frames = _frames2d(frames)
         # fb_ring_write trusts len(frames) and reads n_frames * self.channels
         # floats from whatever buffer we hand it -- a caller that passes a
         # narrower array (e.g. mono into a stereo ring) would otherwise make
         # it read past the array's end into uninitialized heap (confirmed:
         # the tail frames come back as garbage floats, not zeros or an
-        # error). AudioCircularBuffer.write instead silently broadcasts a
-        # narrower array across channels; raising here is a deliberate
-        # parity divergence -- broadcasting would mask a real caller bug by
-        # writing plausible-looking wrong audio into the recording.
+        # error). raising is deliberate: broadcasting would mask a caller
+        # bug by writing plausible-looking wrong audio into the recording.
         if frames.shape[1] != self.channels:
             raise ValueError(
                 f"write() frames has {frames.shape[1]} channel(s), "
                 f"ring has {self.channels}"
             )
-        frames = np.ascontiguousarray(frames, dtype=np.float32)
         self._lib.fb_ring_write(self._h, _as_f32p(frames), len(frames))
 
     def flush(self) -> None:
@@ -232,17 +489,16 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         status = self._lib.fb_ring_read(self._h, abs_start, n, _as_f32p(out))
         if status != _OK:
             # Overwritten mid-read is the seqlock's honest answer for a
-            # span that no longer exists; callers get empty, same shape
-            # as the Python implementation's clamped-to-nothing result.
+            # span that no longer exists; callers get an empty array.
             return np.zeros((0, self.channels), dtype=np.float32)
         return out
 
-    # -- AudioCircularBuffer surface ------------------------------------
+    # -- ring surface -----------------------------------------------------
 
     def get_latest(self, seconds: float) -> np.ndarray:
-        # Unlike the Python impl there is no lock between snapshotting
-        # total_written and reading -- a fast writer on a tiny ring can lap
-        # us in the gap. Re-snapshot and retry; the span rides the writer.
+        # There is no lock between the snapshot and the read -- a fast
+        # writer on a tiny ring can lap us in the gap. Re-snapshot and
+        # retry; the span rides the writer.
         for _ in range(3):
             tw = self.total_written
             n = min(int(seconds * self.sample_rate), min(tw, self.buffer_size))
@@ -257,13 +513,11 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         if start_ago <= end_ago:
             raise ValueError("start_ago must be greater than end_ago")
         # Same re-snapshot-and-retry pattern as get_latest, and for the
-        # same reason: no lock between snapshotting total_written and the
-        # read completing, so a fast writer can lap this span in the gap.
+        # same reason: there is no lock between the snapshot and the read
+        # completing, so a fast writer can lap this span in the gap.
         # Without a retry here, get_segment silently returns empty under
-        # writer contention where the Python implementation (which holds
-        # the lock across the whole snapshot-and-retry loop in
-        # copy_abs_range) returns data -- a real parity divergence on
-        # the exact path checkout.py's create()/create_from_abs_range use.
+        # writer contention on the exact path checkout.py's
+        # create()/create_from_abs_range use.
         for _ in range(3):
             tw = self.total_written
             n_avail = min(tw, self.buffer_size)
@@ -281,11 +535,8 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         return np.zeros((0, self.channels), dtype=np.float32)
 
     def copy_abs_range(self, abs_start: int, abs_end: int) -> np.ndarray:
-        """Public counterpart to AudioCircularBuffer.copy_abs_range — the
-        shared surface checkout.py (create_from_abs_range, the drag-select
-        checkout path) and mixed_capture.py (the mixer thread, polling a
-        live sub-source ring every 10ms) read an absolute span through
-        instead of implementation-private internals.
+        """The shared surface checkout.py (create_from_abs_range, the
+        drag-select checkout path) reads an absolute span through.
 
         Retries up to 3 times on the SAME fixed (abs_start, abs_end) --
         unlike get_latest/get_segment, which re-resolve abs_start from a
@@ -293,9 +544,7 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         the caller and never moves. The retry still matters: a torn read
         (the writer mid-copy during our read) can make a single
         fb_ring_read report OVERWRITTEN for a span that is not actually
-        gone -- the exact same request would succeed on the next attempt.
-        Matches AudioCircularBuffer.copy_abs_range's 3-attempt retry so
-        both implementations answer a transient tear the same way."""
+        gone -- the exact same request would succeed on the next attempt."""
         n = abs_end - abs_start
         if n <= 0:
             return np.zeros((0, self.channels), dtype=np.float32)
@@ -306,22 +555,45 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         return np.zeros((0, self.channels), dtype=np.float32)
 
     def get_peak_bins(self, seconds: float, n_bins: int) -> np.ndarray:
-        return _peak_bins_impl(
-            self.buffer, self.buffer_size,
-            lambda: self.total_written,
-            lambda abs_start: self.total_written - abs_start <= self.buffer_size,
-            self.sample_rate, self.channels, seconds, n_bins,
+        """(n_bins, 2, channels) float32: [i, 0, c] = min, [i, 1, c] = max.
+        The engine fills PeakBin{min, max} per (bin, channel); the transpose
+        below is the only Python work. Zeros for an empty or torn window,
+        and for a closed handle."""
+        out = np.zeros((n_bins, self.channels, 2), dtype=np.float32)
+        if self._h is None:
+            # closed handle: NULL into a *Ring is a process abort, not an
+            # exception. Same transpose as the live return below -- the
+            # shape callers see must not depend on whether the handle
+            # happened to be open.
+            return np.ascontiguousarray(out.transpose(0, 2, 1))
+        status = self._lib.fb_ring_peak_bins(
+            self._h, max(0, int(seconds * self.sample_rate)), n_bins,
+            out.ctypes.data_as(C.POINTER(FbPeakBin)),
         )
+        if status == _INVALID_ARG:
+            raise ValueError("n_bins must be positive")
+        return np.ascontiguousarray(out.transpose(0, 2, 1))
+
+    def get_rms_levels(self, window_seconds: float = 0.1) -> np.ndarray:
+        """RMS per channel over the newest window (level meter). Zeros when
+        the window is empty or torn -- the engine zeroes `out` on error --
+        and for a closed handle."""
+        out = np.zeros(self.channels, dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
+        self._lib.fb_ring_rms(self._h, max(0, int(window_seconds * self.sample_rate)), _as_f32p(out))
+        return out
 
     def get_summary_bins(self, n_bins: int, seconds=None, bin_span_samples=None) -> np.ndarray:
-        """See AudioCircularBuffer.get_summary_bins's docstring for the
-        shared contract. One divergence: n_bins > 4096 raises ValueError
-        here (Summary.rmsBins's max_bins stack-scratch bound), where
-        AudioCircularBuffer accepts any positive n_bins -- unreachable
-        today since the UI never requests more than 360 bins."""
+        """(n_bins, channels) RMS amplitude values from the pre-decimated
+        summary ring. n_bins > 4096 raises ValueError (Summary.rmsBins's
+        max_bins stack-scratch bound) -- unreachable today since the UI
+        never requests more than 360 bins. Zeros for a closed handle."""
         if n_bins <= 0:
             raise ValueError("n_bins must be positive")
         out = np.zeros((n_bins, self.channels), dtype=np.float32)
+        if self._h is None:
+            return out  # closed handle: NULL into a *Ring is a process abort, not an exception
         n_samples = 0 if seconds is None else int(seconds * self.sample_rate)
         # fb_ring_summary_bins/Summary.rmsBins overload n_samples=0 as ITS
         # OWN sentinel for "all available" (mirroring get_summary_bins's
@@ -338,21 +610,12 @@ class NativeAudioCircularBuffer(RingDerivedOps):
         return out
 
     def close(self) -> None:
-        """Destroys the Zig-owned ring and frees its storage. Unlike
-        AudioCircularBuffer.close() (a no-op), this one does real work,
-        with two consequences a caller must respect:
+        """Destroys the Zig-owned ring and frees its storage.
 
-        - Never retain a reference to `self.buffer` across a call to
-          close() -- it is a zero-copy numpy VIEW over storage that
-          fb_ring_destroy frees; a view held past this point points at
-          freed memory.
-        - `self.buffer` itself becomes None (see below), so any method
-          that reads it -- get_peak_bins, for instance -- raises
-          TypeError if called after close(). AudioCircularBuffer has no
-          such post-close failure mode (its close() does nothing), so
-          this is implementation-specific behavior a caller holding a
-          RingDerivedOps generically should not rely on either way:
-          don't use a buffer after closing it.
+        Never retain a reference to `self.buffer` across a call to
+        close() -- it is a zero-copy numpy VIEW over storage that
+        fb_ring_destroy frees; a view held past this point points at
+        freed memory. Don't use a buffer after closing it.
         """
         if self._h:
             self.buffer = None
@@ -364,3 +627,149 @@ class NativeAudioCircularBuffer(RingDerivedOps):
             self.close()
         except Exception:
             pass
+
+
+def _status_raise(status: int, what: str) -> None:
+    """One FbStatus → exception rule for the checkout calls."""
+    if status == _OK:
+        return
+    if status == _INVALID_ARG:
+        raise ValueError(f"{what}: invalid_arg")
+    if status == _OUT_OF_RANGE:
+        raise RuntimeError(f"{what}: out_of_range (span not written yet)")
+    if status == _OVERWRITTEN:
+        raise RuntimeError(f"{what}: overwritten (the ring lapped the span)")
+    if status == _OUT_OF_MEMORY:
+        raise MemoryError(f"{what}: out_of_memory")
+    if status == _IO_ERROR:
+        raise FileNotFoundError(f"{what}: io_error")
+    raise RuntimeError(f"{what}: status {status}")
+
+
+class NativeScratch:
+    """The process-wide scratch writer + RAM cache: a handle on a Zig
+    `Scratch`. Checkout handles are plain ints (Zig pointers); the
+    CheckoutManager owns their lifetime and destroys every one before
+    `close()`."""
+
+    def __init__(self, budget_bytes: int):
+        self._lib = _require_lib()
+        status = C.c_int(_OK)
+        self._h = self._lib.fb_scratch_create(int(budget_bytes), C.byref(status))
+        if not self._h:
+            _status_raise(status.value, "fb_scratch_create")
+
+    @property
+    def handle(self):
+        return self._h
+
+    def start(self) -> None:
+        _status_raise(self._lib.fb_scratch_start(self._h), "fb_scratch_start")
+
+    def stop(self) -> None:
+        if self._h:
+            self._lib.fb_scratch_stop(self._h)
+
+    def close(self) -> None:
+        if self._h:
+            self._lib.fb_scratch_destroy(self._h)
+            self._h = None
+
+    def set_budget(self, budget_bytes: int) -> None:
+        self._lib.fb_scratch_set_budget(self._h, int(budget_bytes))
+
+    @property
+    def resident_bytes(self) -> int:
+        return int(self._lib.fb_scratch_resident_bytes(self._h))
+
+    # -- checkouts ------------------------------------------------------
+    def checkout_create(self, ring: NativeAudioCircularBuffer, abs_start: int, abs_end: int, path) -> int:
+        status = C.c_int(_OK)
+        h = self._lib.fb_checkout_create(self._h, ring.handle, int(abs_start), int(abs_end), str(path).encode("utf-8"), C.byref(status))
+        if not h:
+            _status_raise(status.value, "fb_checkout_create")
+        return h
+
+    def checkout_slice(self, parent: int, start: int, n: int) -> int:
+        status = C.c_int(_OK)
+        h = self._lib.fb_checkout_slice(self._h, parent, int(start), int(n), C.byref(status))
+        if not h:
+            _status_raise(status.value, "fb_checkout_slice")
+        return h
+
+    def checkout_open(self, path, start_frame: int, n_frames: int) -> int:
+        status = C.c_int(_OK)
+        h = self._lib.fb_checkout_open(self._h, str(path).encode("utf-8"), int(start_frame), int(n_frames), C.byref(status))
+        if not h:
+            _status_raise(status.value, f"fb_checkout_open {path}")
+        return h
+
+    def checkout_info(self, h: int) -> FbCheckoutInfo:
+        info = FbCheckoutInfo()
+        self._lib.fb_checkout_info(self._h, h, C.byref(info))
+        return info
+
+    def checkout_peak_bins(self, h: int, n_bins: int) -> np.ndarray:
+        """(n_bins, 2, channels) float32 — the get_peak_bins layout."""
+        channels = int(self.checkout_info(h).channels)
+        out = np.zeros((int(n_bins), channels, 2), dtype=np.float32)
+        # out_len must be the BUFFER's own FbPeakBin count (R-h6a), same
+        # as wav_peak_bins above — never n_bins * channels re-derived
+        # separately, which is exactly the stale-length bug R-h6a exists
+        # to catch (a re-derivation can silently drift from what `out`
+        # actually holds if this method's own math ever changes).
+        out_len = out.size // 2
+        _status_raise(self._lib.fb_checkout_peak_bins(self._h, h, int(n_bins), out.ctypes.data_as(C.POINTER(FbPeakBin)), out_len), "fb_checkout_peak_bins")
+        return np.ascontiguousarray(out.transpose(0, 2, 1))
+
+    def checkout_pin(self, h: int, on: bool) -> None:
+        self._lib.fb_checkout_pin(self._h, h, 1 if on else 0)
+
+    def checkout_export(self, h: int, dst, start: int, n: int, subtype: str) -> None:
+        _status_raise(self._lib.fb_checkout_export(self._h, h, str(dst).encode("utf-8"), int(start), int(n), SUBTYPE_INTS[subtype]), "fb_checkout_export")
+
+    def checkout_destroy(self, h: int) -> None:
+        self._lib.fb_checkout_destroy(self._h, h)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def _process_entries(max_processes: int = 4096) -> list[tuple[int, int, str]]:
+    """One Toolhelp32 snapshot via the core: (pid, ppid, exe_name) rows.
+    Both public views below derive from this."""
+    lib = load()
+    if lib is None:
+        return []
+    arr = (FbProcess * max_processes)()
+    n = int(lib.fb_processes_list(arr, max_processes))
+    return [(int(p.pid), int(p.ppid), p.name.decode("utf-8", "replace"))
+            for p in arr[:n] if p.pid > 0 and p.name]
+
+
+def list_processes(max_processes: int = 4096) -> list[tuple[int, str]]:
+    rows = [(pid, name) for pid, _ppid, name in _process_entries(max_processes)]
+    rows.sort(key=lambda t: (t[1].lower(), t[0]))
+    return rows
+
+
+def resolve_root_pid(pid: int) -> int:
+    """Walk up from `pid` to the highest ancestor sharing the same exe
+    name (port of win32_process_loopback.resolve_audio_root_pid — apps
+    like Spotify/Chrome play audio from the ROOT of a same-exe tree).
+    Returns `pid` unchanged if it is absent or the chain breaks."""
+    procs = {p: (pp, name) for p, pp, name in _process_entries()}
+    if pid not in procs:
+        return pid
+    name_lc = procs[pid][1].lower()
+    current, visited = pid, set()
+    while current not in visited:
+        visited.add(current)
+        parent, _ = procs.get(current, (0, ""))
+        if parent <= 0 or parent not in procs or procs[parent][1].lower() != name_lc:
+            break
+        current = parent
+    return current

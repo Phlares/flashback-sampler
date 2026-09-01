@@ -14,6 +14,7 @@
 //! See the guard-band note above `read` for why.
 const std = @import("std");
 const Summary = @import("Summary.zig");
+const peaks = @import("peaks.zig");
 
 const Ring = @This();
 
@@ -31,18 +32,16 @@ channels: u16,
 sample_rate: u32,
 total_written: std.atomic.Value(u64),
 gain: std.atomic.Value(f32),
+writer_active: std.atomic.Value(bool), // owned by the control thread that starts/stops the writer thread; tells flush() whether to defer
+flush_pending: std.atomic.Value(bool), // control thread asked for a flush while a writer was active; write() drains it
 summary: Summary, // pre-decimated stats ring; fed per-chunk by write(), poisoned by flush()
 
 pub const Config = struct {
     sample_rate: u32,
     channels: u16,
     seconds: f64,
-    // Must equal Python's AudioCircularBuffer._SUMMARY_SLOT_SAMPLES
-    // (flashback_sampler/core/buffer.py) for get_summary_bins/rmsBins
-    // parity -- per-bin RMS of a constant-amplitude signal is the SAME
-    // number regardless of slot size, so the existing constant-amplitude
-    // parity test cannot detect the two constants drifting apart. A
-    // change to either number is a parity change; change both together.
+    // 4096 frames ≈ 85 ms at 48 kHz: fine enough for smooth rolling,
+    // coarse enough that the summary stays tiny (≈330 KB for 15 min).
     summary_slot_frames: u32 = 4096,
 };
 
@@ -58,6 +57,11 @@ pub const ReadError = error{ Overwritten, OutOfRange };
 pub const max_write_frames: u64 = 4096;
 
 pub fn init(allocator: std.mem.Allocator, config: Config) !Ring {
+    // The ABI used to be the only guard (issue #21). Hosts that construct
+    // a Ring directly (Capture, a future CLAP host) now get the same
+    // protection, and fb_ring_create's guard becomes a pass-through.
+    if (config.sample_rate == 0 or config.channels == 0 or config.channels > 2 or
+        !std.math.isFinite(config.seconds) or config.seconds <= 0) return error.InvalidArgument;
     // The allocator is a PARAMETER, not a global: the caller decides the
     // allocation strategy (testing allocator in tests, one shared
     // allocator in the ABI shim). This is the core Zig memory idiom.
@@ -95,6 +99,8 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Ring {
         .sample_rate = config.sample_rate,
         .total_written = std.atomic.Value(u64).init(0),
         .gain = std.atomic.Value(f32).init(1.0),
+        .writer_active = std.atomic.Value(bool).init(false),
+        .flush_pending = std.atomic.Value(bool).init(false),
         .summary = summary,
     };
 }
@@ -105,32 +111,78 @@ pub fn deinit(self: *Ring) void {
     self.* = undefined; // poison: use-after-deinit becomes loud in Debug
 }
 
-/// Discard all buffered audio. Because `total_written` is the single
+/// Discard all buffered audio. If a writer is registered
+/// (`writer_active`), the flush is handed to the writer thread, which
+/// performs it before its next write (`drainPendingFlush`) — so a
+/// writer that already loaded `total_written` can never republish over
+/// the reset (issue #20). With no writer, it happens here, immediately.
+/// Called from a control thread, never the audio thread.
+///
+/// OWNERSHIP: `writer_active` belongs to the CONTROL thread that owns
+/// the writer thread — `Capture.start`/`stop`, and `Mixer.start`/`stop`
+/// for the mixed-slot target. Stored true BEFORE the spawn, false AFTER
+/// the join; the writer thread never touches it. Storing before the
+/// spawn closes the start window: a flush that lands while the worker
+/// is still opening its stream is deferred to the loop top, not
+/// executed under a writer about to appear. Every writer of a ring
+/// registers this way; a host that wrote through `fb_ring_write` without
+/// it would race both this reset and `Summary.gen` (issue #23) — no such
+/// host remains once the mixer runs in Zig.
+pub fn flush(self: *Ring) void {
+    if (self.writer_active.load(.acquire)) {
+        self.flush_pending.store(true, .release);
+        return;
+    }
+    self.flushNow();
+}
+
+/// The actual reset, shared by both call sites: here directly (no writer
+/// active) and from `write()` (draining a deferred `flush_pending`, on
+/// the writer thread itself). Because `total_written` is the single
 /// source of truth and readers never address at-or-beyond it, resetting
 /// it to zero makes every stale byte unreachable — no zeroing REQUIRED
 /// for correctness. We zero anyway (hygiene: `.buffer` is exposed as a
-/// zero-copy view to the Python host). Called from a control thread,
-/// never the audio thread.
-///
-/// Racing an active writer is NOT bounded to "one block of silence": a
-/// writer that has already loaded `tw` before the flush will still
-/// publish `tw + n` afterward, silently UNDOING the reset (total_written
-/// lands back near its pre-flush value even though every readable frame
-/// is now zero, with no observable indication a flush happened at all).
-/// Up to a full capacity of silence, not one block, can result. This is
-/// a known race in the flush-vs-writer relationship, tracked as a
-/// separate design question for the arc — not fixed here. See issue #20.
-pub fn flush(self: *Ring) void {
+/// zero-copy view to the Python host).
+fn flushNow(self: *Ring) void {
     // Poison BEFORE the total_written store, same ordering rationale as
     // the frames-then-store below: a racing writer that wins a slot's
     // tag write between this poison and the store leaves one slot
     // transiently mixing pre- and post-flush data (~85 ms at typical
     // slot sizes) — it self-heals on the writer's next pass through that
-    // slot's new generation. Spec-documented, same family as the
-    // total_written-vs-writer race described above, not fixed here.
+    // slot's new generation. When `flushNow` runs FROM `write()` there
+    // is no other writer to race in the first place (the caller IS the
+    // writer) — this ordering is kept anyway so both call sites share
+    // one implementation instead of diverging into two.
     self.summary.poison();
     self.total_written.store(0, .release);
     @memset(self.frames, 0);
+}
+
+/// Drains a flush deferred by an active writer (see `flush`'s doc
+/// comment) — the memset is a bounded, allocation-free, lock-free
+/// operation (~50 ms for a 345 MB ring; WASAPI's buffer is 200 ms, so a
+/// flush mid-capture costs no frames). This is the only way a flush can
+/// never be undone by the writer that raced it (issue #20).
+///
+/// Four call sites, because `write()` alone is not enough: a silent
+/// loopback/process source can go arbitrarily long between packets (or
+/// forever), and a flush must never wait on the audio source to be busy.
+///  - `write()` below, before publishing its own data — a writer that IS
+///    producing frames.
+///  - `Capture.runStream`'s loop top, once per iteration BEFORE calling
+///    `stream.next`, INCLUDING the no-packet path (`next` returning null).
+///  - `Capture.idleUntilStopped`, for a worker that lost its stream (or
+///    finished) but still holds the writer registration until stop().
+///  - `Mixer.run`'s loop top, the same rule for the mixed target.
+/// All four run on the writer thread: no lock, no allocation, no error
+/// path. `Capture.stop` and `Mixer.stop` also drain, AFTER the join and
+/// after clearing `writer_active` — those run on the control thread,
+/// which is by then the only thread touching the ring.
+pub fn drainPendingFlush(self: *Ring) void {
+    if (self.flush_pending.load(.acquire)) {
+        self.flushNow();
+        self.flush_pending.store(false, .release);
+    }
 }
 
 /// RT-SAFE: no locks, no allocation, no failure path. Called from the
@@ -143,6 +195,11 @@ pub fn flush(self: *Ring) void {
 /// `max_write_frames`.
 pub fn write(self: *Ring, interleaved: []const f32) void {
     std.debug.assert(interleaved.len % self.channels == 0);
+    // See `drainPendingFlush`'s doc comment: this call site covers a
+    // writer that IS producing frames. A `Capture` writer also drains
+    // from its own loop top, so an idle source still gets flushed
+    // (`write` here never runs while the source is silent).
+    self.drainPendingFlush();
     const g = self.gain.load(.monotonic);
     // Physical wrap is keyed off storage_frames (capacity + the guard
     // band), not capacity — see the struct-level comment and the note
@@ -289,6 +346,166 @@ pub fn read(self: *Ring, abs_start: u64, out: []f32) ReadError!void {
         if (t2 >= abs_start + n and t2 - abs_start <= self.capacity) return;
     }
     return error.Overwritten;
+}
+
+/// Alias of `peaks.PeakBin` (extern; see there for the layout the
+/// ctypes host relies on).
+pub const PeakBin = peaks.PeakBin;
+
+pub const PeakBinsError = error{ InvalidArgument, Overwritten };
+
+/// Cap on samples inspected per bin: above it the bin is stride-sampled so
+/// the per-tick cost stays bounded regardless of ring size. The stride
+/// branch samples `k ≈ 257` positions per bin (this cap plus one), so the
+/// real budget is `k × 360 bins × 2 channels ≈ 185k` float reads per tick,
+/// still sub-millisecond.
+pub const peak_bins_max_samples_per_bin: u64 = 256;
+/// Slack left below capacity on a saturated ring so the writer can advance
+/// during the in-place scan without tripping the verify (4096 frames ≈
+/// 85 ms at 48 kHz, larger than a WASAPI period). Applied only when
+/// capacity > 2 × headroom so tiny test rings still expose every frame.
+pub const peak_bins_read_headroom: u64 = 4096;
+
+/// Downsample the newest `n_frames_req` frames into `n_bins` (min, max)
+/// pairs per channel for the waveform display. `out.len == n_bins *
+/// channels`, laid out `out[bin * channels + ch]`.
+///
+/// Window clamp and headroom, bin edges (`i * step` in f64, truncated),
+/// stride grid anchored to ABSOLUTE frame indices (so rolling the window
+/// by a few frames does not re-pick a bin's samples), and physical
+/// modulus (`storage_frames`, never `capacity`) all match the retired
+/// numpy prototype this was ported from. Two ported quirks stay: the
+/// stride branch reads `k` positions per bin regardless of the bin's
+/// end (it may overshoot into the next bin, or past `total_written` on
+/// the last bin), and NaN samples are ignored by `@min`/`@max` where
+/// numpy would propagate them.
+///
+/// Reads `frames` IN PLACE through the seqlock — no copy of a multi-
+/// hundred-MB ring at 30 Hz — then verifies `total_written`, but the
+/// verify bounds only the OLD end of the span: `t2 >= abs_start` guards
+/// the unsigned subtraction after a racing flush (ReleaseSafe traps on
+/// underflow), and `t2 - abs_start <= capacity` is the lap check. `read`
+/// additionally requires `t2 >= abs_start + n`; this scan does not, so
+/// the stride branch's last bin may sample up to `stride` frames past
+/// `total_written`. Those positions sit inside the writer's in-flight
+/// block, are always taken `% storage_frames` so they never leave the
+/// allocation, and fold into that one bin's min/max — a ported numpy
+/// quirk, display-only by construction. On three torn attempts `out` is
+/// all zeros and the error says so; an empty window is all zeros and
+/// success.
+pub fn peakBins(self: *Ring, n_frames_req: u64, n_bins: usize, out: []PeakBin) PeakBinsError!void {
+    if (n_bins == 0) return error.InvalidArgument;
+    std.debug.assert(out.len == n_bins * self.channels);
+    const chans: usize = self.channels;
+    const modulus = self.storage_frames;
+    var attempt: u8 = 0;
+    while (attempt < 3) : (attempt += 1) {
+        @memset(out, .{ .min = 0, .max = 0 });
+        const tw = self.total_written.load(.acquire);
+        var n_avail = @min(tw, self.capacity);
+        if (n_avail >= self.capacity and self.capacity > 2 * peak_bins_read_headroom)
+            n_avail = self.capacity - peak_bins_read_headroom;
+        const n = @min(n_frames_req, n_avail);
+        if (n == 0) return;
+        const abs_start = tw - n;
+        // Same bin-edge rule as `peaks.binEdge`'s doc comment — see there
+        // for the numpy rationale; kept in one place so the two cannot drift.
+        const step: f64 = @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(n_bins));
+        const span_ref = peaks.binEdge(step, 1, n, n_bins) - peaks.binEdge(step, 0, n, n_bins);
+        const stride: u64 = @max(1, span_ref / peak_bins_max_samples_per_bin);
+
+        if (stride == 1) {
+            for (0..n_bins) |i| {
+                const a = peaks.binEdge(step, i, n, n_bins);
+                const b = peaks.binEdge(step, i + 1, n, n_bins);
+                if (b <= a) {
+                    if (i > 0) @memcpy(out[i * chans .. (i + 1) * chans], out[(i - 1) * chans .. i * chans]);
+                    continue;
+                }
+                var idx: u64 = (abs_start + a) % modulus;
+                var first = true;
+                var f: u64 = a;
+                while (f < b) : (f += 1) {
+                    reduceFrame(self, idx, out[i * chans .. (i + 1) * chans], &first);
+                    idx += 1;
+                    if (idx == modulus) idx = 0;
+                }
+            }
+        } else {
+            // k covers span_ref at any grid alignment; tail bins may pull
+            // 1–2 positions from the next bin (ported behaviour).
+            const k: usize = @intCast(span_ref / stride + 1);
+            for (0..n_bins) |i| {
+                const bin_abs = abs_start + peaks.binEdge(step, i, n, n_bins);
+                const first_abs = ((bin_abs + stride - 1) / stride) * stride; // ceil to the grid
+                var first = true;
+                for (0..k) |j| {
+                    const idx = (first_abs + @as(u64, j) * stride) % modulus;
+                    reduceFrame(self, idx, out[i * chans .. (i + 1) * chans], &first);
+                }
+            }
+        }
+        // Seqlock verify: bounds only the OLD end of the span. `t2 >=
+        // abs_start` guards the unsigned subtraction against a racing
+        // flush (ReleaseSafe traps on underflow); `t2 - abs_start <=
+        // capacity` is the lap check. Unlike `read`, there is no `t2 >=
+        // abs_start + n` clause — the stride branch's overshoot reads are
+        // accepted, not retried (see the doc comment above).
+        const t2 = self.total_written.load(.acquire);
+        if (t2 >= abs_start and t2 - abs_start <= self.capacity) return;
+    }
+    @memset(out, .{ .min = 0, .max = 0 });
+    return error.Overwritten;
+}
+
+/// Frame at PHYSICAL index `idx` (already wrapped by the caller) folded
+/// through the shared reducer — Ring owns the wrap, peaks owns the fold.
+fn reduceFrame(self: *const Ring, idx: u64, out_bin: []PeakBin, first: *bool) void {
+    const chans: usize = self.channels;
+    const at: usize = @intCast(idx * chans);
+    peaks.reduceFrame(self.frames[at .. at + chans], out_bin, first);
+}
+
+/// RMS per channel over the newest `n_frames_req` frames, clamped like
+/// `read`'s callers: min(req, total_written, capacity). `out.len ==
+/// channels`. Reads through `read` in `max_write_frames` chunks — each
+/// chunk is a verified seqlock copy, and the scratch is a fixed 32 KiB
+/// stack array, so the ring's size never reaches the stack. Sum of
+/// squares in f64 (as Summary does) so long windows keep precision.
+pub fn rmsLatest(self: *Ring, n_frames_req: u64, out: []f32) ReadError!void {
+    std.debug.assert(out.len == self.channels);
+    @memset(out, 0);
+    const tw = self.total_written.load(.acquire);
+    const n = @min(n_frames_req, @min(tw, self.capacity));
+    if (n == 0) return;
+    var ss: [2]f64 = .{ 0, 0 }; // channels <= 2 is enforced by Ring.init
+    var scratch: [max_write_frames * 2]f32 = undefined; // channels <= 2 is enforced by Ring.init
+    var abs = tw - n;
+    var left = n;
+    while (left > 0) {
+        const take: usize = @intCast(@min(left, max_write_frames));
+        const chunk = scratch[0 .. take * self.channels];
+        try self.read(abs, chunk);
+        for (chunk, 0..) |v, i| ss[i % self.channels] += @as(f64, v) * @as(f64, v);
+        abs += take;
+        left -= take;
+    }
+    for (out, 0..) |*o, c| o.* = @floatCast(@sqrt(ss[c] / @as(f64, @floatFromInt(n))));
+}
+
+test "init rejects sample_rate == 0" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 0, .channels = 2, .seconds = 1.0 }));
+}
+test "init rejects channels == 0" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 0, .seconds = 1.0 }));
+}
+test "init rejects channels == 3" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 3, .seconds = 1.0 }));
+}
+test "init rejects seconds <= 0, NaN, and +inf" {
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 0.0 }));
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = std.math.nan(f64) }));
+    try std.testing.expectError(error.InvalidArgument, Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = std.math.inf(f64) }));
 }
 
 test "init: capacity is the readable window, storage_frames is capacity + max_write_frames" {
@@ -771,14 +988,26 @@ test "guard band: reader targets the lap boundary" {
 }
 
 test "flush racing a concurrent writer and reader never panics" {
-    // Ring.flush() is DOCUMENTED to race an active writer (see flush()'s
-    // doc comment): a writer that already loaded `tw` before a flush
-    // will still publish `tw + n` afterward, so total_written and the
-    // physical buffer contents can end up in ANY relative state once a
-    // flush races an in-flight write — accepted, not a bug (a separate
-    // design question for the arc, not fixed here). Content correctness
-    // is therefore not meaningfully verifiable while this race is live;
-    // this test instead verifies the property that DOES matter:
+    // `writer_active` (see flush()'s doc comment, issue #20) is
+    // registered by a writer thread's OWNER — the control thread that
+    // spawns and joins it (`Capture.start`/`stop`, `Mixer.start`/`stop`).
+    // The raw writer thread below has no such owner and never sets it, so
+    // `ring.flush()` here always takes the immediate branch, same as
+    // before #20's fix — a writer that already loaded `tw` before the
+    // flush still publishes `tw + n` afterward, so total_written and
+    // the physical buffer contents can end up in ANY relative state
+    // once a flush races an in-flight write. That is expected in THIS
+    // configuration (no active writer registered) and is not what #20
+    // closes. This is also, precisely, the "mixed slot" configuration
+    // `flush()`'s doc comment (issue #23) describes for `Summary`: a
+    // raw writer that never sets `writer_active` plus a concurrent
+    // control-thread flusher races BOTH `total_written` here and
+    // `Summary.gen` the same way — this test only pins the `Ring` half
+    // (no panic, no trap), not the `Summary` half.
+    //
+    // Content correctness is therefore not meaningfully
+    // verifiable while this race is live; this test instead verifies
+    // the property that DOES matter:
     // read() never traps (Critical 1: an unsigned underflow when a
     // flush yanks total_written to 0 mid-read-attempt) and never
     // returns anything other than success or a documented `ReadError`.
@@ -898,6 +1127,31 @@ test "flush poisons stale slot generations, not just resets total_written" {
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), out[0], 1e-6);
 }
 
+test "flush while a writer is active is deferred to the writer and cannot be undone" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 8, .channels = 1, .seconds = 2.0 }); // capacity 16
+    defer ring.deinit();
+    ring.writer_active.store(true, .release);
+    ring.write(&[_]f32{ 1, 1, 1, 1 });
+    ring.flush(); // deferred: total_written must NOT drop yet
+    try std.testing.expectEqual(@as(u64, 4), ring.total_written.load(.acquire));
+    try std.testing.expect(ring.flush_pending.load(.acquire));
+    ring.write(&[_]f32{ 2, 2 }); // the writer executes the flush, then writes
+    try std.testing.expectEqual(@as(u64, 2), ring.total_written.load(.acquire));
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
+    var out: [2]f32 = undefined;
+    try ring.read(0, &out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 2 }, &out);
+}
+
+test "flush with no active writer is immediate (unchanged behaviour)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 8, .channels = 1, .seconds = 2.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 1, 1 });
+    ring.flush();
+    try std.testing.expectEqual(@as(u64, 0), ring.total_written.load(.acquire));
+    try std.testing.expect(!ring.flush_pending.load(.acquire));
+}
+
 test "write chunks a single large call correctly, tagging each summary chunk with its own start_abs" {
     const slot_frames = 1000;
     var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 10_000, .channels = 1, .seconds = 1.0, .summary_slot_frames = slot_frames });
@@ -918,4 +1172,195 @@ test "write chunks a single large call correctly, tagging each summary chunk wit
     try std.testing.expectEqual(@as(f32, 4000), ring.summary.min[4]);
     try std.testing.expectEqual(@as(f32, 4999), ring.summary.max[4]);
     try std.testing.expectEqual(@as(u64, 1000), ring.summary.count[4]);
+}
+
+fn peakRamp(ring: *Ring, n: usize) void {
+    // Writes frames whose ch0 value is the absolute index; ch1 (if any) too.
+    var buf: [1024]f32 = undefined;
+    var abs: u64 = ring.total_written.load(.acquire);
+    var left = n;
+    while (left > 0) {
+        const take = @min(left, 1024 / @as(usize, ring.channels));
+        for (0..take) |i| {
+            for (0..ring.channels) |c| buf[i * ring.channels + c] = @floatFromInt(abs + i);
+        }
+        ring.write(buf[0 .. take * ring.channels]);
+        abs += take;
+        left -= take;
+    }
+}
+
+fn expectBin(out: []const PeakBin, i: usize, min: f32, max: f32) !void {
+    try std.testing.expectEqual(min, out[i].min);
+    try std.testing.expectEqual(max, out[i].max);
+}
+
+test "peakBins: exact edges, stride 1 (case A)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 1000);
+    var out: [4]PeakBin = undefined;
+    try ring.peakBins(1000, 4, &out);
+    try expectBin(&out, 0, 0, 249);
+    try expectBin(&out, 1, 250, 499);
+    try expectBin(&out, 2, 500, 749);
+    try expectBin(&out, 3, 750, 999);
+}
+
+test "peakBins: uneven edges truncate like numpy linspace (case B)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 10);
+    var out: [4]PeakBin = undefined;
+    try ring.peakBins(10, 4, &out);
+    try expectBin(&out, 0, 0, 1);
+    try expectBin(&out, 1, 2, 4);
+    try expectBin(&out, 2, 5, 6);
+    try expectBin(&out, 3, 7, 9);
+}
+
+test "peakBins: an empty bin copies its predecessor; an empty bin 0 stays zero (case C)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 3);
+    var out: [5]PeakBin = undefined;
+    try ring.peakBins(3, 5, &out);
+    try expectBin(&out, 0, 0, 0);
+    try expectBin(&out, 1, 0, 0);
+    try expectBin(&out, 2, 0, 0);
+    try expectBin(&out, 3, 1, 1);
+    try expectBin(&out, 4, 2, 2);
+    // Second ring: 5 frames, 7 bins, step 5/7 -> edges 0,0,1,2,2,3,4,5.
+    // Bin 3 ([2,2)) is empty with a NON-zero predecessor (1,1): this is
+    // what pins the copy -- in the first ring the predecessor is (0,0),
+    // so deleting the copy would not redden it.
+    var ring2 = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring2.deinit();
+    peakRamp(&ring2, 5);
+    var out7: [7]PeakBin = undefined;
+    try ring2.peakBins(5, 7, &out7);
+    try expectBin(&out7, 2, 1, 1);
+    try expectBin(&out7, 3, 1, 1);
+    try expectBin(&out7, 6, 4, 4);
+}
+
+test "peakBins: wraps at storage_frames, not capacity (case D)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 6000); // past storage_frames (1000 + 4096)
+    var out: [2]PeakBin = undefined;
+    try ring.peakBins(1000, 2, &out);
+    try expectBin(&out, 0, 5000, 5499);
+    try expectBin(&out, 1, 5500, 5999);
+}
+
+test "peakBins: headroom clamp and absolute stride grid (cases E, F)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 10_000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 10_000);
+    var out: [2]PeakBin = undefined;
+    try ring.peakBins(10_000, 2, &out);
+    try expectBin(&out, 0, 4103, 7051);
+    try expectBin(&out, 1, 7051, 9999);
+    // Pins the headroom constant itself (4096): at 2 bins a one-frame
+    // shift is invisible, at 100 bins it moves an edge.
+    var out100: [100]PeakBin = undefined;
+    try ring.peakBins(10_000, 100, &out100);
+    try expectBin(&out100, 1, 4155, 4213); // edge 1 = floor(59.04) = 59 -> abs 4155; a 4095 headroom gives 4154
+    peakRamp(&ring, 1); // roll the window by one frame: the grid does not move
+    try ring.peakBins(10_000, 2, &out);
+    try expectBin(&out, 0, 4103, 7051);
+}
+
+test "peakBins: edges are trunc(float(i) * step), not trunc(i * n / n_bins) (case G)" {
+    // n = 30, n_bins = 22: step = 30/22 in f64 = 1.3636...; 11 * step = 14.999... -> 14.
+    // The exact rational 11 * 30 / 22 = 15. numpy's linspace takes the f64
+    // product, so the port must too; a different multiply order moves this
+    // edge by one frame and shifts every waveform golden.
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 30);
+    var out: [22]PeakBin = undefined;
+    try ring.peakBins(30, 22, &out);
+    try expectBin(&out, 10, 13, 13); // [13, 14)
+    try expectBin(&out, 11, 14, 15); // [14, 16)
+}
+
+test "peakBins: channels reduce independently (case H)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var frames: [1000]f32 = undefined;
+    for (0..500) |i| {
+        frames[i * 2] = 0;
+        frames[i * 2 + 1] = @floatFromInt(i);
+    }
+    ring.write(&frames);
+    var out: [2]PeakBin = undefined;
+    try ring.peakBins(500, 1, &out);
+    try expectBin(&out, 0, 0, 0);
+    try expectBin(&out, 1, 0, 499);
+}
+
+test "peakBins: empty window zeroes out and succeeds; n_bins == 0 is InvalidArgument (case I)" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    var out: [3]PeakBin = .{ .{ .min = 9, .max = 9 }, .{ .min = 9, .max = 9 }, .{ .min = 9, .max = 9 } };
+    try ring.peakBins(1000, 3, &out);
+    for (out) |b| try std.testing.expectEqual(@as(f32, 0), b.max);
+    try std.testing.expectError(error.InvalidArgument, ring.peakBins(1000, 0, out[0..0]));
+}
+
+test "peakBins: a request shorter than the available window reads only the newest frames" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 1000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    peakRamp(&ring, 1000);
+    var out: [2]PeakBin = undefined;
+    try ring.peakBins(100, 2, &out); // newest 100 of 1000: abs 900..999
+    try expectBin(&out, 0, 900, 949);
+    try expectBin(&out, 1, 950, 999);
+}
+
+test "rmsLatest: exact values, newest-window clamp, per-channel" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    ring.write(&[_]f32{ 3, 4, 0, 0 });
+    var out: [1]f32 = undefined;
+    try ring.rmsLatest(4, &out);
+    try std.testing.expectEqual(@as(f32, 2.5), out[0]); // sqrt((9 + 16) / 4)
+    try ring.rmsLatest(2, &out);
+    try std.testing.expectEqual(@as(f32, 0), out[0]); // newest two frames are silent
+    var st = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 2, .seconds = 1.0 });
+    defer st.deinit();
+    st.write(&[_]f32{ 1, 2, 1, 2 });
+    var out2: [2]f32 = undefined;
+    try st.rmsLatest(2, &out2);
+    try std.testing.expectEqual(@as(f32, 1), out2[0]);
+    try std.testing.expectEqual(@as(f32, 2), out2[1]);
+}
+
+test "rmsLatest: a window longer than max_write_frames is read in chunks" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 10_000, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    const block = [_]f32{0.5} ** 9000; // > 2 chunks of 4096
+    ring.write(&block);
+    var out: [1]f32 = undefined;
+    try ring.rmsLatest(9000, &out);
+    try std.testing.expectEqual(@as(f32, 0.5), out[0]); // ss = 9000 * 0.25, exact in f64
+}
+
+test "rmsLatest: empty ring is zero and ok" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0 });
+    defer ring.deinit();
+    var out: [1]f32 = .{7};
+    try ring.rmsLatest(16, &out);
+    try std.testing.expectEqual(@as(f32, 0), out[0]);
+}
+
+test "rmsLatest: a request longer than capacity reads only the newest capacity frames" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 16, .channels = 1, .seconds = 1.0 }); // capacity 16
+    defer ring.deinit();
+    ring.write(&([_]f32{100} ** 4 ++ [_]f32{0.5} ** 16)); // 20 frames: the loud four are lapped out
+    var out: [1]f32 = undefined;
+    try ring.rmsLatest(1000, &out);
+    try std.testing.expectEqual(@as(f32, 0.5), out[0]);
 }

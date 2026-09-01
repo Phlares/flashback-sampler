@@ -1,9 +1,10 @@
 """
 Render a checkout into the export pool for an OS drag-out.
 
-Pure Python + soundfile — no Qt. The app layer decides when to render
-(drag-start) and what to do afterward (mark saved on drop, delete on
-cancel); this module only owns naming and the write itself.
+Pure Python — no Qt; the write goes through CheckoutManager.save and
+fb_wav_write. The app layer decides when to render (drag-start) and
+what to do afterward (mark saved on drop, delete on cancel); this
+module only owns naming.
 """
 
 from __future__ import annotations
@@ -56,14 +57,11 @@ def render_drag_file(
     only once the drop target has accepted the file.
     """
     co = manager.get(checkout_id)
-    audio = co.trimmed_audio() if trimmed else co.audio
-    duration_s = audio.shape[0] / co.sample_rate
+    start, n = co.trim_range() if trimmed else (0, co.n_frames)
+    duration_s = n / co.sample_rate
     when = now or datetime.now()
     pool = Path(pool_dir)
     pool.mkdir(parents=True, exist_ok=True)
     target = resolve_collision(pool / drag_filename(source_name, when, duration_s))
-    manager.save(
-        checkout_id, target, fmt="WAV",
-        trimmed=trimmed, subtype=bit_depth, mark_saved=False,
-    )
+    manager.export_range(checkout_id, target, start, n, bit_depth)
     return target

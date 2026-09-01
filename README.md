@@ -3,9 +3,9 @@
 [![test](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml)
 [![release](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml)
 
-A standalone desktop applet that continuously captures the past several minutes of system audio into a circular ring buffer. Pull a slice of it out as a "checkout" — like lifting a record off a turntable while another keeps spinning — preview it, trim it, and decide whether to save it to WAV/FLAC or discard it.
+A standalone desktop applet that continuously captures the past several minutes of system audio into a circular ring buffer. Pull a slice of it out as a "checkout" — like lifting a record off a turntable while another keeps spinning — preview it, trim it, and decide whether to save it as a 32-bit-float WAV or discard it.
 
-The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt imports) so it can later be embedded in a DAW (VST) or OBS dock; the UI is PySide6 native rather than a webview for the same reason.
+The audio engine is a zero-dependency Zig library (`core/`): capture, mixing, playback, the ring, peaks, and WAV encoding run there. Python is a Qt shell that creates handles, starts and stops them, and reads numbers — so the engine can later sit inside a DAW plugin or an OBS dock unchanged.
 
 ## Install
 
@@ -13,7 +13,7 @@ The audio core is intentionally framework-agnostic (pure Python + numpy, no Qt i
 pip install -e ".[dev]"
 ```
 
-Installs the package plus test deps. **Loopback capture of system audio is Windows-only** (needs the `soundcard` library for WASAPI loopback). Mic / line-in capture works cross-platform via `sounddevice`, and the test suite runs anywhere via fake audio sources.
+Installs the package plus test deps (numpy, PySide6, platformdirs; no audio pip packages). **Capture, mixing, and preview playback are Windows-only in this phase** — WASAPI through the Zig core; the core cross-compiles, but `WasapiBackend.zig` is the only `Backend` so far. The test suite needs the built core library (`zig build --build-file core/build.zig -Doptimize=ReleaseSafe`).
 
 ## Run
 
@@ -23,9 +23,13 @@ python -m flashback_sampler.app.main
 
 CLI flags:
 
-- `--buffer-minutes N` — ring buffer length (default 15). Use `0.5` to force a rollover quickly when testing.
+- `--buffer-minutes N` — ring buffer length (default 5). Use `0.5` to force a rollover quickly when testing.
 - `--sample-rate N` — capture sample rate (default 48000). The **Add Source** dialog offers rates up to 192 kHz; when a device can't honestly deliver a requested rate (e.g. loopback is capped at the Windows output mix format), Flashback notifies you and captures at the device's true rate instead.
 - `--channels N` — 1 mono or 2 stereo (default 2).
+
+## Memory
+
+Arming a slot reserves its whole ring up front: `seconds × rate × channels × 4` bytes (the FULL preset — 900 s, 48 kHz, stereo — is 345.6 MB, the number the #17 soak recorded). The project RAM budget (Preferences; default 4096 MB, `DEFAULT_PROJECT_RAM_BUDGET_MB` in `state.py`) refuses a slot that would exceed it (`AppState.add_slot`, checked against `total_project_ram_bytes()`); a ring the OS cannot commit fails at `fb_ring_create` with `out_of_memory` (PR d, #41), which the UI reports as a MemoryError until #16 gives it a home.
 
 ## Using it
 
@@ -34,36 +38,35 @@ The window is a pair of turntables. The **left deck** is the live ring buffer (y
 1. **Pick a source.** Right-click the left deck → **Select Source Input(s)** to choose Default (system output), a specific capture device, a process, or to mux several inputs into one slot.
 2. **START / STOP** (center) begins and ends capture. Watch the buffer deck fill.
 3. **Set the slice.** The duration presets (0:15 → 15:00) and the buffer **− / +** controls set how much audio a checkout grabs; **◀ / ▶** scrub the anchor back through the buffer. **FREEZE** pins the buffer display so you can line up a grab while capture keeps rolling.
-4. **OUT →** checks out the current selection as a frozen in-RAM clip onto the right deck. The ring buffer keeps recording throughout.
+4. **OUT →** checks out the current selection as a frozen clip onto the right deck. The ring buffer keeps recording throughout.
 5. **Preview & trim.** Select a clip, then **PLAY** (or the spacebar) auditions it. The clip **− / + / ◀ / ▶** controls trim the in/out points; **LOOP** repeats the trimmed range.
-6. **SAVE** opens a file dialog (WAV or FLAC); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
+6. **SAVE** opens a file dialog (WAV, 32-bit float by default); right-click a clip for save-full / clear-trim / discard. **FLUSH** wipes the current buffer (checkouts are untouched).
 7. **Drag it into your DAW.** Grab the inside of a selection band on either deck and drag it out of the window — the slice lands as a 32-bit-float WAV on whatever accepts file drops (an Ableton track, Explorer, a sampler). Ctrl+drag on the clip deck exports the whole untrimmed clip. Exports live in the pool folder (Preferences → Export; default `Documents/flashback-sampler/exports`) and the dragged clip stays on the right deck as your sample bank — never move pool files a DAW project still references.
 
 > Set your **preview output to a different device than your capture source** (e.g. headphones while capturing speakers) so the preview doesn't feed back into the ring.
 
 Checkouts survive after you stop capture — you can pull a clip from buffered audio without an active stream.
 
+Checkouts scratch to `%LOCALAPPDATA%\flashback-sampler\Cache\scratch` (Preferences → Scratch) as float32 WAV at the capture rate; the app adopts that folder at launch, so a crash or quit keeps every checkout. Discard deletes the file.
+
 ## Architecture
 
 ```
 flashback_sampler/
-  core/                  # pure Python + numpy — no Qt / soundcard / sounddevice
-    buffer.py            # AudioCircularBuffer — seqlock non-blocking reads
-    checkout.py          # Checkout + CheckoutManager (+ WAV/FLAC save)
-    scrub_player.py      # ScrubPlayer — callback-driven preview engine
-    capture.py           # AudioCapture (sounddevice — mic / line-in)
-    loopback_capture.py  # LoopbackCapture (soundcard WASAPI — Windows output)
-    mixed_capture.py     # sum multiple inputs into one slot
+  core/                  # ctypes shell over the Zig core — no Qt
+    checkout.py          # Checkout + CheckoutManager (+ WAV save through `fb_wav_write`)
+    scrub_player.py      # NativeScrubPlayer — handle on the Zig Playback render thread
+    native.py            # ctypes bindings for the Zig core
+    native_capture.py    # NativeCaptureSource (Zig/WASAPI — loopback + mic / line-in) + NativeMixedSource (Zig mixer handle)
     capture_slot.py      # one buffer + its source(s) + checkout manager
     quality_presets.py   # sample-rate / channel presets
-  io/
-    win32_process_loopback.py  # ctypes WASAPI per-process loopback (Windows)
   app/                   # PySide6 only — isolated from core
     main.py              # QApplication bootstrap + CLI
     state.py             # AppState — owns slots / buffers / checkouts
     turntable_window.py  # the main window
     theme.py             # Erebus palette + base QSS, Monaspace fonts
     widgets/             # custom-painted instruments (turntable, waveform, …)
+core/ (repo root)        # Zig engine: Ring, Summary, Capture, Mixer, Playback, WasapiBackend, wav
 tests/
   unit/                  # TDD suite — no real audio hardware
   fixtures/              # deterministic sine / ramp generators

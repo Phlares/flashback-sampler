@@ -7,7 +7,27 @@ const std = @import("std");
 pub const Ring = @import("Ring.zig");
 pub const Summary = @import("Summary.zig");
 pub const wav = @import("wav.zig");
+pub const convert = @import("convert.zig");
+pub const peaks = @import("peaks.zig");
 pub const abi = @import("abi.zig");
+pub const Backend = @import("Backend.zig");
+pub const FakeBackend = @import("FakeBackend.zig");
+pub const ErrorSlot = @import("ErrorSlot.zig");
+pub const Capture = @import("Capture.zig");
+pub const Playback = @import("Playback.zig");
+pub const Mixer = @import("Mixer.zig");
+pub const Checkout = @import("Checkout.zig");
+pub const Scratch = @import("Scratch.zig");
+pub const test_util = @import("test_util.zig");
+
+// OS-gated: these two files only compile for Windows targets. On other
+// targets `wasapi`/`WasapiBackend` are empty structs and abi.zig's
+// capture exports return null/0. builtin.os.tag is a comptime constant, so the
+// dead branch is never analyzed on macOS/Linux — that is what keeps the
+// cross-compile legs green.
+const builtin = @import("builtin");
+pub const wasapi = if (builtin.os.tag == .windows) @import("wasapi.zig") else struct {};
+pub const WasapiBackend = if (builtin.os.tag == .windows) @import("WasapiBackend.zig") else struct {};
 
 // A `pub const` import alone is not enough: Zig's lazy Sema only analyzes
 // declarations that are actually used, so an unreferenced `Ring` re-export

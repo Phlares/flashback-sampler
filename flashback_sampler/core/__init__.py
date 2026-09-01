@@ -1,2 +1,1 @@
-from .buffer import AudioCircularBuffer
-from .capture import AudioCapture
+"""Audio core: ctypes handles over the Zig library (native.py) and the Python shell around them."""

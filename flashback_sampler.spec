@@ -10,12 +10,8 @@ Outputs:
     dist/flashback-sampler/ (dependencies + data files)
 
 Notes:
-    - soundcard, sounddevice, soundfile all ship native DLLs that
-      PyInstaller finds only via collect-all.
-    - flashback_sampler/io/win32_process_loopback.py uses ctypes to
-      talk to Mmdevapi.dll / combase.dll / kernel32.dll, all system
-      DLLs — no bundling needed, but we do need the submodule
-      included in the build (hence the explicit hiddenimports entry).
+    - No pip package ships native DLLs any more; the only native binary
+      is flashback_core.dll (below).
     - The Monaspace OTF fonts are loaded at runtime via
       QFontDatabase.addApplicationFont(), so they must be copied to
       the bundle as data files.
@@ -27,20 +23,11 @@ Notes:
       finds it exactly like a dev checkout finds its zig-out build.
 """
 
-from PyInstaller.utils.hooks import collect_all
-
 datas = []
 binaries = []
 hiddenimports = [
     "flashback_sampler.io",
-    "flashback_sampler.io.win32_process_loopback",
 ]
-
-for pkg in ("soundcard", "sounddevice", "soundfile"):
-    d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hiddenimports += h
 
 # Bundle the Monaspace OTFs. Path relative to the spec file, which
 # lives at the repo root.

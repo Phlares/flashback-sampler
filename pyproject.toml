@@ -4,16 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashback-sampler"
-version = "0.1.0"
+version = "0.3.0"
 description = "Circular audio buffer that retains the past several minutes of audio for sampling, playback, and export."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Phlares" }]
 dependencies = [
     "numpy>=1.24",
-    "sounddevice>=0.5.0",
-    "soundfile>=0.12.1",
-    "soundcard>=0.4.3 ; sys_platform == 'win32'",
     "PySide6>=6.7",
     "platformdirs>=4.0",
 ]
@@ -49,8 +46,6 @@ branch = true
 source = ["flashback_sampler"]
 omit = [
     "flashback_sampler/app/main.py",
-    "flashback_sampler/io/win32_process_loopback.py",
-    "flashback_sampler/core/loopback_capture.py",
 ]
 
 [tool.coverage.report]

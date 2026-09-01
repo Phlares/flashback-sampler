@@ -5,7 +5,7 @@ Boots the QApplication, applies the Erebus base stylesheet, builds the
 AppState object graph, shows the main window, and runs the event loop.
 
 CLI:
-    --buffer-minutes N    ring buffer length in minutes (default 15)
+    --buffer-minutes N    ring buffer length in minutes (default 5)
     --sample-rate N       override the capture sample rate (default 48000)
     --channels N          1 = mono, 2 = stereo (default)
 """
@@ -17,10 +17,15 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette, QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from flashback_sampler.app.state import AppState
+from flashback_sampler.app.state import DEFAULT_BUFFER_SECONDS, AppState
 from flashback_sampler.app.theme import EREBUS, base_stylesheet, load_fonts
+
+# Single source of truth for the launch default: state.py's
+# DEFAULT_BUFFER_SECONDS. Derived, not duplicated, so the ruling only
+# has to be changed in one place.
+_DEFAULT_BUFFER_MINUTES = DEFAULT_BUFFER_SECONDS / 60.0
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -28,8 +33,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--buffer-minutes",
         type=float,
-        default=15.0,
-        help="ring buffer length in minutes (default: 15). "
+        default=_DEFAULT_BUFFER_MINUTES,
+        help=f"ring buffer length in minutes (default: {_DEFAULT_BUFFER_MINUTES:g}). "
         "Use a small value like 0.5 to test rollover quickly.",
     )
     p.add_argument("--sample-rate", type=int, default=48_000)
@@ -37,6 +42,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     # Parse known args only — leave sys.argv[1:] extras untouched for Qt
     args, _ = p.parse_known_args(argv)
     return args
+
+
+def _build_state(args: argparse.Namespace) -> AppState | None:
+    """Build the AppState object graph. AppState raises RuntimeError when
+    the native audio core is missing or broken; show that as a dialog
+    instead of letting the process exit with no message (a windowed
+    build has no console to print to)."""
+    try:
+        return AppState(
+            buffer_seconds=args.buffer_minutes * 60.0,
+            sample_rate=args.sample_rate,
+            channels=args.channels,
+        )
+    except (RuntimeError, OSError) as e:
+        QMessageBox.critical(
+            None,
+            "Flashback",
+            f"{e}\n\nBuild the audio core: "
+            "zig build --build-file core/build.zig -Doptimize=ReleaseSafe",
+        )
+        return None
+
+
+def _run(app: QApplication, args: argparse.Namespace) -> int:
+    state = _build_state(args)
+    if state is None:
+        return 1
+    from flashback_sampler.app.turntable_window import TurntableWindow
+    window = TurntableWindow(state)
+    window.show()
+
+    return app.exec()
 
 
 def main() -> int:
@@ -69,16 +106,7 @@ def main() -> int:
     load_fonts(app)
     app.setStyleSheet(base_stylesheet())
 
-    state = AppState(
-        buffer_seconds=args.buffer_minutes * 60.0,
-        sample_rate=args.sample_rate,
-        channels=args.channels,
-    )
-    from flashback_sampler.app.turntable_window import TurntableWindow
-    window = TurntableWindow(state)
-    window.show()
-
-    return app.exec()
+    return _run(app, args)
 
 
 if __name__ == "__main__":

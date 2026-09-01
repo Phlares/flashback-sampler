@@ -1,146 +1,112 @@
-"""
-ScrubPlayer — a single long-lived output stream with a manually managed
-read cursor for auditioning checked-out clips.
+"""NativeScrubPlayer — the clip preview player on the Zig core.
 
-Design notes
-------------
-- One `sd.OutputStream` instance, created lazily in `open()`, reused for
-  the lifetime of the app. Swapping the previewed clip is an in-place
-  `bind()` — the stream never restarts.
-- The audio callback (`_audio_callback`) reads from
-  `self._source[self._cursor:self._cursor + frames]` and advances the
-  cursor. Seeking is an atomic cursor assignment. Pausing causes the
-  callback to zero-fill without advancing. End-of-source auto-stops
-  (no loop); pressing play again rewinds to 0.
-- The callback is a plain Python method, deliberately separated from the
-  sounddevice wiring in `open()`/`close()`. Tests invoke the callback
-  directly with a numpy output buffer — no real audio device required
-  for 95% of the unit tests.
-- State (`_source`, `_cursor`, `_playing`) is guarded by a single
-  `threading.Lock()`. The callback holds the lock only long enough to
-  snapshot the state and perform the slice copy, which is microseconds
-  for typical block sizes.
-"""
+Python holds a handle. The Zig render thread opens the WASAPI output,
+fills it from an owned copy of the clip, and publishes cursor/playing
+through atomics (core/src/Playback.zig). Nothing here touches frames.
 
+`bind` hands the checkout's audio and rate across; the stream opens at
+that rate and the OS resamples to the mix rate. Playback auto-stops at
+the end of the clip (no loop); `play` at the end rewinds.
+"""
 from __future__ import annotations
 
-import threading
-from typing import Optional
+import ctypes as C
 
 import numpy as np
 
+from flashback_sampler.core import native
 
-class ScrubPlayer:
-    """
-    Preview player with seek + pause. Supports a single bound source at a
-    time (one active preview — see the plan's "multiple checkouts, one
-    active preview" decision).
-    """
 
-    def __init__(
-        self,
-        sample_rate: int = 48_000,
-        channels: int = 2,
-        blocksize: int = 1024,
-        device: Optional[int] = None,
-    ):
+class NativeScrubPlayer:
+    def __init__(self, sample_rate: int = 48_000, channels: int = 2, device: str = ""):
+        # No native call here. AppState builds a player at startup, and a
+        # workstation with no Zig build must still import and run (see
+        # tests/conftest.py); the handle appears on the first bind/play,
+        # and only that call can raise.
+        self._lib = None
+        self._h = None
+        # Separates "not created yet" from "destroyed": both leave _h
+        # None, but only the first may create.
+        self._closed = False
         self.sample_rate = int(sample_rate)
         self.channels = int(channels)
-        self.blocksize = int(blocksize)
         self.device = device
 
-        self._lock = threading.Lock()
-        self._source: Optional[np.ndarray] = None
-        self._cursor: int = 0
-        self._playing: bool = False
-        self._stream = None  # sd.OutputStream, lazy
+    def _handle(self):
+        """The native handle, created on first need. None once closed."""
+        if self._h is None and not self._closed:
+            lib = native.load()
+            if lib is None:
+                raise RuntimeError("flashback_core library not available")
+            self._lib = lib
+            self._h = lib.fb_playback_create(self.device.encode("utf-8"), self.sample_rate, self.channels)
+            if not self._h:
+                raise RuntimeError("fb_playback_create failed (bad args, or no render backend on this OS)")
+        return self._h
 
-    # ------------------------------------------------------------------
-    # Public API (UI thread)
-    # ------------------------------------------------------------------
+    # -- transport ------------------------------------------------------
+    def bind(self, audio: np.ndarray, sample_rate: int) -> None:
+        if not self._handle():
+            return
+        audio = native._frames2d(audio)
+        n_frames, channels = audio.shape
+        status = self._lib.fb_playback_bind(self._h, native._as_f32p(audio), n_frames, int(sample_rate), channels)
+        if status == native._INVALID_ARG:
+            raise ValueError(f"fb_playback_bind rejected {n_frames} frames x {channels} ch at {sample_rate} Hz")
+        if status == native._OUT_OF_MEMORY:
+            raise MemoryError(f"fb_playback_bind: could not allocate {audio.nbytes} bytes")
+        if status != native._OK:
+            raise RuntimeError(f"fb_playback_bind failed with status {status}")
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
 
-    def bind(self, audio: np.ndarray) -> None:
-        """
-        Atomically replace the source, reset cursor to 0, and pause. The
-        input must be shape (N, channels) and will be viewed as float32.
-        """
-        if audio.ndim != 2:
-            raise ValueError(
-                f"audio must be [N, channels], got ndim={audio.ndim}"
-            )
-        if audio.shape[1] != self.channels:
-            raise ValueError(
-                f"audio has {audio.shape[1]} channels, player has "
-                f"{self.channels}"
-            )
-        audio_f32 = audio.astype(np.float32, copy=False)
-        with self._lock:
-            self._source = audio_f32
-            self._cursor = 0
-            self._playing = False
+    def bind_checkout(self, scratch, h: int, start: int, n: int, sample_rate: int, channels: int) -> None:
+        """Bind `[start, start + n)` of a checkout handle: Zig copies from
+        the checkout's RAM copy or reads its file — no numpy round trip."""
+        if not self._handle():
+            return
+        status = self._lib.fb_playback_bind_checkout(self._h, scratch.handle, h, int(start), int(n))
+        if status == native._INVALID_ARG:
+            raise ValueError(f"fb_playback_bind_checkout rejected span {start}+{n}")
+        if status == native._OUT_OF_MEMORY:
+            raise MemoryError("fb_playback_bind_checkout: could not allocate the clip")
+        if status != native._OK:
+            raise RuntimeError(f"fb_playback_bind_checkout failed with status {status}")
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
 
     def play(self) -> None:
-        """Begin (or resume) playback. Rewinds if the cursor is at the end."""
-        with self._lock:
-            if self._source is None:
-                return
-            if self._cursor >= len(self._source):
-                self._cursor = 0
-            self._playing = True
+        if not self._handle():
+            return
+        status = self._lib.fb_playback_play(self._h)
+        if status != native._OK:
+            raise RuntimeError(f"fb_playback_play failed with status {status}: {self.last_error() or ''}")
 
     def pause(self) -> None:
-        with self._lock:
-            self._playing = False
+        if self._h:
+            self._lib.fb_playback_pause(self._h)
 
     def stop(self) -> None:
-        """Pause, reset cursor, and release the source reference."""
-        with self._lock:
-            self._playing = False
-            self._cursor = 0
-            self._source = None
+        self.pause()
+        self.seek_samples(0)
 
     def seek_samples(self, pos: int) -> None:
-        """Atomically set the cursor. Clamped to [0, len(source)]."""
-        with self._lock:
-            if self._source is None:
-                return
-            self._cursor = max(0, min(int(pos), len(self._source)))
+        if self._h:
+            # The ABI takes u64; a negative int must not wrap on the wire.
+            self._lib.fb_playback_seek(self._h, max(0, int(pos)))
 
     def seek(self, seconds: float) -> None:
         self.seek_samples(int(round(seconds * self.sample_rate)))
 
-    def set_device(self, device: int | str | None) -> None:
-        """
-        Change the output device. If the underlying sounddevice
-        OutputStream is currently open, it is closed so that the next
-        call to open()/play() will create a fresh stream bound to the
-        new device. Called from the UI thread.
-        """
-        with self._lock:
-            if device == self.device:
-                return
-            self.device = device
-            had_stream = self._stream is not None
-            was_playing = self._playing
-        if had_stream:
-            try:
-                self.close()
-            except Exception:  # pragma: no cover
-                pass
-        # Leave the source bound and cursor in place so the next
-        # play() resumes from where we were.
-        if was_playing:
-            with self._lock:
-                self._playing = False
+    def set_device(self, device: str) -> None:
+        self.device = device
+        if self._h:
+            self._lib.fb_playback_set_device(self._h, device.encode("utf-8"))
 
-    # ------------------------------------------------------------------
-    # Read-only state
-    # ------------------------------------------------------------------
-
+    # -- state ----------------------------------------------------------
     @property
     def cursor_samples(self) -> int:
-        with self._lock:
-            return self._cursor
+        return int(self._state().cursor)
 
     @property
     def cursor_seconds(self) -> float:
@@ -148,81 +114,32 @@ class ScrubPlayer:
 
     @property
     def is_playing(self) -> bool:
-        with self._lock:
-            return self._playing
+        return bool(self._state().playing)
 
     @property
     def source_length_samples(self) -> int:
-        with self._lock:
-            return 0 if self._source is None else len(self._source)
+        return int(self._state().clip_frames)
 
-    # ------------------------------------------------------------------
-    # Audio callback (PortAudio thread)
-    # ------------------------------------------------------------------
-
-    def _audio_callback(
-        self,
-        outdata: np.ndarray,
-        frames: int,
-        time_info,  # noqa: ARG002 — PortAudio callback signature
-        status,  # noqa: ARG002
-    ) -> None:
-        """
-        Fill `outdata` (shape [frames, channels]) from the bound source.
-
-        Idle / paused / end-of-source → zero-fill. Partial final fill
-        also zero-pads the remainder and auto-stops playback.
-        """
-        with self._lock:
-            source = self._source
-            cursor = self._cursor
-            if not self._playing or source is None:
-                outdata.fill(0.0)
-                return
-            n_avail = len(source) - cursor
-            if n_avail <= 0:
-                outdata.fill(0.0)
-                self._playing = False
-                return
-            n_fill = min(frames, n_avail)
-            outdata[:n_fill] = source[cursor : cursor + n_fill]
-            if n_fill < frames:
-                outdata[n_fill:].fill(0.0)
-                self._playing = False  # auto-stop after the final partial
-            self._cursor = cursor + n_fill
-
-    # ------------------------------------------------------------------
-    # Device lifecycle (thin wrapper — only exercised by audio_hw tests)
-    # ------------------------------------------------------------------
-
-    def open(self) -> None:
-        """Create and start the underlying sounddevice OutputStream."""
-        if self._stream is not None:
-            return
-        import sounddevice as sd  # lazy — lets unit tests skip PortAudio
-
-        self._stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            device=self.device,
-            dtype="float32",
-            blocksize=self.blocksize,
-            callback=self._audio_callback,
-            latency="low",
-        )
-        self._stream.start()
+    def last_error(self) -> str | None:
+        if not self._h:
+            return None
+        raw = self._lib.fb_playback_last_error(self._h)
+        return raw.decode("utf-8", "replace") if raw else None
 
     def close(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-            finally:
-                self._stream.close()
-                self._stream = None
+        self._closed = True
+        if self._h:
+            self._lib.fb_playback_destroy(self._h)
+            self._h = None
 
-    def __enter__(self) -> "ScrubPlayer":
-        self.open()
-        return self
+    def _state(self) -> native.FbPlaybackState:
+        st = native.FbPlaybackState()
+        if self._h:
+            self._lib.fb_playback_state(self._h, C.byref(st))
+        return st
 
-    def __exit__(self, *_) -> None:
-        self.close()
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

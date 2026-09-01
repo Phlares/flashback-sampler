@@ -7,10 +7,9 @@ The seams a new platform must address:
 
   * **Capture / source listening** — ``flashback_sampler/app/audio_devices.py``
     (``list_capture_devices`` gates loopback to Windows; ``build_capture_source``
-    selects the backend by ``device.kind``). Backends:
-    ``core/loopback_capture.py`` (WASAPI loopback, soundcard),
-    ``io/win32_process_loopback.py`` (per-process WASAPI, ctypes),
-    ``core/capture.py`` (mic / line-in via sounddevice — already cross-platform).
+    selects the backend by ``device.kind``). Backend:
+    ``core/native_capture.py`` + ``core/WasapiBackend.zig`` (WASAPI loopback,
+    mic / line-in, and per-process loopback, all via the Zig core).
   * **System tray** — ``flashback_sampler/platform/tray.py`` (QSystemTrayIcon).
   * **Config / data paths** — ``flashback_sampler/app/config.py`` (APPDATA / XDG).
   * **Packaging** — ``flashback_sampler.spec`` (PyInstaller, Windows onedir).
@@ -40,10 +39,10 @@ def current_os() -> str:
 def loopback_supported() -> bool:
     """True if system-audio (speaker) loopback capture is available.
 
-    Today only Windows ships a loopback backend (WASAPI via ``soundcard``
-    and per-process WASAPI via ctypes). Mic / line-in capture works on every
-    platform regardless of this flag. macOS / Linux loopback are the open
-    seam — see ``PLATFORM.md``.
+    Today only Windows ships a loopback backend (WASAPI, including
+    per-process loopback, via the Zig core). Mic / line-in capture works on
+    every platform regardless of this flag. macOS / Linux loopback are the
+    open seam — see ``PLATFORM.md``.
     """
     return current_os() == WINDOWS
 
