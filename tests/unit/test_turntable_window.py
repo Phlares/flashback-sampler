@@ -1118,3 +1118,27 @@ def test_buffer_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, monke
         assert len(cos) == 1 and cos[0].id != first and cos[0].state == "saved"
     finally:
         win.close()
+
+
+def test_flush_confirm_names_the_action_not_a_stale_seconds_figure(qapp, state, monkeypatch):
+    """#40: the flush clears the whole ring, so the confirm must not quote a
+    buffered-seconds figure that is stale by the time the flush runs."""
+    import flashback_sampler.app.turntable_window as tw
+
+    win = TurntableWindow(state)
+    asked = []
+
+    def question(parent, title, text, *a, **k):
+        asked.append(text)
+        return tw.QMessageBox.Yes
+
+    monkeypatch.setattr(tw.QMessageBox, "question", question)
+    flushed = []
+    monkeypatch.setattr(state.slots[0].buffer, "flush", lambda: flushed.append(True))
+
+    win._flush_slot_buffer(0)
+
+    assert flushed == [True]
+    assert len(asked) == 1
+    assert not any(c.isdigit() for c in asked[0]), asked[0]
+    assert "all buffered audio" in asked[0]
