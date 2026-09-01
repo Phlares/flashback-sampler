@@ -1,15 +1,15 @@
 name: test
 
-# Minutes budget: private-repo Actions minutes are scarce. Every job bills
-# rounded up to a whole minute; Windows costs 2x, macOS 10x. So:
-#   - one Windows pytest job (py3.12, the version release.yml ships)
-#   - Zig unit tests on ubuntu (1x); the Windows job builds the DLL anyway
-#   - run only when main moves (feature PRs target dev, tests run locally)
-#   - hard timeouts, so a hung test costs minutes, not hours
-# Expected cost per run: ~5 billed minutes. Worst case (both hang): 15.
+# Two jobs: pytest on Windows (py3.12, the version release.yml ships;
+# it builds the DLL anyway) and the Zig unit tests on Ubuntu. Hard
+# timeouts so a hung test stops in minutes. Docs-only changes skip it.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
     paths-ignore:
       - "**.md"
       - "docs/**"
