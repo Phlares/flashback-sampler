@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import struct
 from datetime import datetime
+from typing import get_args
 
 import pytest
 
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
-from flashback_sampler.core.checkout import CheckoutManager
+from flashback_sampler.core.checkout import CheckoutManager, CheckoutSubtype
 from flashback_sampler.core.drag_export import (
     BYTES_PER_SAMPLE, DragRender, drag_filename, export_span, render_root_drag,
     render_slice_drag, resolve_collision, sanitize_source_name,
@@ -55,6 +56,13 @@ def test_resolve_collision_appends_suffix(tmp_path):
     assert resolve_collision(target) == tmp_path / "clip_2.wav"
     (tmp_path / "clip_2.wav").write_bytes(b"")
     assert resolve_collision(target) == tmp_path / "clip_3.wav"
+
+
+def test_bytes_per_sample_covers_every_export_subtype():
+    """render_slice_drag indexes BYTES_PER_SAMPLE with whatever bit_depth
+    it is handed, so a subtype the manager accepts but this map lacks is
+    a KeyError at drag time."""
+    assert set(BYTES_PER_SAMPLE) == set(get_args(CheckoutSubtype))
 
 
 @pytest.mark.parametrize("parent,s,e,handle_mb,expect", [
