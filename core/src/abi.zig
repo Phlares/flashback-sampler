@@ -1219,6 +1219,7 @@ test "fb_playback_create rejects rate 0 and channels 3" {
 }
 
 test "fb_playback_bind rejects an n_frames * channels product that overflows usize" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest; // fb_playback_create needs a backend
     const pb = fb_playback_create("", 48_000, 2) orelse return error.CreateFailed;
     defer fb_playback_destroy(pb);
     const frames = [_]f32{0.0};
