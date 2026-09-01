@@ -2068,11 +2068,12 @@ class TurntableWindow(QMainWindow):
         if not (0 <= slot_index < len(self._state.slots)):
             return
         slot = self._state.slots[slot_index]
-        buffered = slot.buffered_seconds()
+        # No seconds figure: the flush clears the whole ring, and a number
+        # read at click time is stale by the time it runs (#40).
         reply = QMessageBox.question(
             self,
             "Flush buffer?",
-            f"Discard {buffered:.1f}s of buffered audio on {slot.name!r}?",
+            f"Flush all buffered audio on {slot.name!r}?",
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Cancel,
         )
