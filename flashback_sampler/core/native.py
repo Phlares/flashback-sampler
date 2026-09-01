@@ -61,7 +61,11 @@ def load() -> C.CDLL | None:
             continue
         try:
             lib = C.CDLL(str(path))
-        except OSError:
+            # A library that loads but lacks an export (a stale bundled
+            # build behind the header) is the same case as one that
+            # does not load: skip it, keep looking (#48).
+            _declare(lib)
+        except (OSError, AttributeError):
             # Exists but won't load: an architecture mismatch, a missing
             # runtime dependency, or a corrupted/truncated file -- the
             # realistic way a BUNDLED library breaks (a dev-build path
@@ -72,7 +76,6 @@ def load() -> C.CDLL | None:
             # NativeAudioCircularBuffer raises RuntimeError without it --
             # but a crash here, mid-scan, must not take down app startup.
             continue
-        _declare(lib)
         _lib = lib
         break
     return _lib
