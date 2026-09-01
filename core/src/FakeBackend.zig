@@ -17,6 +17,9 @@ pub const Hold = union(enum) { none, open, packet: usize };
 packets: []const []const f32,
 discontinuity_at: ?usize = null,
 open_error: ?Backend.Error = null,
+/// next() fails with DeviceNotFound instead of delivering packet k —
+/// a device that vanished mid-stream.
+stream_error_at: ?usize = null,
 mix_rate: u32 = 48_000,
 devices: []const Backend.Device = &.{},
 opened: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -99,6 +102,7 @@ fn next(ptr: *anyopaque, timeout_ms: u32) Backend.Error!?Backend.Packet {
         .packet => |k| if (k == i) self.waitRelease(),
         else => {},
     }
+    if (self.stream_error_at) |k| if (k == i) return error.DeviceNotFound;
     if (i < self.packets.len) {
         self.delivered.store(i + 1, .release);
         return .{ .frames = self.packets[i], .discontinuity = (self.discontinuity_at orelse std.math.maxInt(usize)) == i };
