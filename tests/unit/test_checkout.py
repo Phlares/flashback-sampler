@@ -438,8 +438,9 @@ def test_slice_references_the_parent_file_and_is_saved(scratch, tmp_path):
     assert (s.parent_id, s.path, s.start_frame, s.n_frames, s.state) == (parent.id, parent.path, 100, 200, "saved")
     assert s.bins["360"].shape == (360, 2, 1)
     # Bin 0 is empty (360 bins over 200 frames) and stays zero by the
-    # peaks.zig rule, so bin 1 is the first populated one. Both ends are
-    # pinned: bins over the WHOLE parent file would also start at 1100.
+    # peaks.zig rule, so bin 1 is the first populated one. Bin 1 pins the
+    # slice's OFFSET (the ramp starts at 1000, so bins over the whole
+    # parent file would read ~1001 here); bin 359 pins its LENGTH.
     assert s.bins["360"][1, 0, 0] == pytest.approx(1100.0)  # slice frame 0 = parent frame 100
     assert s.bins["360"][359, 1, 0] == pytest.approx(1299.0)  # slice frame 199 = parent frame 299
     assert mgr.file_refcount(parent.path) == 2

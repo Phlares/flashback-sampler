@@ -115,6 +115,24 @@ def test_render_slice_drag_mints_a_saved_slice_and_exports_the_span(scratch, tmp
     assert struct.unpack_from("<I", raw, raw.index(b"cue ") + 8 + 4 + 20)[0] == 50
 
 
+def test_render_slice_drag_discards_the_minted_slice_when_the_export_fails(scratch, tmp_path, monkeypatch):
+    """A failing export (full disk, an unwritable pool dir) must not
+    strand the slice: the caller never gets a DragRender, so it has no id
+    to discard, and adoption would resurrect the orphan at next launch."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    mgr.set_trim(co.id, 200, 300)
+
+    def boom(*a, **kw):
+        raise RuntimeError("could not export checkout; the disk is full")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        render_slice_drag(mgr, co.id, tmp_path, "x", now=WHEN)
+    assert [c.id for c in mgr.list()] == [co.id]  # the slice is gone
+    assert mgr.file_refcount(co.path) == 1  # its refcount on the parent file too
+    assert co.path.exists()  # and the parent's own file survived the cleanup
+
+
 def test_render_slice_drag_on_an_untrimmed_clip_falls_back_to_the_root(scratch, tmp_path):
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
     r = render_slice_drag(mgr, co.id, tmp_path, "x", now=WHEN)

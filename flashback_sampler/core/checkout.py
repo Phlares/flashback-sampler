@@ -235,7 +235,9 @@ class CheckoutManager:
     def slice(self, parent_id: str, start: int, n: int) -> Checkout:
         """A saved segment `(parent file, start, n)`. Waits for the
         parent's file: a slice has no RAM copy, so its bins and audio
-        come from disk (plan P13). Raises when the parent's write failed."""
+        come from disk (plan P13). Raises RuntimeError when the parent's
+        write failed, and KeyError when the parent was discarded while
+        this call waited for that write."""
         parent = self.get(parent_id)
         if start < 0 or n <= 0 or start + n > parent.n_frames:
             raise ValueError(f"slice {start}+{n} is outside the parent's {parent.n_frames} frames")

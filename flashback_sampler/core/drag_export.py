@@ -123,9 +123,26 @@ def render_slice_drag(
     if not co.has_trim():
         return render_root_drag(manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, now=now)
     start, n = co.trim_range()
+    # Mint BEFORE the export: the plan names the file for the slice, so
+    # the slice has to exist first. That leaves the export as the only
+    # step that can strand it -- the caller never receives a DragRender,
+    # so it has no id to discard, and adoption would resurrect the orphan
+    # (state `saved`, a manifest on disk, a refcount on the parent file)
+    # at the next launch. Undo the mint here, where the id is still known.
     s = manager.slice(checkout_id, start, n)
-    lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
-    target = _target(pool_dir, source_name, n / co.sample_rate, now)
-    # Markers are relative to the EXPORTED file, so rebase by lo.
-    manager.export_range(checkout_id, target, lo, hi - lo, bit_depth, markers=(start - lo, start + n - lo))
+    try:
+        lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
+        target = _target(pool_dir, source_name, n / co.sample_rate, now)
+        # Markers are relative to the EXPORTED file, so rebase by lo.
+        manager.export_range(checkout_id, target, lo, hi - lo, bit_depth, markers=(start - lo, start + n - lo))
+    except BaseException:
+        # discard() drops the manifest and the refcount; the parent's file
+        # survives on the parent's own reference. Swallowed like
+        # _destroy_quietly: a cleanup that fails must not replace the
+        # export error the caller actually needs to see.
+        try:
+            manager.discard(s.id)
+        except Exception:
+            pass
+        raise
     return DragRender(target, s.id, True)
