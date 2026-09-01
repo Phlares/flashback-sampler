@@ -402,10 +402,16 @@ class CheckoutManager:
     # Save / discard
     # ------------------------------------------------------------------
 
-    def export_range(self, checkout_id: str, target_path: Path | str, start: int, n: int, subtype: str = _DEFAULT_SUBTYPE) -> Path:
+    def export_range(self, checkout_id: str, target_path: Path | str, start: int, n: int, subtype: str = _DEFAULT_SUBTYPE,
+                     markers: tuple[int, int] | None = None) -> Path:
         """Materialise `[start, start + n)` of the checkout into a WAV.
         Zig reads the scratch file (or the RAM copy while the write is
-        still in flight) — no audio crosses into Python."""
+        still in flight) — no audio crosses into Python.
+
+        `markers` is `(slice_start, slice_end)` in frames RELATIVE TO THE
+        EXPORTED FILE, end exclusive; Zig appends the cue/smpl/adtl
+        chunks. A marker export needs the audio on disk, so it waits for
+        the scratch write and raises if that write failed."""
         if subtype not in _VALID_SUBTYPES:
             raise ValueError(f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}")
         target = Path(target_path)
@@ -421,7 +427,7 @@ class CheckoutManager:
                 raise KeyError(checkout_id)
             handle = self._checkouts[checkout_id].handle
             try:
-                self._scratch.checkout_export(handle, target, int(start), int(n), subtype)
+                self._scratch.checkout_export(handle, target, int(start), int(n), subtype, markers)
             except (RuntimeError, OSError) as e:
                 # R-h8k: one exception type out of every engine-reaching call.
                 raise RuntimeError(f"could not export checkout {checkout_id}; {e}") from e

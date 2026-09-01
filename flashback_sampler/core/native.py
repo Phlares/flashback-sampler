@@ -128,6 +128,12 @@ class FbMemInfo(C.Structure):
     _fields_ = [("total", C.c_uint64), ("available", C.c_uint64)]
 
 
+class FbMarkers(C.Structure):
+    """Mirrors FbMarkers in core/include/flashback_core.h: where the
+    exported slice sits inside the exported file, end exclusive."""
+    _fields_ = [("slice_start", C.c_uint64), ("slice_end", C.c_uint64)]
+
+
 class FbCheckoutInfo(C.Structure):
     _fields_ = [
         ("rate", C.c_uint32), ("channels", C.c_uint16), ("write_state", C.c_uint8),
@@ -281,7 +287,8 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_checkout_peak_bins.restype = C.c_int
     lib.fb_checkout_pin.argtypes = [vp, vp, C.c_uint8]
     lib.fb_checkout_pin.restype = None
-    lib.fb_checkout_export.argtypes = [vp, vp, C.c_char_p, u64, u64, C.c_int]
+    # Trailing markers pointer is nullable: None means "no marker chunks".
+    lib.fb_checkout_export.argtypes = [vp, vp, C.c_char_p, u64, u64, C.c_int, C.POINTER(FbMarkers)]
     lib.fb_checkout_export.restype = C.c_int
     lib.fb_checkout_destroy.argtypes = [vp, vp]
     lib.fb_checkout_destroy.restype = None
@@ -747,8 +754,10 @@ class NativeScratch:
     def checkout_pin(self, h: int, on: bool) -> None:
         self._lib.fb_checkout_pin(self._h, h, 1 if on else 0)
 
-    def checkout_export(self, h: int, dst, start: int, n: int, subtype: str) -> None:
-        _status_raise(self._lib.fb_checkout_export(self._h, h, str(dst).encode("utf-8"), int(start), int(n), SUBTYPE_INTS[subtype]), "fb_checkout_export")
+    def checkout_export(self, h: int, dst, start: int, n: int, subtype: str,
+                        markers: tuple[int, int] | None = None) -> None:
+        mk = None if markers is None else C.byref(FbMarkers(int(markers[0]), int(markers[1])))
+        _status_raise(self._lib.fb_checkout_export(self._h, h, str(dst).encode("utf-8"), int(start), int(n), SUBTYPE_INTS[subtype], mk), "fb_checkout_export")
 
     def checkout_destroy(self, h: int) -> None:
         self._lib.fb_checkout_destroy(self._h, h)
