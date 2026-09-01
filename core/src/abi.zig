@@ -1274,8 +1274,18 @@ test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
 
 test "FbWavInfo layout matches native.py's FbWavInfo ctypes struct" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(FbWavInfo));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Capture.Stats)); // FbCaptureStats: u8, pad, u64, u32, u32, u8, pad
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbWavInfo, "frames"));
+}
+
+test "FbCaptureStats layout matches native.py's FbCaptureStats ctypes struct" {
+    // u8, 7 pad, u64, u32, u32, u8, 7 pad. Offsets, not only the size:
+    // two fields swapped keep @sizeOf at 32 while ctypes reads the wrong
+    // bytes.
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Capture.Stats));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(Capture.Stats, "frames_written"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(Capture.Stats, "xruns"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(Capture.Stats, "mix_rate"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(Capture.Stats, "sources"));
 }
 
 test "FbCheckoutInfo layout matches native.py's FbCheckoutInfo ctypes struct" {

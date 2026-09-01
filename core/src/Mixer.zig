@@ -134,16 +134,21 @@ pub fn stop(self: *Mixer) void {
 pub fn stats(self: *const Mixer) Capture.Stats {
     var xruns = self.xruns.load(.acquire);
     var sources: u8 = 0;
+    // The first PUBLISHED rate: a source whose open failed never publishes
+    // one, and since #47 it no longer stalls the mix, so its 0 must not
+    // be the mix's reported rate. A stopped source keeps its rate.
+    var mix_rate: u32 = 0;
     for (self.sources[0..self.n_sources], 0..) |*s, i| {
         const st = s.capture.stats();
         xruns +|= st.xruns;
         if (st.running != 0) sources |= bit(i);
+        if (mix_rate == 0) mix_rate = st.mix_rate;
     }
     return .{
         .running = @intFromBool(self.running.load(.acquire)),
         .frames_written = self.frames_written.load(.acquire),
         .xruns = xruns,
-        .mix_rate = self.sources[0].capture.stats().mix_rate,
+        .mix_rate = mix_rate,
         .sources = sources,
     };
 }
@@ -233,10 +238,12 @@ fn run(self: *Mixer) void {
     }
 }
 
-/// Frames given up after a lap so the writer cannot catch the cursor
-/// before the read: one publish (Ring.max_write_frames, the ring's own
-/// guard band) in real use, half the stage when a stage is smaller than
-/// that (test rates) — the same formula serves both ends.
+/// Frames given up after a lap so ONE publish landing between the
+/// total_written load and the read cannot fail the tick: max_write_frames
+/// (the ring's own guard band) in real use, half the stage when a stage
+/// is smaller than that (test rates) — one formula serves both ends. More
+/// than one publish in that window still fails the read; the seqlock
+/// `complete = false` path re-derives every cursor next tick.
 fn lapMargin(capacity: u64) u64 {
     return @min(Ring.max_write_frames, capacity / 2);
 }
@@ -448,7 +455,7 @@ test "writer_active is true from start() through stop(), false after" {
     m.stop(); // idempotent
 }
 
-test "stats: xruns sums the captures' discontinuities, mix_rate is the first source's, lastError is the first non-empty" {
+test "stats: xruns sums the captures' discontinuities, mix_rate is the first published rate, lastError is the first non-empty" {
     var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
     defer target.deinit();
     var a = FakeBackend.init(&.{ &[_]f32{0}, &[_]f32{0} });
@@ -471,11 +478,10 @@ test "stats: xruns sums the captures' discontinuities, mix_rate is the first sou
     m.stop();
     const st = m.stats();
     try std.testing.expectEqual(@as(u32, 1), st.xruns);
-    // The router hands a/b out in ARRIVAL order, so which capture got
-    // 44_100 is not fixed. Pin "the first source's" against source 0
-    // itself, and that the value is one of the two scripted rates.
-    try std.testing.expectEqual(m.sources[0].capture.stats().mix_rate, st.mix_rate);
-    try std.testing.expect(st.mix_rate == 44_100 or st.mix_rate == 0); // b's open fails, so its capture never publishes a rate
+    // The router hands a/b out in ARRIVAL order, so which source got
+    // 44_100 is not fixed — but b's open fails and never publishes a
+    // rate, so the first PUBLISHED rate is a's whichever index it took.
+    try std.testing.expectEqual(@as(u32, 44_100), st.mix_rate);
     try std.testing.expectEqualStrings("open failed: FormatRejected", m.lastError());
 }
 

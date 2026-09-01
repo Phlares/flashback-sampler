@@ -36,6 +36,7 @@ SUBTYPE_INTS = {"FLOAT": 0, "PCM_24": 1, "PCM_16": 2}
 
 _lib: C.CDLL | None = None
 _lib_tried = False
+_skipped: list[tuple[Path, str]] = []  # (candidate, why) for the not-available error
 
 
 def _candidates() -> list[Path]:
@@ -63,9 +64,12 @@ def load() -> C.CDLL | None:
             lib = C.CDLL(str(path))
             # A library that loads but lacks an export (a stale bundled
             # build behind the header) is the same case as one that
-            # does not load: skip it, keep looking (#48).
+            # does not load: skip it, keep looking (#48). The reason is
+            # kept so a bug inside _declare itself cannot hide as a
+            # silent "not built anywhere".
             _declare(lib)
-        except (OSError, AttributeError):
+        except (OSError, AttributeError) as e:
+            _skipped.append((path, f"{type(e).__name__}: {e}"))
             # Exists but won't load: an architecture mismatch, a missing
             # runtime dependency, or a corrupted/truncated file -- the
             # realistic way a BUNDLED library breaks (a dev-build path
@@ -340,7 +344,8 @@ def _wav_raise(status: int, path) -> None:
 def _require_lib() -> C.CDLL:
     lib = load()
     if lib is None:
-        raise RuntimeError("flashback_core library not available")
+        why = "; ".join(f"{p}: {r}" for p, r in _skipped) or "not built in any candidate location"
+        raise RuntimeError(f"flashback_core library not available ({why})")
     return lib
 
 
