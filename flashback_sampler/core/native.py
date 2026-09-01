@@ -99,7 +99,8 @@ class FbCaptureSpec(C.Structure):
 
 class FbCaptureStats(C.Structure):
     _fields_ = [("running", C.c_uint8), ("frames_written", C.c_uint64),
-                ("xruns", C.c_uint32), ("mix_rate", C.c_uint32)]
+                ("xruns", C.c_uint32), ("mix_rate", C.c_uint32),
+                ("sources", C.c_uint8)]
 
 
 class FbProcess(C.Structure):

@@ -1274,6 +1274,7 @@ test "PeakBin is two packed f32 (the ctypes host relies on this layout)" {
 
 test "FbWavInfo layout matches native.py's FbWavInfo ctypes struct" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(FbWavInfo));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Capture.Stats)); // FbCaptureStats: u8, pad, u64, u32, u32, u8, pad
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(FbWavInfo, "frames"));
 }
 

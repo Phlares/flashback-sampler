@@ -15,6 +15,7 @@ class _FakeLib:
         self.calls = []
         self.started = False
         self.stats = (0, 0, 0, 48_000)  # running, frames, xruns, mix_rate
+        self.sources = 0
         self.err = b""
         self.devices = []
         self.ring_status = 0
@@ -37,6 +38,7 @@ class _FakeLib:
             if name in ("fb_capture_stats", "fb_mixer_stats"):
                 st = a[1]._obj if hasattr(a[1], "_obj") else a[1]
                 st.running, st.frames_written, st.xruns, st.mix_rate = self.stats
+                st.sources = self.sources
             if name in ("fb_capture_last_error", "fb_mixer_last_error"):
                 return self.err
             if name == "fb_devices_list":
@@ -252,3 +254,11 @@ def test_mixed_start_stop_stats_and_close_are_inert_after_close(lib):
     with pytest.raises(RuntimeError):
         src.start()
     assert len(lib.calls) == before
+
+
+def test_running_sources_names_the_live_sources_of_a_mix(lib):
+    """#47: a mixed slot reports one bit per source so a dead source can be
+    named while the mix carries on."""
+    src = NativeMixedSource(_FakeBuffer(), specs=[{"kind": "loopback"}, {"kind": "input", "device_id": "{mic}"}])
+    lib.sources = 0b01  # source 1 died; source 0 still streams
+    assert src.running_sources() == 0b01
