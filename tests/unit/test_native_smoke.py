@@ -241,3 +241,11 @@ def test_not_available_error_names_the_skipped_candidate_and_why(tmp_path, monke
         native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=1)
     assert str(stale_path) in str(info.value)
     assert "fb_" in str(info.value)
+
+
+def test_mem_info_reports_physical_ram_and_free_within_it():
+    """#41: the footprint check reads total and available physical bytes
+    from the engine; on Windows both are known and non-zero."""
+    total, available = native.mem_info()
+    assert total > 1024 ** 3  # more than 1 GB on any dev box
+    assert 0 < available <= total

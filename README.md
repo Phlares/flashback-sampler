@@ -29,7 +29,7 @@ CLI flags:
 
 ## Memory
 
-Arming a slot reserves its whole ring up front: `seconds × rate × channels × 4` bytes (the FULL preset — 900 s, 48 kHz, stereo — is 345.6 MB, the number the #17 soak recorded). The project RAM budget (Preferences; default 4096 MB, `DEFAULT_PROJECT_RAM_BUDGET_MB` in `state.py`) refuses a slot that would exceed it (`AppState.add_slot`, checked against `total_project_ram_bytes()`); a ring the OS cannot commit fails at `fb_ring_create` with `out_of_memory` (PR d, #41), which the UI reports as a MemoryError until #16 gives it a home.
+Arming a slot reserves its whole ring up front: `seconds × rate × channels × 4` bytes (the FULL preset — 900 s, 48 kHz, stereo — is 345.6 MB). Two checks run before a ring is created. **Max footprint** (Preferences → Memory) caps the session's resident bytes; the default is 25 % of physical RAM, and 0 means no cap. The second check refuses a ring larger than the free physical memory the engine reports (`fb_mem_info`). A ring the OS still cannot commit fails at `fb_ring_create` with `out_of_memory`, which the UI reports as a MemoryError until #16 gives it a home.
 
 ## Using it
 
