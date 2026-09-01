@@ -1249,7 +1249,8 @@ class TurntableWindow(QMainWindow):
 
     def _render_for_drag(self, slot, co, *, trimmed: bool, markers_at_trim: bool = False):
         """Render for an OS drag; returns a DragRender or None on failure
-        (already reported). A trimmed clip-deck drag mints a slice."""
+        (already reported). A clip-deck drag mints a slice when the clip
+        has a trim; otherwise the whole clip goes."""
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if trimmed:
@@ -1320,9 +1321,11 @@ class TurntableWindow(QMainWindow):
             self._refresh_clip_side(auto_select_newest=auto_select_newest)
             self.statusBar().showMessage(f"Exported {render.path.name}", 4000)
         else:
+            # Unlink first: the pool file is the only thing the user can
+            # see, and a discard that raises must not strand it.
+            render.path.unlink(missing_ok=True)
             if discard_on_cancel:
                 slot.checkout_manager.discard(render.checkout_id)
-            render.path.unlink(missing_ok=True)
 
     def _on_buffer_drag_out(self, start_frac: float, end_frac: float) -> None:
         """Snipe the current buffer selection straight out of the app:

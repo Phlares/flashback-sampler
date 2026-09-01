@@ -1226,3 +1226,17 @@ def test_buffer_drag_rebases_handles_onto_a_lapped_ring(qapp, tmp_path, monkeypa
     finally:
         win.close()
         state.shutdown()
+
+
+def test_set_drag_handle_mb_persists_and_applies(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+
+    saved = []
+    monkeypatch.setattr(tw, "save_drag_handle_mb", saved.append)
+    win = TurntableWindow(state)
+    try:
+        win._set_drag_handle_mb(50)
+        assert win._drag_handle_mb == 50.0
+        assert saved == [50]
+    finally:
+        win.close()

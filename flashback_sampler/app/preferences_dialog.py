@@ -125,6 +125,9 @@ class PreferencesDialog(QDialog):
         self.drag_cap_spin = QSpinBox()
         self.drag_cap_spin.setRange(0, 100000)
         self.drag_cap_spin.setSuffix(" MB")
+        # One callback per committed value, not one per keystroke: each
+        # callback writes config.json.
+        self.drag_cap_spin.setKeyboardTracking(False)
         self.drag_cap_spin.setValue(int(drag_handle_mb))
 
         def _drag_cap_changed(v: int) -> None:
