@@ -124,6 +124,10 @@ class FbWavInfo(C.Structure):
     _fields_ = [("rate", C.c_uint32), ("channels", C.c_uint16), ("subtype", C.c_uint8), ("frames", C.c_uint64)]
 
 
+class FbMemInfo(C.Structure):
+    _fields_ = [("total", C.c_uint64), ("available", C.c_uint64)]
+
+
 class FbCheckoutInfo(C.Structure):
     _fields_ = [
         ("rate", C.c_uint32), ("channels", C.c_uint16), ("write_state", C.c_uint8),
@@ -192,6 +196,8 @@ def _declare(lib: C.CDLL) -> None:
 
     lib.fb_wav_info.argtypes = [C.c_char_p, C.POINTER(FbWavInfo)]
     lib.fb_wav_info.restype = C.c_int
+    lib.fb_mem_info.argtypes = [C.POINTER(FbMemInfo)]
+    lib.fb_mem_info.restype = None
     # out_len (R-h6a): the callee validates this against its own
     # derived length instead of trusting a re-derived caller size.
     lib.fb_wav_read.argtypes = [C.c_char_p, C.c_uint64, C.c_size_t, f32p, C.c_size_t]
@@ -347,6 +353,13 @@ def _require_lib() -> C.CDLL:
         why = "; ".join(f"{p}: {r}" for p, r in _skipped) or "not built in any candidate location"
         raise RuntimeError(f"flashback_core library not available ({why})")
     return lib
+
+
+def mem_info() -> tuple[int, int]:
+    """(total, available) physical bytes; 0 where the platform cannot say."""
+    info = FbMemInfo()
+    _require_lib().fb_mem_info(C.byref(info))
+    return int(info.total), int(info.available)
 
 
 def wav_info(path) -> FbWavInfo:

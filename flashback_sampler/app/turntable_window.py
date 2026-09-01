@@ -38,6 +38,7 @@ from flashback_sampler.app.config import (
     save_export_bit_depth,
     save_export_pool_dir,
     save_global_hotkeys_enabled,
+    save_max_footprint_mb,
     save_scratch_dir,
     save_show_notifications,
 )
@@ -542,7 +543,14 @@ class TurntableWindow(QMainWindow):
         self._scratch_dir_pref = path_str
         self.statusBar().showMessage("Scratch folder applies at next launch", 4000)
 
+    def _set_max_footprint_mb(self, mb: float) -> None:
+        self._state.set_max_footprint_mb(mb)
+        save_max_footprint_mb(self._state.max_footprint_mb)
+
     def _open_preferences_dialog(self) -> None:
+        from flashback_sampler.core import native
+
+        mem_total, mem_free = native.mem_info()
         dlg = PreferencesDialog(
             show_notifications=self._show_notifications,
             on_notifications_changed=self._set_notifications_enabled,
@@ -555,6 +563,10 @@ class TurntableWindow(QMainWindow):
             on_export_bit_depth_changed=self._set_export_bit_depth,
             scratch_dir=self._scratch_dir_pref,
             on_scratch_dir_changed=self._set_scratch_dir,
+            max_footprint_mb=self._state.max_footprint_mb,
+            on_max_footprint_changed=self._set_max_footprint_mb,
+            mem_total_mb=mem_total / (1024 * 1024),
+            mem_free_mb=mem_free / (1024 * 1024),
             parent=self,
         )
         dlg.exec()

@@ -14,6 +14,7 @@ const Mixer = @import("Mixer.zig");
 const Playback = @import("Playback.zig");
 const Checkout = @import("Checkout.zig");
 const Scratch = @import("Scratch.zig");
+const mem = @import("mem.zig");
 const builtin = @import("builtin");
 
 // One allocator instance for every ABI-created object. smp_allocator is
@@ -201,6 +202,12 @@ fn ringCreate(alloc: std.mem.Allocator, rate: u32, channels: u16, seconds: f64, 
 // exactly like channels == 3.
 export fn fb_ring_create(rate: u32, channels: u16, seconds: f64, status: ?*FbStatus) ?*Ring {
     return ringCreate(allocator, rate, channels, seconds, status);
+}
+
+/// Physical memory for the host's footprint check (#41): total and
+/// currently available bytes, 0 where the platform cannot say.
+export fn fb_mem_info(out: *mem.Info) void {
+    out.* = mem.query();
 }
 
 export fn fb_ring_destroy(ring: *Ring) void {
