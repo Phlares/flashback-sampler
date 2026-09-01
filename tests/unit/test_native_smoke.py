@@ -219,3 +219,25 @@ def test_load_skips_a_candidate_that_loads_but_lacks_a_symbol(tmp_path, monkeypa
 
     assert native.load() is good
     assert declared == [good]
+
+
+def test_not_available_error_names_the_skipped_candidate_and_why(tmp_path, monkeypatch):
+    """A skipped candidate must not vanish into "not built anywhere": the
+    RuntimeError names the path and the missing export."""
+    class Stale:
+        def __getattr__(self, name):
+            raise AttributeError(f"function '{name}' not found")
+
+    stale_path = tmp_path / "stale.dll"
+    stale_path.write_text("x")
+    monkeypatch.setattr(native, "_candidates", lambda: [stale_path])
+    monkeypatch.setattr(native.C, "CDLL", lambda p: Stale())
+    monkeypatch.setattr(native, "_lib", None)
+    monkeypatch.setattr(native, "_lib_tried", False)
+    monkeypatch.setattr(native, "_skipped", [])
+
+    assert native.load() is None
+    with pytest.raises(RuntimeError) as info:
+        native.NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=8, channels=1)
+    assert str(stale_path) in str(info.value)
+    assert "fb_" in str(info.value)

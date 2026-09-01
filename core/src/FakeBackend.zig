@@ -102,7 +102,10 @@ fn next(ptr: *anyopaque, timeout_ms: u32) Backend.Error!?Backend.Packet {
         .packet => |k| if (k == i) self.waitRelease(),
         else => {},
     }
-    if (self.stream_error_at) |k| if (k == i) return error.DeviceNotFound;
+    if (self.stream_error_at) |k| {
+        std.debug.assert(k <= self.packets.len); // past the list it would never fire
+        if (k == i) return error.DeviceNotFound;
+    }
     if (i < self.packets.len) {
         self.delivered.store(i + 1, .release);
         return .{ .frames = self.packets[i], .discontinuity = (self.discontinuity_at orelse std.math.maxInt(usize)) == i };
