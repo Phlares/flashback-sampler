@@ -24,7 +24,8 @@ typedef struct FbCapture FbCapture; /* opaque */
 typedef struct FbMixer FbMixer; /* opaque */
 typedef struct FbDevice { uint8_t kind; uint8_t is_default; uint32_t mix_rate; uint16_t mix_channels; char id[128]; char name[128]; } FbDevice;
 typedef struct FbCaptureSpec { uint8_t kind; uint32_t pid; uint32_t rate; uint16_t channels; const char *device_id; } FbCaptureSpec;
-typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; } FbCaptureStats;
+/* sources: bit i set while source i streams (a capture: bit 0 == running; a mixer: one bit per source). */
+typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; uint8_t sources; } FbCaptureStats;
 typedef struct FbProcess { uint32_t pid; uint32_t ppid; char name[128]; } FbProcess;
 
 typedef struct FbPlayback FbPlayback; /* opaque */

@@ -9,7 +9,10 @@ const FakeBackend = @import("FakeBackend.zig");
 const ErrorSlot = @import("ErrorSlot.zig");
 const Capture = @This();
 
-pub const Stats = extern struct { running: u8, frames_written: u64, xruns: u32, mix_rate: u32 };
+/// `sources`: bit i set while source i is streaming. A Capture reports
+/// its own `running` in bit 0; a Mixer reports one bit per source, so a
+/// host can name a source that died while the mix carries on (#47).
+pub const Stats = extern struct { running: u8, frames_written: u64, xruns: u32, mix_rate: u32, sources: u8 };
 pub const max_device_id = 256;
 pub const max_error = ErrorSlot.max_len;
 
@@ -29,6 +32,11 @@ id_len: usize,
 thread: ?std.Thread = null,
 stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+/// True once the worker's stream returned for any reason (open failure,
+/// stream failure, stop). `running` cannot tell "not up yet" from "never
+/// coming": a source whose open failed never runs at all. Readers that
+/// must not wait on such a source (Mixer) key off this instead.
+done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 frames_written: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 xruns: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 mix_rate: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -69,6 +77,7 @@ fn currentSpec(self: *const Capture) Backend.Spec {
 pub fn start(self: *Capture) !void {
     if (self.thread != null) return error.AlreadyRunning;
     self.stop_flag.store(false, .monotonic);
+    self.done.store(false, .monotonic);
     // Clear the TEXT too, not only the length. err backs lastError(), and
     // fb_capture_last_error hands lastError()'s pointer straight to ctypes
     // as a C string. A stale byte at position 0 caused the restart-after-
@@ -101,11 +110,13 @@ pub fn stop(self: *Capture) void {
 }
 
 pub fn stats(self: *const Capture) Stats {
+    const running = self.running.load(.acquire);
     return .{
-        .running = @intFromBool(self.running.load(.acquire)),
+        .running = @intFromBool(running),
         .frames_written = self.frames_written.load(.acquire),
         .xruns = self.xruns.load(.acquire),
         .mix_rate = self.mix_rate.load(.acquire),
+        .sources = @intFromBool(running),
     };
 }
 
@@ -119,6 +130,7 @@ fn setError(self: *Capture, comptime fmt: []const u8, args: anytype) void {
 
 fn run(self: *Capture) void {
     self.runStream();
+    self.done.store(true, .release);
     self.idleUntilStopped();
 }
 
@@ -213,6 +225,43 @@ test "open failure lands in lastError and running stays false" {
     cap.stop();
     try std.testing.expectEqualStrings("open failed: DeviceNotFound", cap.lastError());
     try std.testing.expectEqual(@as(u8, 0), cap.stats().running);
+    try std.testing.expectEqual(@as(u8, 0), cap.stats().sources);
+    try std.testing.expect(cap.done.load(.acquire));
+}
+
+test "a stream failure mid-run lands in lastError, flips running false and done true" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    const pkt = [_]f32{0} ** 8;
+    var fake = FakeBackend.init(&.{ &pkt, &pkt });
+    fake.stream_error_at = 2; // two packets land, the third read fails
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "flaky", .rate = 48_000, .channels = 2 });
+    try cap.start();
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.done.load(.acquire);
+        }
+    }.f);
+    try std.testing.expectEqual(@as(u8, 0), cap.stats().running);
+    try std.testing.expectEqual(@as(u64, 8), cap.stats().frames_written);
+    try std.testing.expectEqualStrings("stream failed: DeviceNotFound", cap.lastError());
+    cap.stop();
+}
+
+test "stats.sources mirrors running in bit 0 while the stream is up" {
+    var ring = try Ring.init(std.testing.allocator, .{ .sample_rate = 48_000, .channels = 2, .seconds = 1.0 });
+    defer ring.deinit();
+    var fake = FakeBackend.init(&.{});
+    var cap = Capture.init(&ring, fake.backend(), .{ .kind = .input, .device_id = "", .rate = 48_000, .channels = 2 });
+    try cap.start();
+    try waitUntil(&cap, struct {
+        fn f(c: *Capture) bool {
+            return c.running.load(.acquire);
+        }
+    }.f);
+    try std.testing.expectEqual(@as(u8, 1), cap.stats().sources);
+    cap.stop();
+    try std.testing.expectEqual(@as(u8, 0), cap.stats().sources);
 }
 
 test "discontinuity flag increments xruns; mix_rate is published" {
