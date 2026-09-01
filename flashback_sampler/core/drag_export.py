@@ -10,6 +10,10 @@ Two renderers: `render_root_drag` writes the whole checkout (markers at
 its trim on request, nothing minted); `render_slice_drag` mints a saved
 slice of a trimmed clip and writes the slice plus handle audio around
 it, markers at the slice.
+
+`alc=True` adds an Ableton Live Clip sidecar naming the marked bounds --
+only where there ARE markers, since a full-clip drag has no bounds to
+write.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .alc import write_alc
 from .checkout import CheckoutManager, CheckoutSubtype
 
 _MAX_COLLISION_SUFFIX = 999
@@ -31,6 +36,7 @@ class DragRender:
     path: Path
     checkout_id: str  # the checkout the drop commits (a minted slice, or the clip itself)
     minted: bool      # True when the render created a slice checkout
+    sidecar: Path | None = None  # the .alc offered alongside `path`, when written
 
 
 def sanitize_source_name(name: str) -> str:
@@ -75,6 +81,36 @@ def export_span(
     return max(0, slice_start - half), min(parent_frames, slice_end + half)
 
 
+def _export(
+    manager: CheckoutManager,
+    checkout_id: str,
+    target: Path,
+    lo: int,
+    n: int,
+    bit_depth: CheckoutSubtype,
+    markers: tuple[int, int] | None,
+    alc: bool,
+    rate: int,
+) -> Path | None:
+    """Write the WAV, then the `.alc` sidecar when one was asked for and
+    there are markers to put in it. Returns the sidecar path or None.
+
+    Any failure unlinks both files before re-raising: the caller is told
+    the render failed and never receives a DragRender, so anything left
+    in the pool is a file nobody owns. `markers` are frames into the
+    EXPORTED file; the sidecar wants them in seconds."""
+    sidecar = target.with_suffix(".alc")
+    try:
+        manager.export_range(checkout_id, target, lo, n, bit_depth, markers=markers)
+        if not (alc and markers):
+            return None
+        return write_alc(sidecar, target, markers[0] / rate, markers[1] / rate, frames=n, rate=rate)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise
+
+
 def _target(pool_dir: Path | str, source_name: str, duration_s: float, now: datetime | None) -> Path:
     pool = Path(pool_dir)
     pool.mkdir(parents=True, exist_ok=True)
@@ -89,6 +125,7 @@ def render_root_drag(
     *,
     bit_depth: CheckoutSubtype = "FLOAT",
     markers_at_trim: bool = False,
+    alc: bool = False,
     now: datetime | None = None,
 ) -> DragRender:
     """The whole checkout, optionally with markers at its trim (the
@@ -101,8 +138,10 @@ def render_root_drag(
         start, n = co.trim_range()
         markers = (start, start + n)
     target = _target(pool_dir, source_name, co.duration_seconds, now)
-    manager.export_range(checkout_id, target, 0, co.n_frames, bit_depth, markers=markers)
-    return DragRender(target, checkout_id, False)
+    sidecar = _export(
+        manager, checkout_id, target, 0, co.n_frames, bit_depth, markers, alc, co.sample_rate
+    )
+    return DragRender(target, checkout_id, False, sidecar)
 
 
 def render_slice_drag(
@@ -113,6 +152,7 @@ def render_slice_drag(
     *,
     bit_depth: CheckoutSubtype = "FLOAT",
     handle_mb: float = 0.0,
+    alc: bool = False,
     now: datetime | None = None,
 ) -> DragRender:
     """The clip-deck drag of a trimmed band: mint a saved slice, export
@@ -121,7 +161,9 @@ def render_slice_drag(
     whole clip goes."""
     co = manager.get(checkout_id)
     if not co.has_trim():
-        return render_root_drag(manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, now=now)
+        return render_root_drag(
+            manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, alc=alc, now=now
+        )
     start, n = co.trim_range()
     # Mint BEFORE the export: the plan names the file for the slice, so
     # the slice has to exist first. That leaves the export as the only
@@ -134,7 +176,10 @@ def render_slice_drag(
         lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
         target = _target(pool_dir, source_name, n / co.sample_rate, now)
         # Markers are relative to the EXPORTED file, so rebase by lo.
-        manager.export_range(checkout_id, target, lo, hi - lo, bit_depth, markers=(start - lo, start + n - lo))
+        sidecar = _export(
+            manager, checkout_id, target, lo, hi - lo, bit_depth,
+            (start - lo, start + n - lo), alc, co.sample_rate,
+        )
     except BaseException:
         # discard() drops the manifest and the refcount; the parent's file
         # survives on the parent's own reference. Swallowed like
@@ -145,4 +190,4 @@ def render_slice_drag(
         except Exception:
             pass
         raise
-    return DragRender(target, s.id, True)
+    return DragRender(target, s.id, True, sidecar)

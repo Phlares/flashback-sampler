@@ -10,6 +10,7 @@ import pytest
 
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from flashback_sampler.core.checkout import CheckoutManager, CheckoutSubtype
+from flashback_sampler.core import drag_export
 from flashback_sampler.core.drag_export import (
     BYTES_PER_SAMPLE, DragRender, drag_filename, export_span, render_root_drag,
     render_slice_drag, resolve_collision, sanitize_source_name,
@@ -145,3 +146,70 @@ def test_render_creates_pool_dir(scratch, tmp_path):
     pool = tmp_path / "nested" / "exports"
     r = render_root_drag(mgr, co.id, pool, "x", now=WHEN)
     assert r.path.parent == pool and r.path.exists()
+
+
+def _alc_clip(path):
+    import gzip, xml.etree.ElementTree as ET
+    with gzip.open(path, "rb") as fh:
+        return next(ET.fromstring(fh.read()).iter("AudioClip"))
+
+
+def test_render_slice_drag_writes_an_alc_sidecar_at_the_slice(scratch, tmp_path):
+    """The WAV carries slice + handles; the sidecar says which seconds of
+    it are the slice, so Live opens there with the handles recoverable."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)  # 1000 Hz mono
+    mgr.set_trim(co.id, 200, 300)
+    handles = 100 * 4 / 2**20  # 50 extra frames each side
+    r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", handle_mb=handles, alc=True, now=WHEN)
+    assert r.sidecar == r.path.with_suffix(".alc") and r.sidecar.exists()
+    clip = _alc_clip(r.sidecar)
+    # span 150..350, slice 200..300 -> 0.05 s .. 0.15 s into the export
+    assert clip.find("Loop/LoopStart").get("Value") == "0.05"
+    assert clip.find("Loop/LoopEnd").get("Value") == "0.15"
+    assert clip.find("Loop/HiddenLoopEnd").get("Value") == "0.2"  # 200 exported frames
+    assert clip.find("SampleRef/FileRef/Path").get("Value") == r.path.resolve().as_posix()
+    assert clip.find("SampleRef/DefaultDuration").get("Value") == "200"
+
+
+def test_render_slice_drag_writes_no_sidecar_unless_asked(scratch, tmp_path):
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    mgr.set_trim(co.id, 200, 300)
+    r = render_slice_drag(mgr, co.id, tmp_path, "x", now=WHEN)
+    assert r.sidecar is None and list(tmp_path.glob("*.alc")) == []
+
+
+def test_render_root_drag_writes_a_sidecar_only_when_it_has_markers(scratch, tmp_path):
+    """A full-clip drag has no bounds to write, so it gets no sidecar
+    even with the preference on."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    mgr.set_trim(co.id, 100, 300)
+    full = render_root_drag(mgr, co.id, tmp_path / "full", "x", alc=True, now=WHEN)
+    assert full.sidecar is None and list((tmp_path / "full").glob("*.alc")) == []
+
+    marked = render_root_drag(
+        mgr, co.id, tmp_path / "marked", "x", markers_at_trim=True, alc=True, now=WHEN
+    )
+    assert marked.sidecar == marked.path.with_suffix(".alc")
+    clip = _alc_clip(marked.sidecar)
+    assert clip.find("Loop/LoopStart").get("Value") == "0.1"
+    assert clip.find("Loop/LoopEnd").get("Value") == "0.3"
+
+
+def test_render_slice_drag_cleans_up_the_wav_and_the_slice_when_the_sidecar_fails(
+    scratch, tmp_path, monkeypatch
+):
+    """A sidecar that will not write is a failed render: the caller is
+    told, so the pool must not keep the WAV and the mint must not
+    survive to be adopted at the next launch."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    mgr.set_trim(co.id, 200, 300)
+
+    def boom(*a, **kw):
+        raise OSError("could not write the sidecar; the disk is full")
+
+    monkeypatch.setattr(drag_export, "write_alc", boom)
+    with pytest.raises(OSError, match="the disk is full"):
+        render_slice_drag(mgr, co.id, tmp_path, "x", alc=True, now=WHEN)
+    assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.alc")) == []
+    assert [c.id for c in mgr.list()] == [co.id]
+    assert co.path.exists()

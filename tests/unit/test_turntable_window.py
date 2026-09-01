@@ -1240,3 +1240,81 @@ def test_set_drag_handle_mb_persists_and_applies(qapp, state, monkeypatch):
         assert saved == [50]
     finally:
         win.close()
+
+
+def _trimmed_clip_for_drag(state, win, tmp_path):
+    _write_one_second(state)
+    mgr = state.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    win._refresh_clip_side(auto_select_newest=True)
+    mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+    win._export_pool_dir = tmp_path
+    win._drag_handle_mb = 0.0
+    return co
+
+
+def test_clip_drag_with_the_alc_pref_offers_the_wav_and_the_sidecar(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _trimmed_clip_for_drag(state, win, tmp_path)
+        win._drag_alc_sidecar = True
+        offered = []
+
+        def fake_drag(widget, paths):
+            offered.append(paths)
+            return True
+
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", fake_drag)
+        win._on_clip_drag_out(0.25, 0.5)
+        wav = next(tmp_path.glob("*.wav"))
+        alc = wav.with_suffix(".alc")
+        assert alc.exists()
+        assert offered == [[wav, alc]]
+    finally:
+        win.close()
+
+
+def test_clip_drag_cancel_with_the_alc_pref_leaves_neither_file(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        co = _trimmed_clip_for_drag(state, win, tmp_path)
+        win._drag_alc_sidecar = True
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: False)
+        win._on_clip_drag_out(0.25, 0.5)
+        assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.alc")) == []
+        assert [c.id for c in state.checkout_manager.list()] == [co.id]
+    finally:
+        win.close()
+
+
+def test_clip_drag_without_the_alc_pref_offers_the_wav_alone(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _trimmed_clip_for_drag(state, win, tmp_path)
+        offered = []
+
+        def fake_drag(widget, paths):
+            offered.append(paths)
+            return True
+
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", fake_drag)
+        win._on_clip_drag_out(0.25, 0.5)
+        assert offered == [[next(tmp_path.glob("*.wav"))]]
+        assert list(tmp_path.glob("*.alc")) == []
+    finally:
+        win.close()
+
+
+def test_set_drag_alc_sidecar_persists_and_applies(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+
+    saved = []
+    monkeypatch.setattr(tw, "save_drag_alc_sidecar", saved.append)
+    win = TurntableWindow(state)
+    try:
+        assert win._drag_alc_sidecar is False
+        win._set_drag_alc_sidecar(True)
+        assert win._drag_alc_sidecar is True
+        assert saved == [True]
+    finally:
+        win.close()

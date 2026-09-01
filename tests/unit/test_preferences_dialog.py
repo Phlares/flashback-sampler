@@ -121,3 +121,14 @@ def test_drag_handle_row_reports_edits(qapp):
     assert dlg.drag_cap_spin.value() == 200
     dlg.drag_cap_spin.setValue(50)
     assert seen == [50.0]
+
+
+def test_alc_sidecar_checkbox_reports_toggles(qapp):
+    """Off by default; the drag offers the .alc only when it is on."""
+    seen = []
+    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
+                            drag_alc_sidecar=False, on_drag_alc_sidecar_changed=seen.append)
+    assert dlg.alc_sidecar_check.isChecked() is False
+    assert "Ableton" in dlg.alc_sidecar_check.text()
+    dlg.alc_sidecar_check.setChecked(True)
+    assert seen == [True]

@@ -40,4 +40,5 @@ def _isolated_scratch_dir(tmp_path, monkeypatch, request):
     from flashback_sampler.app import turntable_window
     monkeypatch.setattr(turntable_window, "load_export_bit_depth", lambda path=None: "FLOAT")
     monkeypatch.setattr(turntable_window, "load_drag_handle_mb", lambda path=None: config.DEFAULT_DRAG_HANDLE_MB)
+    monkeypatch.setattr(turntable_window, "load_drag_alc_sidecar", lambda path=None: False)
     yield

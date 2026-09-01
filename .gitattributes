@@ -6,3 +6,8 @@
 # always match what `zig fmt` wrote, regardless of local git config.
 *.zig text eol=lf
 *.zon text eol=lf
+
+# The Ableton clip template must ship byte-identical to what Live wrote:
+# the round-trip test compares it against the captured .alc, and any EOL
+# rewrite on checkout would break that on one platform only.
+flashback_sampler/core/alc_template.xml -text

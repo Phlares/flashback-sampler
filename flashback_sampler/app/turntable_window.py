@@ -30,12 +30,14 @@ from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
+    load_drag_alc_sidecar,
     load_drag_handle_mb,
     load_export_bit_depth,
     load_export_pool_dir,
     load_global_hotkeys_enabled,
     load_scratch_dir,
     load_show_notifications,
+    save_drag_alc_sidecar,
     save_drag_handle_mb,
     save_export_bit_depth,
     save_export_pool_dir,
@@ -317,6 +319,7 @@ class TurntableWindow(QMainWindow):
         self._export_pool_dir: Path = load_export_pool_dir()
         self._export_bit_depth: str = load_export_bit_depth()
         self._drag_handle_mb: float = load_drag_handle_mb()
+        self._drag_alc_sidecar: bool = load_drag_alc_sidecar()
 
         # Scratch dir pref — display-only here; AppState already adopted
         # the scratch dir it was constructed with, so a change here takes
@@ -548,6 +551,10 @@ class TurntableWindow(QMainWindow):
         self._drag_handle_mb = float(mb)
         save_drag_handle_mb(mb)
 
+    def _set_drag_alc_sidecar(self, enabled: bool) -> None:
+        self._drag_alc_sidecar = bool(enabled)
+        save_drag_alc_sidecar(enabled)
+
     def _set_scratch_dir(self, path_str: str) -> None:
         save_scratch_dir(path_str)
         self._scratch_dir_pref = path_str
@@ -573,6 +580,8 @@ class TurntableWindow(QMainWindow):
             on_export_bit_depth_changed=self._set_export_bit_depth,
             drag_handle_mb=self._drag_handle_mb,
             on_drag_handle_mb_changed=self._set_drag_handle_mb,
+            drag_alc_sidecar=self._drag_alc_sidecar,
+            on_drag_alc_sidecar_changed=self._set_drag_alc_sidecar,
             scratch_dir=self._scratch_dir_pref,
             on_scratch_dir_changed=self._set_scratch_dir,
             max_footprint_mb=self._state.max_footprint_mb,
@@ -1261,6 +1270,7 @@ class TurntableWindow(QMainWindow):
                     slot.name,
                     bit_depth=self._export_bit_depth,
                     handle_mb=self._drag_handle_mb,
+                    alc=self._drag_alc_sidecar,
                 )
             return render_root_drag(
                 slot.checkout_manager,
@@ -1269,6 +1279,7 @@ class TurntableWindow(QMainWindow):
                 slot.name,
                 bit_depth=self._export_bit_depth,
                 markers_at_trim=markers_at_trim,
+                alc=self._drag_alc_sidecar,
             )
         except Exception as e:
             QMessageBox.warning(self, "Export failed", str(e))
@@ -1308,10 +1319,12 @@ class TurntableWindow(QMainWindow):
     ) -> None:
         """Shared tail of both decks' drag-out flows: run the blocking OS
         drag, then commit (mark saved + refresh) or roll back (delete the
-        just-rendered file; discard the checkout too when it was created
+        just-rendered files; discard the checkout too when it was created
         just for this drag). `render.checkout_id` is what the drop
-        commits — a minted slice, or the clip itself."""
-        if perform_file_drag(source_widget, render.path):
+        commits — a minted slice, or the clip itself. The Ableton sidecar
+        rides the same drag and shares its fate."""
+        files = [render.path] + ([render.sidecar] if render.sidecar else [])
+        if perform_file_drag(source_widget, files):
             try:
                 slot.checkout_manager.mark_saved(render.checkout_id)
             except KeyError:
@@ -1321,9 +1334,10 @@ class TurntableWindow(QMainWindow):
             self._refresh_clip_side(auto_select_newest=auto_select_newest)
             self.statusBar().showMessage(f"Exported {render.path.name}", 4000)
         else:
-            # Unlink first: the pool file is the only thing the user can
-            # see, and a discard that raises must not strand it.
-            render.path.unlink(missing_ok=True)
+            # Unlink first: the pool files are the only thing the user
+            # can see, and a discard that raises must not strand them.
+            for f in files:
+                f.unlink(missing_ok=True)
             if discard_on_cancel:
                 slot.checkout_manager.discard(render.checkout_id)
 

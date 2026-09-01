@@ -133,6 +133,8 @@ CHECKOUT_CACHE_MB_KEY = "checkout_cache_mb"
 # stay resident; every written root drops to disk).
 DEFAULT_CHECKOUT_CACHE_MB = 0.0
 
+DRAG_ALC_SIDECAR_KEY = "drag_alc_sidecar"
+
 DRAG_HANDLE_MB_KEY = "drag_handle_mb"
 # Extra parent audio a slice drag carries around the slice, half each
 # side. On by default: a DAW user who nudges a marker wants audio there.
@@ -209,3 +211,14 @@ def load_drag_handle_mb(path: Path | None = None) -> float:
 
 def save_drag_handle_mb(mb: float, path: Path | None = None) -> None:
     set_pref(DRAG_HANDLE_MB_KEY, max(0.0, float(mb)), path)
+
+
+def load_drag_alc_sidecar(path: Path | None = None) -> bool:
+    """Whether a drag also offers an Ableton Live Clip (.alc) naming the
+    slice. Off by default: it helps only Ableton users, and every other
+    drop target sees a second file it has no use for."""
+    return bool(get_pref(DRAG_ALC_SIDECAR_KEY, False, path))
+
+
+def save_drag_alc_sidecar(enabled: bool, path: Path | None = None) -> None:
+    set_pref(DRAG_ALC_SIDECAR_KEY, bool(enabled), path)

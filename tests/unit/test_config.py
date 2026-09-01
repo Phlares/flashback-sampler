@@ -190,3 +190,15 @@ def test_drag_handle_mb_defaults_200_and_floors_at_zero(tmp_path):
     assert config.load_drag_handle_mb(p) == 0.0
     config.save_drag_handle_mb(-1, p)
     assert config.load_drag_handle_mb(p) == 0.0
+
+
+def test_drag_alc_sidecar_defaults_off_and_roundtrips(tmp_path):
+    """Off by default: the sidecar only helps Ableton users, and every
+    other drop target would see a second file it cannot read."""
+    from flashback_sampler.app import config
+    p = tmp_path / "c.json"
+    assert config.load_drag_alc_sidecar(p) is False
+    config.save_drag_alc_sidecar(True, p)
+    assert config.load_drag_alc_sidecar(p) is True
+    config.save_drag_alc_sidecar(False, p)
+    assert config.load_drag_alc_sidecar(p) is False
