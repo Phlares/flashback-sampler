@@ -196,3 +196,26 @@ def test_get_peak_bins_and_get_rms_levels_after_close_keep_their_shape():
     summary = buf.get_summary_bins(4)
     assert summary.shape == (4, 1)
     assert np.all(summary == 0.0)
+
+
+def test_load_skips_a_candidate_that_loads_but_lacks_a_symbol(tmp_path, monkeypatch):
+    """#48: a stale bundled library that loads but misses an export must be
+    skipped like a broken one, not raise AttributeError through startup."""
+    class Stale:
+        def __getattr__(self, name):
+            raise AttributeError(name)
+
+    good = object()
+    stale_path = tmp_path / "stale.dll"
+    good_path = tmp_path / "good.dll"
+    stale_path.write_text("x")
+    good_path.write_text("x")
+    monkeypatch.setattr(native, "_candidates", lambda: [stale_path, good_path])
+    monkeypatch.setattr(native.C, "CDLL", lambda p: Stale() if p == str(stale_path) else good)
+    declared = []
+    monkeypatch.setattr(native, "_declare", lambda lib: declared.append(lib) if lib is good else Stale().fb_ring_create)
+    monkeypatch.setattr(native, "_lib", None)
+    monkeypatch.setattr(native, "_lib_tried", False)
+
+    assert native.load() is good
+    assert declared == [good]
