@@ -36,6 +36,8 @@ class PreferencesDialog(QDialog):
         on_export_pool_dir_changed: Callable[[str], None] | None = None,
         export_bit_depth: str = "FLOAT",
         on_export_bit_depth_changed: Callable[[str], None] | None = None,
+        drag_handle_mb: float = 200.0,
+        on_drag_handle_mb_changed: Callable[[float], None] | None = None,
         scratch_dir: str = "",
         on_scratch_dir_changed: Callable[[str], None] | None = None,
         max_footprint_mb: float = 0.0,
@@ -117,6 +119,31 @@ class PreferencesDialog(QDialog):
 
         self.export_depth_combo.currentIndexChanged.connect(_depth_changed)
         root.addWidget(self.export_depth_combo)
+
+        drag_cap_row = QHBoxLayout()
+        drag_cap_row.addWidget(QLabel("Drag-out handles (tunable): add up to"))
+        self.drag_cap_spin = QSpinBox()
+        self.drag_cap_spin.setRange(0, 100000)
+        self.drag_cap_spin.setSuffix(" MB")
+        self.drag_cap_spin.setValue(int(drag_handle_mb))
+
+        def _drag_cap_changed(v: int) -> None:
+            if on_drag_handle_mb_changed is not None:
+                on_drag_handle_mb_changed(float(v))
+
+        self.drag_cap_spin.valueChanged.connect(_drag_cap_changed)
+        drag_cap_row.addWidget(self.drag_cap_spin, 1)
+        root.addLayout(drag_cap_row)
+        self.drag_cap_hint = QLabel(
+            "of extra parent audio before and after a dragged slice, with "
+            "markers at the slice, so the DAW can recover more than you "
+            "sliced. The slice itself is always exported whole. "
+            "0 = slice only — use it on constrained systems: the handles "
+            "also size the buffer-deck root's RAM copy."
+        )
+        self.drag_cap_hint.setWordWrap(True)
+        self.drag_cap_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
+        root.addWidget(self.drag_cap_hint)
 
         root.addSpacing(10)
         root.addWidget(QLabel("<b>Scratch</b>"))

@@ -30,11 +30,13 @@ from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
+    load_drag_handle_mb,
     load_export_bit_depth,
     load_export_pool_dir,
     load_global_hotkeys_enabled,
     load_scratch_dir,
     load_show_notifications,
+    save_drag_handle_mb,
     save_export_bit_depth,
     save_export_pool_dir,
     save_global_hotkeys_enabled,
@@ -53,7 +55,10 @@ from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
 from flashback_sampler.core.drag_export import (
-    render_drag_file,
+    BYTES_PER_SAMPLE,
+    export_span,
+    render_root_drag,
+    render_slice_drag,
     sanitize_source_name,
 )
 from flashback_sampler.core.source_status import (
@@ -311,6 +316,7 @@ class TurntableWindow(QMainWindow):
         # a clip for an OS drag (see _render_for_drag).
         self._export_pool_dir: Path = load_export_pool_dir()
         self._export_bit_depth: str = load_export_bit_depth()
+        self._drag_handle_mb: float = load_drag_handle_mb()
 
         # Scratch dir pref — display-only here; AppState already adopted
         # the scratch dir it was constructed with, so a change here takes
@@ -538,6 +544,10 @@ class TurntableWindow(QMainWindow):
         self._export_bit_depth = depth
         save_export_bit_depth(depth)
 
+    def _set_drag_handle_mb(self, mb: float) -> None:
+        self._drag_handle_mb = float(mb)
+        save_drag_handle_mb(mb)
+
     def _set_scratch_dir(self, path_str: str) -> None:
         save_scratch_dir(path_str)
         self._scratch_dir_pref = path_str
@@ -561,6 +571,8 @@ class TurntableWindow(QMainWindow):
             on_export_pool_dir_changed=self._set_export_pool_dir,
             export_bit_depth=self._export_bit_depth,
             on_export_bit_depth_changed=self._set_export_bit_depth,
+            drag_handle_mb=self._drag_handle_mb,
+            on_drag_handle_mb_changed=self._set_drag_handle_mb,
             scratch_dir=self._scratch_dir_pref,
             on_scratch_dir_changed=self._set_scratch_dir,
             max_footprint_mb=self._state.max_footprint_mb,
@@ -1235,18 +1247,27 @@ class TurntableWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
 
-    def _render_for_drag(self, slot, co, trimmed: bool):
-        """Render `co` into the export pool; returns the path or None on
-        failure (already reported to the user)."""
+    def _render_for_drag(self, slot, co, *, trimmed: bool, markers_at_trim: bool = False):
+        """Render for an OS drag; returns a DragRender or None on failure
+        (already reported). A trimmed clip-deck drag mints a slice."""
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            return render_drag_file(
+            if trimmed:
+                return render_slice_drag(
+                    slot.checkout_manager,
+                    co.id,
+                    self._export_pool_dir,
+                    slot.name,
+                    bit_depth=self._export_bit_depth,
+                    handle_mb=self._drag_handle_mb,
+                )
+            return render_root_drag(
                 slot.checkout_manager,
                 co.id,
                 self._export_pool_dir,
                 slot.name,
                 bit_depth=self._export_bit_depth,
-                trimmed=trimmed,
+                markers_at_trim=markers_at_trim,
             )
         except Exception as e:
             QMessageBox.warning(self, "Export failed", str(e))
@@ -1267,19 +1288,18 @@ class TurntableWindow(QMainWindow):
         if co is None:
             return
         slot = self._state.active_slot
-        path = self._render_for_drag(slot, co, trimmed)
-        if path is None:
+        r = self._render_for_drag(slot, co, trimmed=trimmed)
+        if r is None:
             return
         self._complete_drag(
-            slot, co, path, self.clip_panel.waveform,
-            discard_on_cancel=False, auto_select_newest=False,
+            slot, r, self.clip_panel.waveform,
+            discard_on_cancel=r.minted, auto_select_newest=r.minted,
         )
 
     def _complete_drag(
         self,
         slot,
-        co,
-        path,
+        render,
         source_widget,
         *,
         discard_on_cancel: bool,
@@ -1288,24 +1308,27 @@ class TurntableWindow(QMainWindow):
         """Shared tail of both decks' drag-out flows: run the blocking OS
         drag, then commit (mark saved + refresh) or roll back (delete the
         just-rendered file; discard the checkout too when it was created
-        just for this drag)."""
-        if perform_file_drag(source_widget, path):
+        just for this drag). `render.checkout_id` is what the drop
+        commits — a minted slice, or the clip itself."""
+        if perform_file_drag(source_widget, render.path):
             try:
-                slot.checkout_manager.mark_saved(co.id)
+                slot.checkout_manager.mark_saved(render.checkout_id)
             except KeyError:
                 # Checkout was discarded while the drag loop ran; the
                 # exported file is still valid — nothing to flip.
                 pass
             self._refresh_clip_side(auto_select_newest=auto_select_newest)
-            self.statusBar().showMessage(f"Exported {path.name}", 4000)
+            self.statusBar().showMessage(f"Exported {render.path.name}", 4000)
         else:
             if discard_on_cancel:
-                slot.checkout_manager.discard(co.id)
-            path.unlink(missing_ok=True)
+                slot.checkout_manager.discard(render.checkout_id)
+            render.path.unlink(missing_ok=True)
 
     def _on_buffer_drag_out(self, start_frac: float, end_frac: float) -> None:
         """Snipe the current buffer selection straight out of the app:
-        implicit checkout → render → OS drag. On accept the checkout
+        implicit checkout → render → OS drag. The root pulls selection ±
+        handles (Preferences → Drag-out handles); the selection becomes
+        its trim, marked in the exported file. On accept the checkout
         stays on the clip deck as `saved` (the pool + deck form the
         sample bank); on cancel it is discarded.
 
@@ -1324,10 +1347,20 @@ class TurntableWindow(QMainWindow):
                 "scrolled out of the buffer.", 4000,
             )
             return
+        sel_start, sel_end = sel_abs
+        buf = slot.buffer
+        total = buf.total_written
+        oldest = max(0, total - buf.buffer_size)
+        # export_span works in parent-relative frames, so rebase the ring's
+        # absolute indices onto the oldest sample it still holds, then put
+        # the offset back for create_from_abs_range.
+        lo, hi = export_span(total - oldest, sel_start - oldest, sel_end - oldest, buf.channels,
+                             BYTES_PER_SAMPLE[self._export_bit_depth], self._drag_handle_mb)
+        lo, hi = lo + oldest, hi + oldest
         co = None
         while co is None:
             try:
-                co = slot.checkout_manager.create_from_abs_range(*sel_abs)
+                co = slot.checkout_manager.create_from_abs_range(lo, hi)
             except (RuntimeError, ValueError) as e:
                 # At the active-checkout cap, make room by evicting the
                 # oldest `saved` clip — its pool file is the durable
@@ -1336,12 +1369,13 @@ class TurntableWindow(QMainWindow):
                 if not (at_cap and self._evict_oldest_saved_checkout(slot)):
                     self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
                     return
-        path = self._render_for_drag(slot, co, trimmed=True)
-        if path is None:
+        slot.checkout_manager.set_trim(co.id, sel_start - lo, sel_end - lo)
+        r = self._render_for_drag(slot, co, trimmed=False, markers_at_trim=True)
+        if r is None:
             slot.checkout_manager.discard(co.id)
             return
         self._complete_drag(
-            slot, co, path, self.buffer_panel.waveform,
+            slot, r, self.buffer_panel.waveform,
             discard_on_cancel=True, auto_select_newest=True,
         )
 
