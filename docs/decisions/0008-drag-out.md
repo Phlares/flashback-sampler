@@ -18,3 +18,4 @@ A DAW accepts one thing from every app: a plain OS file drop. Virtual-file drags
 
 - Drag the clip edge in the DAW and the audio around the slice is there.
 - One formula covers the constrained system and the whole-parent case.
+- Live refuses a drop that mixes a `.alc` and a `.wav`, so with the sidecar preference on the drag offers the `.alc` alone and the WAV stays in the export pool.
