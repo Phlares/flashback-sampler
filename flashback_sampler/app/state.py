@@ -250,7 +250,7 @@ class AppState:
                                           buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
                             name=m.slot or "Adopted", armed=False,
                         )
-                    co = slot.checkout_manager.adopt_root(m, audio, partial, int(m.start_frame))
+                    co = slot.checkout_manager.adopt_root(m, audio, partial, m.start_frame)
             except Exception:
                 # No on-disk artefact may abort a launch -- skip and continue.
                 continue

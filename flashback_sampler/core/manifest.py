@@ -106,7 +106,7 @@ def read_manifest(path: Path | str) -> Optional[Manifest]:
     # root owns its own file; an old slice's best guess is its parent's,
     # which is what adoption assumed then. The next rewrite stores the
     # real value.
-    data.setdefault("file", data["parent"] if data["parent"] is not None else data["id"])
+    data.setdefault("file", data["parent"] or data["id"])
     try:
         return Manifest(**{k: data[k] for k in _FIELDS})
     except TypeError:
