@@ -151,7 +151,7 @@ class PreferencesDialog(QDialog):
         root.addWidget(self.drag_cap_hint)
 
         self.alc_sidecar_check = QCheckBox(
-            "Also offer an Ableton Live Clip (.alc) on drag"
+            "Drag an Ableton Live Clip (.alc) instead of the WAV"
         )
         self.alc_sidecar_check.setChecked(drag_alc_sidecar)
         if on_drag_alc_sidecar_changed is not None:
@@ -160,9 +160,9 @@ class PreferencesDialog(QDialog):
             )
         root.addWidget(self.alc_sidecar_check)
         self.alc_sidecar_hint = QLabel(
-            "Live opens the clip at the slice, with the handles still "
-            "there on the clip edge. Other drop targets get a second file "
-            "they cannot read."
+            "The WAV stays in the pool folder; the clip references it. "
+            "Other DAWs and Explorer get the .alc file, so leave this off "
+            "unless you drop into Live."
         )
         self.alc_sidecar_hint.setWordWrap(True)
         self.alc_sidecar_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")

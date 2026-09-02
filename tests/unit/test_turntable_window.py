@@ -1253,7 +1253,9 @@ def _trimmed_clip_for_drag(state, win, tmp_path):
     return co
 
 
-def test_clip_drag_with_the_alc_pref_offers_the_wav_and_the_sidecar(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_with_the_alc_pref_offers_only_the_alc(qapp, state, tmp_path, monkeypatch):
+    """Live refuses a mixed .alc + .wav drop, so the pref offers the .alc
+    alone. The WAV still lands in the pool -- the .alc references it."""
     win = TurntableWindow(state)
     try:
         _trimmed_clip_for_drag(state, win, tmp_path)
@@ -1269,7 +1271,8 @@ def test_clip_drag_with_the_alc_pref_offers_the_wav_and_the_sidecar(qapp, state,
         wav = next(tmp_path.glob("*.wav"))
         alc = wav.with_suffix(".alc")
         assert alc.exists()
-        assert offered == [[wav, alc]]
+        assert wav.exists()
+        assert offered == [[alc]]
     finally:
         win.close()
 

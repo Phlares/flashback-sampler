@@ -621,3 +621,5 @@ the spike passes.
 - `export_span` has no `handle_mb <= 0` branch: `half` is 0 there and
   the clamps return the slice itself. The budget is floored at 0 so a
   negative one cannot truncate the slice.
+- Live refuses a mixed `.alc` + `.wav` drop, so with the preference on
+  the drag offers only the `.alc`.

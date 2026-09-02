@@ -1324,10 +1324,16 @@ class TurntableWindow(QMainWindow):
         drag, then commit (mark saved + refresh) or roll back (delete the
         just-rendered files; discard the checkout too when it was created
         just for this drag). `render.checkout_id` is what the drop
-        commits — a minted slice, or the clip itself. The Ableton sidecar
-        rides the same drag and shares its fate."""
-        files = [render.path] + ([render.sidecar] if render.sidecar else [])
-        if perform_file_drag(source_widget, files):
+        commits — a minted slice, or the clip itself.
+
+        Live refuses any drop that mixes a `.alc` with a `.wav`, so when
+        a sidecar was written the drag offers it ALONE. The WAV stays in
+        the pool, and the `.alc` references it by absolute path. Cancel
+        still deletes both: the pool files are what the user can see,
+        offered or not."""
+        all_files = [render.path] + ([render.sidecar] if render.sidecar else [])
+        offered = [render.sidecar] if render.sidecar else [render.path]
+        if perform_file_drag(source_widget, offered):
             try:
                 slot.checkout_manager.mark_saved(render.checkout_id)
             except KeyError:
@@ -1339,7 +1345,7 @@ class TurntableWindow(QMainWindow):
         else:
             # Unlink first: the pool files are the only thing the user
             # can see, and a discard that raises must not strand them.
-            for f in files:
+            for f in all_files:
                 f.unlink(missing_ok=True)
             if discard_on_cancel:
                 slot.checkout_manager.discard(render.checkout_id)
