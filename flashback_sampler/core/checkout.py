@@ -307,7 +307,7 @@ class CheckoutManager:
         write_manifest(self._scratch_dir, Manifest(
             id=co.id, slot=self._slot_name, rate=co.sample_rate, channels=co.channels,
             abs_start=co.abs_sample_start, abs_end=co.abs_sample_end, created_at=time.time(),
-            parent=co.parent_id, start_frame=co.start_frame, n_frames=co.n_frames,
+            parent=co.parent_id, file=co.path.stem, start_frame=co.start_frame, n_frames=co.n_frames,
             trim_in=co.trim_in_samples, trim_out=co.trim_out_samples, state=co.state,
             partial=co.partial, bins=bins_to_json(co.bins) if co.bins else None,
         ))
@@ -316,29 +316,23 @@ class CheckoutManager:
     # Adoption (launch)
     # ------------------------------------------------------------------
 
-    def adopt_root(self, m: Manifest, audio: Path, partial: bool, start_frame: int = 0) -> Checkout:
-        """A checkout opened directly over a file that already exists.
-        Frame count comes from the file (a partial file reports its true
-        prefix); bins from the manifest when present, else computed once
-        from the file.
-
-        `start_frame` is the absolute offset into `audio` this checkout
-        starts at -- 0 for a real root, since a root is a slice at
-        `(0, all)`. `adopt_scratch` passes the manifest's own value for
-        an ORPHANED slice: one whose parent left the manifests (the user
-        discarded it, or the window's count-cap eviction did) while its
-        file is still on disk, held there by this slice's refcount. Such
-        a checkout keeps the `parent_id` its manifest recorded even
-        though no parent is adopted, so the manifest rewritten here sends
-        every later launch down this same path."""
+    def adopt_root(self, m: Manifest, audio: Path, partial: bool) -> Checkout:
+        """A checkout opened directly over a file that already exists, at
+        `m.start_frame` into it: 0 for a root, the slice's own offset for
+        an orphaned slice whose parent left the manifests. Frame count
+        comes from the file (a partial file reports its true prefix);
+        bins from the manifest when present, else computed once from the
+        file. An orphan keeps the `parent_id` its manifest recorded, so
+        every later launch takes this same path."""
+        start_frame = int(m.start_frame)
         handle = None
         try:
-            handle = self._scratch.checkout_open(audio, int(start_frame), max(1, int(m.n_frames)))
+            handle = self._scratch.checkout_open(audio, start_frame, max(1, int(m.n_frames)))
             info = self._scratch.checkout_info(handle)
             co = Checkout(
                 id=m.id, handle=handle, path=Path(audio),
                 sample_rate=int(info.rate), channels=int(info.channels),
-                n_frames=int(info.n_frames), start_frame=int(start_frame),
+                n_frames=int(info.n_frames), start_frame=start_frame,
                 abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
                 parent_id=m.parent,
                 trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),

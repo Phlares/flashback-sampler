@@ -324,7 +324,7 @@ def test_adopt_root_and_slice_share_one_file_with_a_refcount(scratch, tmp_path):
     assert a.id == root.id and a.n_frames == 500 and mgr2.write_state(a.id) == "adopted"
     assert a.bins["540"].shape == (540, 2, 1)  # from the manifest, no audio read
     m_slice = Manifest(id="slice1", slot="Main", rate=1000, channels=1, abs_start=1100, abs_end=1200,
-                       created_at=2.0, parent=root.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
+                       created_at=2.0, parent=root.id, file=root.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
                        state="saved", partial=False, bins=None)
     write_manifest(tmp_path, m_slice)
     s = mgr2.adopt_slice(m_slice, a)
@@ -387,7 +387,7 @@ def test_engine_errors_surface_as_one_runtimeerror_everywhere(scratch, tmp_path,
 
     a = mgr2.adopt_root(m_root, root.path, partial=False)
     m_slice = Manifest(id="slice1", slot="Main", rate=1000, channels=1, abs_start=1100, abs_end=1200,
-                       created_at=2.0, parent=a.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
+                       created_at=2.0, parent=a.id, file=a.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
                        state="saved", partial=False, bins=None)
     write_manifest(tmp_path, m_slice)
     with monkeypatch.context() as m:
@@ -452,6 +452,18 @@ def test_slice_references_the_parent_file_and_is_saved(scratch, tmp_path):
     assert audio[0, 0] == pytest.approx(1100.0)
     mgr.discard(s.id)
     assert not parent.path.exists()
+
+
+def test_manifests_name_the_file_owning_checkout(scratch, tmp_path):
+    """A root owns its file; every slice under it, however deep, names
+    the root, so adoption never has to walk parents to find the audio."""
+    mgr = _mgr(scratch, tmp_path)
+    root = mgr.create(duration_s=0.5)
+    s1 = mgr.slice(root.id, 100, 300)
+    s2 = mgr.slice(s1.id, 50, 100)
+    assert read_manifest(manifest_path(tmp_path, root.id)).file == root.id
+    assert read_manifest(manifest_path(tmp_path, s1.id)).file == root.id
+    assert read_manifest(manifest_path(tmp_path, s2.id)).file == root.id
 
 
 def test_slice_rejects_a_span_past_the_parent_and_a_failed_parent(scratch, tmp_path, monkeypatch):

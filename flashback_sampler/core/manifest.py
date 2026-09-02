@@ -1,9 +1,10 @@
 """Per-checkout manifest: the JSON sidecar next to a scratch WAV.
 
 The manifest is what adoption reads at launch: identity, provenance
-(slot, absolute ring range), the file range this checkout covers, its
-parent for a slice, trim, state, and the deck's peak bins (so a launch
-with gigabytes of scratch draws the deck without reading audio).
+(slot, absolute ring range), the checkout that owns the file and the
+range of it this checkout covers, its parent for a slice, trim, state,
+and the deck's peak bins (so a launch with gigabytes of scratch draws
+the deck without reading audio).
 
 Pure Python, no Qt, no engine calls. Bins travel as flat float lists in
 the numpy layout (n_bins, 2, channels); `bins_to_json` / `bins_from_json`
@@ -41,6 +42,7 @@ class Manifest:
     abs_end: int
     created_at: float
     parent: Optional[str]
+    file: str  # id of the checkout whose `<id>.wav` holds the audio; a root names itself
     start_frame: int
     n_frames: int
     trim_in: int
@@ -51,6 +53,7 @@ class Manifest:
 
 
 _FIELDS = {f.name for f in fields(Manifest)}
+_REQUIRED = _FIELDS - {"file"}
 
 
 def manifest_path(scratch_dir: Path | str, checkout_id: str) -> Path:
@@ -94,20 +97,14 @@ def read_manifest(path: Path | str) -> Optional[Manifest]:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    # Subset check, not equality: a future Manifest field with a
-    # default (`= something`) would keep `Manifest(**data)` below from
-    # raising for an OLD on-disk file that lacks it, so the TypeError
-    # catch alone would silently start accepting those files without
-    # actually validating them. This guard is what still enforces "all
-    # of TODAY's required fields are present" once that happens — keep
-    # it even though it looks redundant with the catch right now; a
-    # later /simplify pass should not delete it as dead code.
-    if not isinstance(data, dict) or not (_FIELDS <= set(data)):
+    if not isinstance(data, dict) or not (_REQUIRED <= set(data)):
         return None
-    try:
-        return Manifest(**{k: data[k] for k in _FIELDS})
-    except TypeError:
-        return None
+    # A manifest without `file` (written before 0.4.1): a root owns its
+    # own file, a slice gets its parent's. A nested slice from then whose
+    # parent is gone stays unfindable; the next rewrite stores the real
+    # value for every other case.
+    data.setdefault("file", data["parent"] or data["id"])
+    return Manifest(**{k: data[k] for k in _FIELDS})
 
 
 def scan(scratch_dir: Path | str) -> list[Manifest]:
@@ -127,14 +124,15 @@ def scan(scratch_dir: Path | str) -> list[Manifest]:
 
 
 def resolve_audio(scratch_dir: Path | str, m: Manifest) -> Optional[tuple[Path, bool]]:
-    """(path, partial) for a root's audio. `<id>.wav` wins; a lone
-    `<id>.wav.part` (crash mid-write) is renamed into place and flagged
+    """(path, partial) for the audio `m` lives in: `<file>.wav`, its own
+    for a root, the root's for a slice. The `.wav` wins; a lone
+    `<file>.wav.part` (crash mid-write) is renamed into place and flagged
     partial — the reader clamps to what it holds. None when neither
     exists. Never deletes anything."""
-    wav = audio_path(scratch_dir, m.id)
+    wav = audio_path(scratch_dir, m.file)
     if wav.exists():
         return wav, False
-    part = Path(scratch_dir) / f"{m.id}{PART_SUFFIX}"
+    part = Path(scratch_dir) / f"{m.file}{PART_SUFFIX}"
     if part.exists():
         part.rename(wav)
         return wav, True
