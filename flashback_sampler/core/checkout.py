@@ -48,6 +48,11 @@ _VALID_SUBTYPES: tuple[str, ...] = ("FLOAT", "PCM_24", "PCM_16")
 BIN_COUNTS: tuple[int, ...] = (540, 360)
 
 
+class ScratchWriteFailed(RuntimeError):
+    """The checkout's scratch write failed, so nothing can reference its
+    file. The RAM copy still exports."""
+
+
 @dataclass
 class Checkout:
     """A frozen span of ring audio. `handle` is the Zig `*Checkout`;
@@ -241,8 +246,8 @@ class CheckoutManager:
     def slice(self, parent_id: str, start: int, n: int) -> Checkout:
         """A saved segment `(parent file, start, n)`. Waits for the
         parent's file: a slice has no RAM copy, so its bins and audio
-        come from disk (plan P13). Raises RuntimeError when the parent's
-        write failed, and KeyError when the parent was discarded while
+        come from disk (plan P13). Raises ScratchWriteFailed when the
+        parent's write failed, and KeyError when the parent was discarded while
         this call waited for that write."""
         parent = self.get(parent_id)
         if start < 0 or n <= 0 or start + n > parent.n_frames:
@@ -256,7 +261,7 @@ class CheckoutManager:
             if ws in ("written", "adopted"):
                 break
             if ws == "failed":
-                raise RuntimeError("scratch write failed for the parent; cannot slice")
+                raise ScratchWriteFailed("scratch write failed for the parent; cannot slice")
             if time.monotonic() > deadline:
                 raise RuntimeError("timed out waiting for the parent's scratch write")
             time.sleep(0.005)
@@ -521,9 +526,12 @@ class CheckoutManager:
         mint through here, so the same trim leaves as the same slice
         whichever way it goes."""
         co = self.get(checkout_id)
-        if not co.has_trim() or self.write_state(checkout_id) == "failed":
+        if not co.has_trim():
             return None
-        return self.slice(checkout_id, *co.trim_range())
+        try:
+            return self.slice(checkout_id, *co.trim_range())
+        except ScratchWriteFailed:
+            return None
 
     def save(
         self,

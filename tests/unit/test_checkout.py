@@ -283,15 +283,15 @@ def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     mgr.set_trim(co.id, 100, 300)
     assert co.trim_range() == (100, 200) and co.has_trim()
     out = tmp_path / "t.wav"
-    mgr.save(co.id, out, trimmed=True, subtype="PCM_16", mark_saved=False)
+    mgr.save(co.id, out, trimmed=True, subtype="PCM_16")
     audio, info = read_wav(out)
     assert info.frames == 200 and info.subtype == "PCM_16"
-    assert mgr.get(co.id).state == "pending"
     m = read_manifest(manifest_path(tmp_path, co.id))
     assert (m.trim_in, m.trim_out) == (100, 300)
     full = tmp_path / "f.wav"
-    mgr.save(co.id, full, trimmed=False)
+    mgr.save(co.id, full, trimmed=False, mark_saved=False)
     assert read_wav(full)[1].frames == 500
+    assert mgr.get(co.id).state == "pending"  # mark_saved=False leaves the clip alone
 
 
 def test_save_validation(scratch, tmp_path):
