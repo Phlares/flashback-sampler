@@ -797,6 +797,103 @@ def test_adoption_of_a_slice_needs_its_parent(tmp_path):
     st2.shutdown()
 
 
+def _stamp_created_at(scratch_dir, checkout_id, when):
+    """Pin a manifest's creation stamp so `scan` adopts in a known order.
+    The Windows `time.time()` tick is ~15.6 ms, so two manifests written
+    in one tick would otherwise sort by id."""
+    import json
+    p = scratch_dir / f"{checkout_id}.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["created_at"] = when
+    p.write_text(json.dumps(d), encoding="utf-8")
+
+
+def test_adoption_keeps_a_slice_whose_parent_is_gone(tmp_path):
+    """C1: a trimmed drag mints a slice, then the parent is discarded --
+    by the user, or by the window's count-cap eviction. The slice is the
+    only reference keeping the parent's WAV alive, so adoption must take
+    it: as a ROOT over that file at the slice's own span. Skipping it
+    leaks both the WAV and the slice's own manifest forever."""
+    from flashback_sampler.core import native
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    _written(st, co)
+    sl = mgr.slice(co.id, 100, 50)
+    parent_wav = co.path
+    mgr.discard(co.id)  # the slice's refcount keeps the file alive
+    assert parent_wav.exists()
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    mgr2 = st2.slots[0].checkout_manager
+    assert [c.id for c in mgr2.list()] == [sl.id]
+    back = mgr2.get(sl.id)
+    assert (back.path, back.start_frame, back.n_frames, back.state) == (parent_wav, 100, 50, "saved")
+    assert back.parent_id == co.id  # recorded, so the next launch takes this same path
+    # Through the handle: the adopted checkout must read the slice's
+    # samples, not the file's first 50 frames.
+    got = native.wav_read(mgr2.export_range(back.id, tmp_path / "out" / "orphan.wav", 0, 50), 0, 50)
+    assert np.array_equal(got, native.wav_read(parent_wav, 100, 50))
+    mgr2.discard(back.id)  # the last reference to the file
+    assert not parent_wav.exists() and not (tmp_path / f"{sl.id}.json").exists()
+    st2.shutdown()
+
+
+def test_adoption_of_a_slice_of_a_slice_reads_the_same_audio(tmp_path):
+    """C2: a manifest's `start_frame` is ABSOLUTE into the file, but the
+    Zig slice call takes a PARENT-RELATIVE start and adds the parent's
+    own start itself. Re-adopting a nested slice with the absolute value
+    reads at `parent.start + start` -- the wrong audio, or (here) past
+    the parent's end, where Zig's range guard drops the slice."""
+    from flashback_sampler.core import native
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    _written(st, co)
+    s1 = mgr.slice(co.id, 100, 300)   # file frames 100..400
+    s2 = mgr.slice(s1.id, 250, 50)    # file frames 350..400
+    assert s2.start_frame == 350      # absolute into the file
+    before = native.wav_read(mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50)
+    _stamp_created_at(tmp_path, s1.id, 10.0)
+    _stamp_created_at(tmp_path, s2.id, 20.0)
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    mgr2 = st2.slots[0].checkout_manager
+    assert sorted(c.id for c in mgr2.list()) == sorted([co.id, s1.id, s2.id])
+    back = mgr2.get(s2.id)
+    assert back.start_frame == 350
+    after = native.wav_read(mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50)
+    assert np.array_equal(after, before)
+    st2.shutdown()
+
+
+def test_adoption_skips_a_slice_that_starts_before_its_parent(tmp_path):
+    """The absolute -> parent-relative conversion can only go negative on
+    a manifest that disagrees with its parent. Skip it like any other
+    corrupt manifest, and keep adopting everything else."""
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    _written(st, co)
+    s1 = mgr.slice(co.id, 100, 300)
+    _stamp_created_at(tmp_path, s1.id, 10.0)
+    write_manifest(tmp_path, Manifest(id="before", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
+                                      created_at=20.0, parent=s1.id, start_frame=50, n_frames=10, trim_in=0,
+                                      trim_out=0, state="saved", partial=False, bins=None))
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert sorted(c.id for c in st2.slots[0].checkout_manager.list()) == sorted([co.id, s1.id])
+    assert (tmp_path / "before.json").exists()  # left in place
+    st2.shutdown()
+
+
 def test_remove_slot_discards_its_checkouts_and_files(tmp_path):
     from flashback_sampler.core.quality_presets import preset_by_name
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
