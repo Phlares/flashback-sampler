@@ -1,7 +1,9 @@
 //! Checkout.zig — one checkout: the ONE RAM copy of its frames (or none,
 //! once evicted) plus where the same audio lives on disk:
-//! `(path, start_frame, n_frames)`. A root owns its file at (0, all); a
-//! slice references its parent's file. Python decides lifetimes (which
+//! `(path, start_frame, n_frames)`. A root created from the ring owns its
+//! file at (0, all); a slice references its parent's file; an adopted
+//! checkout may start anywhere in a file it does not own (an orphaned
+//! slice re-adopted over its parent's WAV). Python decides lifetimes (which
 //! file is deleted when); this file holds bytes and moves them.
 //!
 //! Concurrency: `write_state` is atomic (the ABI polls it without a
@@ -31,7 +33,10 @@ allocator: std.mem.Allocator,
 frames: ?[]f32,
 path_buf: [max_path]u8,
 path_len: usize,
-/// Offset into the file. 0 for a root; a slice's offset into its parent.
+/// Absolute offset into the file (never parent-relative): 0 for a root
+/// created from the ring; `parent.start_frame + start` for a slice, so
+/// nested slices stay absolute. `slice` takes the parent-relative start
+/// and adds; Python stores and adopts the absolute value.
 start_frame: u64,
 n_frames: u64,
 rate: u32,
