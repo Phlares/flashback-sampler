@@ -281,3 +281,34 @@ def test_build_mixed_capture_source_maps_every_device(monkeypatch):
     build_mixed_capture_source([spk, proc], buffer=_FakeBuffer(), sample_rate=44_100, channels=1)
     assert seen["specs"] == [{"kind": "loopback", "device_id": "{spk}"}, {"kind": "process", "pid": 1235}]
     assert (seen["sample_rate"], seen["channels"]) == (44_100, 1)
+
+
+# ── #77: does a capture device record the preview output? ──────────────────
+
+def test_captures_preview_matches_a_loopback_on_the_same_endpoint():
+    from flashback_sampler.app.audio_devices import captures_preview
+    spk = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2)
+    default_out = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+    other = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
+    pinned = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}")
+    pinned_default = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True)
+    assert captures_preview(pinned, spk)
+    assert not captures_preview(pinned, other)
+    # The OS default on either side matches a pinned pick of the default endpoint.
+    assert captures_preview(DEFAULT_LOOPBACK, default_out)
+    assert captures_preview(pinned_default, OutputDevice(id="", name="Default", max_output_channels=2))
+    assert not captures_preview(DEFAULT_LOOPBACK, other)
+    # An input never plays back what the preview renders.
+    assert not captures_preview(CaptureDevice(kind="input", name="Mic", id="{spk}"), spk)
+
+
+def test_captures_preview_matches_a_process_source_only_in_our_own_tree(monkeypatch):
+    """Per-process loopback captures the target's process tree (include
+    mode), so it records the preview only when that tree is ours."""
+    import os
+    from flashback_sampler.app.audio_devices import captures_preview
+    roots = {4242: 1, 5151: 5151, os.getpid(): 1}
+    monkeypatch.setattr(audio_devices.native, "resolve_root_pid", lambda pid: roots.get(pid, pid))
+    out = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+    assert captures_preview(CaptureDevice(kind="process_loopback", name="ours", id="4242"), out)
+    assert not captures_preview(CaptureDevice(kind="process_loopback", name="Spotify", id="5151"), out)

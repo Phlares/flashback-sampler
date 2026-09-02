@@ -344,6 +344,40 @@ def test_default_max_footprint_is_a_quarter_of_physical_ram(monkeypatch, tmp_pat
     st.shutdown()
 
 
+def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoint():
+    """#77: one check over every armed slot's resolved devices (the global
+    spec, a slot override, or a mux list). Unarmed slots and inputs do
+    not count. Warn, do not block: the caller decides what to show."""
+    from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
+    from flashback_sampler.core.quality_presets import preset_by_name
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+    st.capture_spec = CaptureDevice(kind="loopback", name="Default output  [loopback]", id="", follow_default=True)
+    main = st.slots[0]
+    mic = st.add_slot(preset_by_name("SCRATCH"), name="Mic",
+                      capture_spec=CaptureDevice(kind="input", name="Mic", id="{mic}"))
+    mux = st.add_slot(preset_by_name("SCRATCH"), name="Mux")
+    mux.capture_specs = [CaptureDevice(kind="input", name="Line", id="{line}"),
+                         CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}")]
+    off = st.add_slot(preset_by_name("SCRATCH"), name="Off", armed=False,
+                      capture_spec=CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}"))
+
+    msg = st.preview_feedback_warning()
+    assert "Main" in msg and "Default output" in msg and "Speakers" in msg
+    assert "Mux" in msg and "Mic" not in msg and "Off" not in msg and "Line" not in msg
+
+    st.output_spec = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
+    assert st.preview_feedback_warning() is None
+    off.armed = True
+    assert st.preview_feedback_warning() is None  # {spk} is no longer the preview endpoint
+    st.set_output_spec(OutputDevice(id="{spk}", name="Speakers", max_output_channels=2))
+    assert "Off" in st.preview_feedback_warning()
+    main.armed = mux.armed = off.armed = False
+    assert st.preview_feedback_warning() is None
+    st.shutdown()
+
+
 def test_effective_capture_spec_prefers_slot_override():
     from flashback_sampler.app.audio_devices import CaptureDevice
     from flashback_sampler.core.quality_presets import preset_by_name
