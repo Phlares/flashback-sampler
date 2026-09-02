@@ -77,6 +77,12 @@ pub const Subtype = enum(u8) {
 
 pub const header_len = 44;
 
+/// What the RIFF chunk size counts BEFORE the data bytes: everything in
+/// the header past its own `RIFF` id and size field. `writeHeader`
+/// writes `riff_prefix + data_len`; `copyRange` re-patches that field to
+/// cover its marker chunks too, and must start from the same number.
+pub const riff_prefix = header_len - 8;
+
 /// The one `std.Io` every wav call uses — the synchronous singleton
 /// `writeFile` also reaches for (see its doc comment for why). Public so
 /// callers that hold a `File` from `open` can close it with the same Io.
@@ -277,16 +283,17 @@ pub fn decodeSamples(st: Subtype, bytes: []const u8, out: []f32) void {
 /// trap. Two overflow points guard against that: the `n_frames *
 /// block_align` product itself (checked with `std.math.mul`, since a
 /// plain `*` would be illegal behavior — a ReleaseSafe trap — on
-/// overflow), and the RIFF chunk size field, which stores `36 + data_len`
-/// in a u32 and so needs `data_len <= maxInt(u32) - 36`.
+/// overflow), and the RIFF chunk size field, which stores
+/// `riff_prefix + data_len` in a u32 and so needs
+/// `data_len <= maxInt(u32) - riff_prefix`.
 pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, n_frames: u64) error{TooLong}!void {
     const bps: u32 = st.bytesPerSample();
     const block_align: u16 = @intCast(bps * channels);
     const data_len_wide: u64 = std.math.mul(u64, n_frames, block_align) catch return error.TooLong;
-    if (data_len_wide > std.math.maxInt(u32) - 36) return error.TooLong;
+    if (data_len_wide > std.math.maxInt(u32) - riff_prefix) return error.TooLong;
     const data_len: u32 = @intCast(data_len_wide);
     @memcpy(out[0..4], "RIFF");
-    std.mem.writeInt(u32, out[4..8], 36 + data_len, .little);
+    std.mem.writeInt(u32, out[4..8], riff_prefix + data_len, .little);
     @memcpy(out[8..12], "WAVE");
     @memcpy(out[12..16], "fmt ");
     std.mem.writeInt(u32, out[16..20], 16, .little);
@@ -449,15 +456,15 @@ pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u
     if (markers) |m| try m.validate(n_frames);
     const chans: u64 = o.info.channels;
     const data_len_wide: u64 = n_frames * chans * st.bytesPerSample();
-    // The pad byte and the marker chunks are inside the same u32 RIFF
-    // size as `data`, so the TooLong bound has to cover them too —
-    // checking `data_len_wide` alone would let the patched
-    // `36 + data_len + pad + extra` below overflow u32 (a ReleaseSafe
-    // trap) at the very top of the range. With no markers both terms are
-    // 0 and the bound is exactly the pre-PR-i one.
-    const pad: u32 = if (markers != null) @intCast(data_len_wide & 1) else 0;
-    const extra: u32 = if (markers != null) @intCast(Markers.byte_len) else 0;
-    if (data_len_wide + pad + extra > std.math.maxInt(u32) - header_len) return error.TooLong;
+    // Everything written AFTER `data`: the word-alignment pad byte an
+    // odd `data` needs, plus the marker chunks. It is inside the same
+    // u32 RIFF size, so the TooLong bound has to cover it too — checking
+    // `data_len_wide` alone would let the patched
+    // `riff_prefix + data_len + tail` below overflow u32 (a ReleaseSafe
+    // trap) at the very top of the range. With no markers it is 0 and
+    // the bound is exactly the pre-PR-i one.
+    const tail: u32 = if (markers != null) @intCast((data_len_wide & 1) + Markers.byte_len) else 0;
+    if (data_len_wide + tail > std.math.maxInt(u32) - header_len) return error.TooLong;
     const data_len: u32 = @intCast(data_len_wide);
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{});
     defer out.close(io);
@@ -465,7 +472,7 @@ pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u
     try writeHeader(&header, o.info.rate, o.info.channels, st, n_frames);
     // writeHeader only knows about `data`; the RIFF size must span every
     // byte after it. A no-op when `markers` is null.
-    std.mem.writeInt(u32, header[4..8], 36 + data_len + pad + extra, .little);
+    std.mem.writeInt(u32, header[4..8], riff_prefix + data_len + tail, .little);
     try out.writeStreamingAll(io, &header);
     const frames_per_chunk: u64 = read_chunk_bytes / (4 * chans);
     var samples: [read_chunk_bytes / 4]f32 = undefined;
@@ -483,7 +490,7 @@ pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u
         // RIFF chunks are word-aligned: an odd `data` needs its pad byte
         // before the next chunk id, or every reader mis-parses what
         // follows (P15).
-        if (pad == 1) try out.writeStreamingAll(io, &[_]u8{0});
+        if (data_len_wide & 1 == 1) try out.writeStreamingAll(io, &[_]u8{0});
         var mb: [Markers.byte_len]u8 = undefined;
         m.write(&mb, o.info.rate);
         try out.writeStreamingAll(io, &mb);

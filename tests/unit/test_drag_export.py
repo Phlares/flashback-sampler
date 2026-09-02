@@ -74,6 +74,7 @@ def test_bytes_per_sample_covers_every_export_subtype():
     (1000, 900, 950, 300 * 4 / 2**20, (750, 1000)),  # clamped at the end
     (1000, 400, 500, 50 * 4 / 2**20, (375, 525)),    # a budget smaller than the slice still adds handles; the slice is whole
     (1000, 0, 1000, 10 * 4 / 2**20, (0, 1000)),      # a slice that IS the parent is never truncated
+    (1000, 400, 500, -1.0, (400, 500)),              # a negative budget is 0, never a truncation
 ])
 def test_export_span(parent, s, e, handle_mb, expect):
     assert export_span(parent, s, e, 1, 4, handle_mb) == expect

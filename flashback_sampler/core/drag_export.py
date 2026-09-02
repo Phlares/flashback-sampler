@@ -74,10 +74,11 @@ def export_span(
     to `handle_mb` of extra parent audio, half before and half after,
     clamped to the parent. The slice is never truncated. 0 = the slice
     alone; ∞ = the whole parent. A clamp at one edge does not move the
-    other (the file just gets smaller)."""
-    if handle_mb <= 0:
-        return slice_start, slice_end
-    half = (int(handle_mb * 2**20) // (channels * bytes_per_sample)) // 2
+    other (the file just gets smaller). A budget of 0 needs no special
+    case -- `half` is 0 and the clamps return the slice itself; the
+    `max(0.0, ...)` is what keeps a negative budget from eating into
+    the slice."""
+    half = (int(max(0.0, handle_mb) * 2**20) // (channels * bytes_per_sample)) // 2
     return max(0, slice_start - half), min(parent_frames, slice_end + half)
 
 
