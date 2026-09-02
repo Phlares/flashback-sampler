@@ -1263,7 +1263,10 @@ class TurntableWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if trimmed:
-                return render_slice_drag(
+                # A trimmed drag MINTS a slice, so it meets the same
+                # per-slot count cap the buffer drag does -- keeping the
+                # clip being dragged, since it is the slice's parent.
+                return self._with_room(slot, lambda: render_slice_drag(
                     slot.checkout_manager,
                     co.id,
                     self._export_pool_dir,
@@ -1271,7 +1274,7 @@ class TurntableWindow(QMainWindow):
                     bit_depth=self._export_bit_depth,
                     handle_mb=self._drag_handle_mb,
                     alc=self._drag_alc_sidecar,
-                )
+                ), keep=co.id)
             return render_root_drag(
                 slot.checkout_manager,
                 co.id,
@@ -1374,18 +1377,11 @@ class TurntableWindow(QMainWindow):
         lo, hi = export_span(total - oldest, sel_start - oldest, sel_end - oldest, buf.channels,
                              BYTES_PER_SAMPLE[self._export_bit_depth], self._drag_handle_mb)
         lo, hi = lo + oldest, hi + oldest
-        co = None
-        while co is None:
-            try:
-                co = slot.checkout_manager.create_from_abs_range(lo, hi)
-            except (RuntimeError, ValueError) as e:
-                # At the active-checkout cap, make room by evicting the
-                # oldest `saved` clip — its pool file is the durable
-                # record. Any other failure (range lapped, etc.) reports.
-                at_cap = "Maximum active checkouts" in str(e)
-                if not (at_cap and self._evict_oldest_saved_checkout(slot)):
-                    self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
-                    return
+        try:
+            co = self._with_room(slot, lambda: slot.checkout_manager.create_from_abs_range(lo, hi))
+        except (RuntimeError, ValueError) as e:
+            self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
+            return
         slot.checkout_manager.set_trim(co.id, sel_start - lo, sel_end - lo)
         r = self._render_for_drag(slot, co, trimmed=False, markers_at_trim=True)
         if r is None:
@@ -1396,13 +1392,30 @@ class TurntableWindow(QMainWindow):
             discard_on_cancel=True, auto_select_newest=True,
         )
 
-    def _evict_oldest_saved_checkout(self, slot) -> bool:
+    def _with_room(self, slot, mint, *, keep: str | None = None):
+        """Run `mint` — any call that adds a checkout to `slot` — and,
+        when it fails at the manager's per-slot count cap (P5), evict the
+        oldest `saved` clip and retry. Both drag paths mint: the buffer
+        deck a root, the trimmed clip deck a slice. `keep` is a checkout
+        the eviction must not take (the clip a slice is being cut from).
+        Every other failure propagates to the caller unchanged."""
+        while True:
+            try:
+                return mint()
+            except (RuntimeError, ValueError) as e:
+                if "Maximum active checkouts" not in str(e):
+                    raise
+                if not self._evict_oldest_saved_checkout(slot, keep=keep):
+                    raise
+
+    def _evict_oldest_saved_checkout(self, slot, keep: str | None = None) -> bool:
         """Discard the oldest checkout in `saved` state to make room for
         a new drag checkout. Saved clips live on durably as their export
         pool file; `pending` clips are the user's working set and are
-        never evicted. Returns False when nothing was evictable."""
+        never evicted, and neither is `keep`. Returns False when nothing
+        was evictable."""
         for co in slot.checkout_manager.list():  # oldest first
-            if co.state == "saved":
+            if co.state == "saved" and co.id != keep:
                 slot.checkout_manager.discard(co.id)
                 self._clip_trim_fracs.pop(co.id, None)
                 self._clip_bins_cache.pop(co.id, None)

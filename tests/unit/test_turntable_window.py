@@ -1318,3 +1318,64 @@ def test_set_drag_alc_sidecar_persists_and_applies(qapp, state, monkeypatch):
         assert saved == [True]
     finally:
         win.close()
+
+
+def test_clip_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, tmp_path, monkeypatch):
+    """I1: the trimmed clip-deck drag mints a slice, so it meets the same
+    per-slot count cap the buffer drag does. It must make room the same
+    way -- evict the oldest `saved` clip and retry -- not fail the drag."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.apply_checkout_caps(max_active=3)
+        mgr = state.checkout_manager
+        for _ in range(2):
+            filler = mgr.create(duration_s=0.01)
+            mgr.mark_saved(filler.id)
+        oldest_saved = mgr.list()[0].id
+        co = mgr.create(duration_s=0.5)  # at the cap now
+        mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+        win._refresh_clip_side(auto_select_newest=True)
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = 0.0
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True
+        )
+        win._on_clip_drag_out(0.25, 0.5)
+        ids = [c.id for c in mgr.list()]
+        assert oldest_saved not in ids  # room was made
+        assert [i for i in ids if mgr.get(i).parent_id == co.id]  # the slice was minted
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(qapp, state, tmp_path, monkeypatch):
+    """The dragged clip is the slice's parent, so evicting it would
+    destroy the audio the drag is about (and the mint would raise). A
+    re-drag of a `saved` clip that is also the oldest saved must skip it
+    and take the next one instead."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.apply_checkout_caps(max_active=3)
+        mgr = state.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+        mgr.mark_saved(co.id)  # oldest AND saved: the eviction candidate
+        younger = [mgr.create(duration_s=0.01) for _ in range(2)]
+        for c in younger:
+            mgr.mark_saved(c.id)
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = 0.0
+        monkeypatch.setattr(win, "_currently_displayed_checkout", lambda: co)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True
+        )
+        win._on_clip_drag_out(0.25, 0.5)
+        ids = [c.id for c in mgr.list()]
+        assert co.id in ids  # the dragged clip survived
+        assert younger[0].id not in ids  # the next oldest saved went instead
+        assert [i for i in ids if mgr.get(i).parent_id == co.id]  # the slice was minted
+    finally:
+        win.close()
