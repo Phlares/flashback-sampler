@@ -209,16 +209,15 @@ def test_tick_timer_runs_without_crash(qapp, state):
 
 def test_status_poll_warns_once_each_time_the_preview_output_is_captured(qapp, state, monkeypatch):
     """#77: the 1 Hz health poll surfaces the feedback check, so arming a
-    source and changing the preview output both reach it. The dialog
-    shows once per pairing, and again when the pairing comes back."""
-    from flashback_sampler.app import turntable_window as tw
+    source and changing the preview output both reach it. The status bar
+    line shows once per pairing, and again when the pairing comes back."""
     from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
     warnings = []
-    monkeypatch.setattr(tw.QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
     state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
     state.capture_spec = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True)
     state.slots[0].armed = False
     win = TurntableWindow(state)
+    monkeypatch.setattr(win.statusBar(), "showMessage", lambda msg, *a: warnings.append(msg))
     try:
         win._poll_source_status()
         assert warnings == []

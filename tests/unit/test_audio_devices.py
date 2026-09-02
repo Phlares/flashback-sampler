@@ -302,14 +302,15 @@ def test_captures_preview_matches_a_loopback_on_the_same_endpoint():
     assert not captures_preview(CaptureDevice(kind="input", name="Mic", id="{spk}"), spk)
 
 
-def test_captures_preview_matches_a_process_source_only_in_our_own_tree(monkeypatch):
+def test_captures_preview_matches_a_process_source_only_in_our_own_tree(monkeypatch, request):
     """Per-process loopback captures the target's process tree (include
     mode), so it records the preview only when that tree is ours."""
     import os
     from flashback_sampler.app.audio_devices import captures_preview
     roots = {4242: 1, 5151: 5151, os.getpid(): 1}
     monkeypatch.setattr(audio_devices.native, "resolve_root_pid", lambda pid: roots.get(pid, pid))
-    audio_devices._own_root_pid.cache_clear()
+    audio_devices._root_pid.cache_clear()
+    request.addfinalizer(audio_devices._root_pid.cache_clear)  # the fake roots must not outlive the patch
     out = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
     assert captures_preview(CaptureDevice(kind="process_loopback", name="ours", id="4242"), out)
     assert not captures_preview(CaptureDevice(kind="process_loopback", name="Spotify", id="5151"), out)

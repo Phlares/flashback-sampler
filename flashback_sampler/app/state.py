@@ -432,10 +432,12 @@ class AppState:
         return [] if device is None else [device]
 
     def preview_feedback_warning(self) -> Optional[str]:
-        """One message naming the preview output and every armed slot's
+        """One line naming the preview output and every armed slot's
         device that records it, or None. Playing a clip through such an
         output lands back in the ring. A warning, not a refusal: the
-        caller shows it, and someone may want the loop."""
+        caller shows it, and someone may want the loop. The launch
+        default (follow-default loopback, default output) is one such
+        pairing, so the caller must keep this quiet, not modal."""
         out = self.output_spec
         if out is None:
             return None
@@ -445,10 +447,10 @@ class AppState:
         ]
         if not hits:
             return None
-        lines = [f"{slot.name} ({d.name}) captures the preview output {out.name}." for slot, d in hits]
-        return "\n".join(lines) + (
-            "\n\nPlaying a clip records it back into the buffer. "
-            "Pick another preview output or capture source if you do not want that."
+        who = "; ".join(f"{slot.name} ({d.name})" for slot, d in hits)
+        return (
+            f"{who} captures the preview output {out.name}: playing a clip records it "
+            "back into the buffer. Capture from another endpoint, or stop capture while you preview."
         )
 
     def build_capture_for_slot(self, slot: CaptureSlot):

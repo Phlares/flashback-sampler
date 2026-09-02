@@ -507,12 +507,14 @@ class TurntableWindow(QMainWindow):
         """Show the preview-feedback warning once per pairing: the same
         message stays quiet until the condition clears and comes back.
         Polled, so arming a source and changing the preview output both
-        reach it within a second."""
+        reach it within a second. The status bar, not a dialog: the
+        launch default is such a pairing, and a modal inside a timer
+        slot nests the event loop."""
         msg = self._state.preview_feedback_warning()
         if msg != self._feedback_warned:
             self._feedback_warned = msg
             if msg is not None:
-                QMessageBox.warning(self, "Preview feeds back into the buffer", msg)
+                self.statusBar().showMessage(msg, 10000)
 
     def _set_notifications_enabled(self, enabled: bool) -> None:
         """Single source of truth for the notifications pref — persists it

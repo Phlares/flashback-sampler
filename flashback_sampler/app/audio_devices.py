@@ -158,11 +158,12 @@ def _endpoints(device_id: str, is_default: bool) -> set[str]:
     return {device_id} | ({""} if is_default else set())
 
 
-@functools.cache
-def _own_root_pid() -> int:
-    """This process's same-exe root, resolved once: the check runs from
-    a 1 Hz poll and the answer never changes."""
-    return native.resolve_root_pid(os.getpid())
+@functools.lru_cache(maxsize=64)
+def _root_pid(pid: int) -> int:
+    """`resolve_root_pid` memoized: a pid's same-exe root does not change
+    while the pid lives, and the check runs from a 1 Hz poll, so one
+    Toolhelp snapshot per pid is enough."""
+    return native.resolve_root_pid(pid)
 
 
 def captures_preview(device: CaptureDevice, output: OutputDevice) -> bool:
@@ -170,12 +171,16 @@ def captures_preview(device: CaptureDevice, output: OutputDevice) -> bool:
     through `output` lands back in the ring. A loopback matches on the
     endpoint. A per-process source captures its target's process tree
     (include mode, `WasapiBackend.zig`), so it matches only when that
-    tree is ours. An input never plays back what the preview renders."""
+    tree is ours. An input never plays back what the preview renders.
+
+    `is_default` on both sides is the enumeration-time snapshot. An OS
+    default output that changes mid-session is not re-resolved here; the
+    preview device is pinned at launch the same way."""
     if device.kind == "loopback":
         return bool(_endpoints(device.id, device.is_default or device.follow_default)
                     & _endpoints(output.id, output.is_default))
     if device.kind == "process_loopback":
-        return native.resolve_root_pid(int(device.id)) == _own_root_pid()
+        return _root_pid(int(device.id)) == _root_pid(os.getpid())
     return False
 
 
