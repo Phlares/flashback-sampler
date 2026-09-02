@@ -207,6 +207,33 @@ def test_tick_timer_runs_without_crash(qapp, state):
     win._tick()  # should handle empty/not-started capture gracefully
 
 
+def test_status_poll_warns_once_each_time_the_preview_output_is_captured(qapp, state, monkeypatch):
+    """#77: the 1 Hz health poll surfaces the feedback check, so arming a
+    source and changing the preview output both reach it. The status bar
+    line shows once per pairing, and again when the pairing comes back."""
+    from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
+    warnings = []
+    state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+    state.capture_spec = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True)
+    state.slots[0].armed = False
+    win = TurntableWindow(state)
+    monkeypatch.setattr(win.statusBar(), "showMessage", lambda msg, *a: warnings.append(msg))
+    try:
+        win._poll_source_status()
+        assert warnings == []
+        state.slots[0].armed = True
+        win._poll_source_status()
+        win._poll_source_status()
+        assert len(warnings) == 1 and "Speakers" in warnings[0] and "Main" in warnings[0]
+        state.output_spec = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
+        win._poll_source_status()
+        state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+        win._poll_source_status()
+        assert len(warnings) == 2
+    finally:
+        win.close()
+
+
 def test_right_click_chip_emits_context_menu_request(qapp):
     """Right-click on a source chip should emit contextMenuRequested.
 
@@ -606,6 +633,37 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         files = list(tmp_path.glob("*.wav"))
         assert len(files) == 1
         assert read_wav(files[0])[1].frames == n // 2 - n // 4
+    finally:
+        win.close()
+
+
+def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(qapp, state, tmp_path, monkeypatch):
+    """#78: save trimmed mints a slice like the trimmed drag, so it meets
+    the same count cap and evicts the oldest saved clip, never the clip
+    being saved. The new slice becomes the shown clip."""
+    from flashback_sampler.app import turntable_window as tw
+    from tests.fixtures.wavread import read_wav
+    win = tw.TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        old = mgr.create(duration_s=0.2)
+        mgr.mark_saved(old.id)
+        co = mgr.create(duration_s=0.5)
+        state.apply_checkout_caps(max_active=2)
+        win._refresh_clip_side(auto_select_newest=True)
+        n = co.n_frames
+        mgr.set_trim(co.id, n // 4, n // 2)
+        target = tmp_path / "trim.wav"
+        monkeypatch.setattr(tw.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "")))
+        win._save_current_clip(trimmed=True)
+        ids = [c.id for c in mgr.list()]
+        assert old.id not in ids and co.id in ids and len(ids) == 2
+        s = mgr.get(ids[-1])
+        assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (co.id, n // 4, n // 4, "saved")
+        assert mgr.get(co.id).state == "pending"
+        assert read_wav(target)[1].frames == n // 4
+        assert win._currently_displayed_checkout().id == s.id
     finally:
         win.close()
 
