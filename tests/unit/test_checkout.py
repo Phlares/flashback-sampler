@@ -123,6 +123,14 @@ def test_checkout_duration_clamps_to_oldest_on_a_lapped_ring(scratch, tmp_path):
     assert audio[0, 0] == pytest.approx(500.0) and audio[-1, 0] == pytest.approx(1499.0)
 
 
+def test_create_has_no_anchor_parameter():
+    """#75: `anchor` raised NotImplementedError for every value but
+    "latest" and no caller passed anything else. A second anchor comes
+    back with its implementation, not as a parameter that refuses."""
+    import inspect
+    assert "anchor" not in inspect.signature(CheckoutManager.create).parameters
+
+
 def test_checkout_anchor_offset_rejects_negative(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     with pytest.raises(ValueError):
