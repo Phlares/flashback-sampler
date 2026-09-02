@@ -705,10 +705,15 @@ class NativeScratch:
             self._h = None
 
     def set_budget(self, budget_bytes: int) -> None:
-        self._lib.fb_scratch_set_budget(self._h, int(budget_bytes))
+        if self._h:
+            self._lib.fb_scratch_set_budget(self._h, int(budget_bytes))
 
     @property
     def resident_bytes(self) -> int:
+        # Closed handle answers 0: the window's 1 Hz tray poll can run
+        # between AppState.shutdown() and process exit (#81).
+        if not self._h:
+            return 0
         return int(self._lib.fb_scratch_resident_bytes(self._h))
 
     # -- checkouts ------------------------------------------------------
