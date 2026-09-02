@@ -15,7 +15,7 @@ A desktop applet that keeps the last several minutes of system audio in a ring b
 
 ## Status
 
-Version 0.3.0. Windows only: capture, mixing, and playback go through WASAPI in the Zig core. The core cross-compiles for Linux and macOS; those backends do not exist yet. The Qt UI is the last Python and is slated for a Zig-native rebuild (see [decision 0011](docs/decisions/0011-zig-native-ui.md)).
+Version 0.4.0. Windows only: capture, mixing, and playback go through WASAPI in the Zig core. The core cross-compiles for Linux and macOS; those backends do not exist yet. The Qt UI is the last Python and is slated for a Zig-native rebuild (see [decision 0011](docs/decisions/0011-zig-native-ui.md)).
 
 ## Install
 
