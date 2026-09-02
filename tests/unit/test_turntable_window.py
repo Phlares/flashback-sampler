@@ -207,6 +207,33 @@ def test_tick_timer_runs_without_crash(qapp, state):
     win._tick()  # should handle empty/not-started capture gracefully
 
 
+def test_status_poll_warns_once_each_time_the_preview_output_is_captured(qapp, state, monkeypatch):
+    """#77: the 1 Hz health poll surfaces the feedback check, so arming a
+    source and changing the preview output both reach it. The status bar
+    line shows once per pairing, and again when the pairing comes back."""
+    from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
+    warnings = []
+    state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+    state.capture_spec = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True)
+    state.slots[0].armed = False
+    win = TurntableWindow(state)
+    monkeypatch.setattr(win.statusBar(), "showMessage", lambda msg, *a: warnings.append(msg))
+    try:
+        win._poll_source_status()
+        assert warnings == []
+        state.slots[0].armed = True
+        win._poll_source_status()
+        win._poll_source_status()
+        assert len(warnings) == 1 and "Speakers" in warnings[0] and "Main" in warnings[0]
+        state.output_spec = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
+        win._poll_source_status()
+        state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+        win._poll_source_status()
+        assert len(warnings) == 2
+    finally:
+        win.close()
+
+
 def test_right_click_chip_emits_context_menu_request(qapp):
     """Right-click on a source chip should emit contextMenuRequested.
 

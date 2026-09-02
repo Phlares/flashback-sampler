@@ -21,6 +21,7 @@ from flashback_sampler.app.audio_devices import (
     OutputDevice,
     build_capture_source,
     build_mixed_capture_source,
+    captures_preview,
     default_capture_device,
     default_output_device,
 )
@@ -412,6 +413,36 @@ class AppState:
     def armed_count(self) -> int:
         return sum(1 for s in self.slots if s.armed)
 
+    def capture_specs_for_slot(self, slot: CaptureSlot) -> list[CaptureDevice]:
+        """The devices `slot` captures from: its own `capture_specs` when
+        it has any, else the global spec (empty when none is selected)."""
+        if slot.capture_specs:
+            return list(slot.capture_specs)
+        device = self.effective_capture_spec_for_slot(slot)
+        return [] if device is None else [device]
+
+    def preview_feedback_warning(self) -> Optional[str]:
+        """One line naming the preview output and every armed slot's
+        device that records it, or None. Playing a clip through such an
+        output lands back in the ring. A warning, not a refusal: the
+        caller shows it, and someone may want the loop. The launch
+        default (follow-default loopback, default output) is one such
+        pairing, so the caller must keep this quiet, not modal."""
+        out = self.output_spec
+        if out is None:
+            return None
+        hits = [
+            (slot, d) for slot in self.slots if slot.armed
+            for d in self.capture_specs_for_slot(slot) if captures_preview(d, out)
+        ]
+        if not hits:
+            return None
+        who = "; ".join(f"{slot.name} ({d.name})" for slot, d in hits)
+        return (
+            f"{who} captures the preview output {out.name}: playing a clip records it "
+            "back into the buffer. Capture from another endpoint, or stop capture while you preview."
+        )
+
     def build_capture_for_slot(self, slot: CaptureSlot):
         """
         Instantiate a capture source wired to `slot`'s buffer.
@@ -422,15 +453,12 @@ class AppState:
         NativeMixedSource that sums all inputs into the same buffer.
         An empty list falls back to AppState's global capture_spec.
         """
-        specs = list(slot.capture_specs) if slot.capture_specs else []
+        specs = self.capture_specs_for_slot(slot)
         if not specs:
-            device = self.effective_capture_spec_for_slot(slot)
-            if device is None:
-                raise RuntimeError(
-                    "No capture device selected. Pick one from the Audio menu "
-                    "or from the slot's right-click menu."
-                )
-            specs = [device]
+            raise RuntimeError(
+                "No capture device selected. Pick one from the Audio menu "
+                "or from the slot's right-click menu."
+            )
 
         if len(specs) == 1:
             return build_capture_source(
