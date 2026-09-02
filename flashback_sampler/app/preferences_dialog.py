@@ -36,6 +36,10 @@ class PreferencesDialog(QDialog):
         on_export_pool_dir_changed: Callable[[str], None] | None = None,
         export_bit_depth: str = "FLOAT",
         on_export_bit_depth_changed: Callable[[str], None] | None = None,
+        drag_handle_mb: float = 200.0,
+        on_drag_handle_mb_changed: Callable[[float], None] | None = None,
+        drag_alc_sidecar: bool = False,
+        on_drag_alc_sidecar_changed: Callable[[bool], None] | None = None,
         scratch_dir: str = "",
         on_scratch_dir_changed: Callable[[str], None] | None = None,
         max_footprint_mb: float = 0.0,
@@ -117,6 +121,52 @@ class PreferencesDialog(QDialog):
 
         self.export_depth_combo.currentIndexChanged.connect(_depth_changed)
         root.addWidget(self.export_depth_combo)
+
+        drag_cap_row = QHBoxLayout()
+        drag_cap_row.addWidget(QLabel("Drag-out handles (tunable): add up to"))
+        self.drag_cap_spin = QSpinBox()
+        self.drag_cap_spin.setRange(0, 100000)
+        self.drag_cap_spin.setSuffix(" MB")
+        # One callback per committed value, not one per keystroke: each
+        # callback writes config.json.
+        self.drag_cap_spin.setKeyboardTracking(False)
+        self.drag_cap_spin.setValue(int(drag_handle_mb))
+
+        def _drag_cap_changed(v: int) -> None:
+            if on_drag_handle_mb_changed is not None:
+                on_drag_handle_mb_changed(float(v))
+
+        self.drag_cap_spin.valueChanged.connect(_drag_cap_changed)
+        drag_cap_row.addWidget(self.drag_cap_spin, 1)
+        root.addLayout(drag_cap_row)
+        self.drag_cap_hint = QLabel(
+            "of extra parent audio before and after a dragged slice, with "
+            "markers at the slice, so the DAW can recover more than you "
+            "sliced. The slice itself is always exported whole. "
+            "0 = slice only — use it on constrained systems: the handles "
+            "also size the buffer-deck root's RAM copy."
+        )
+        self.drag_cap_hint.setWordWrap(True)
+        self.drag_cap_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
+        root.addWidget(self.drag_cap_hint)
+
+        self.alc_sidecar_check = QCheckBox(
+            "Drag an Ableton Live Clip (.alc) instead of the WAV"
+        )
+        self.alc_sidecar_check.setChecked(drag_alc_sidecar)
+        if on_drag_alc_sidecar_changed is not None:
+            self.alc_sidecar_check.toggled.connect(
+                lambda c: on_drag_alc_sidecar_changed(bool(c))
+            )
+        root.addWidget(self.alc_sidecar_check)
+        self.alc_sidecar_hint = QLabel(
+            "The WAV stays in the pool folder; the clip references it. "
+            "Other DAWs and Explorer get the .alc file, so leave this off "
+            "unless you drop into Live."
+        )
+        self.alc_sidecar_hint.setWordWrap(True)
+        self.alc_sidecar_hint.setStyleSheet("color: #8c867b; font-size: 8pt;")
+        root.addWidget(self.alc_sidecar_hint)
 
         root.addSpacing(10)
         root.addWidget(QLabel("<b>Scratch</b>"))

@@ -29,6 +29,9 @@ release = [
 include = ["flashback_sampler*"]
 exclude = ["tests*"]
 
+[tool.setuptools.package-data]
+"flashback_sampler.core" = ["alc_template.xml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

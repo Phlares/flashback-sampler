@@ -468,7 +468,7 @@ at 192 kHz.
 
 | DAW | Markers on drop | Clip bounds from file | Container |
 |---|---|---|---|
-| Ableton Live | not from WAV cues (restores its own `.asd`) | spike | `.alc` (gzipped XML, sample reference) — spike |
+| Ableton Live | no clip markers; the `smpl` loop becomes the arrangement loop brace (tested 2026-09-01, Live 12) | no: the whole file drops as one clip | `.alc` yes (tested 2026-09-01): an unwarped clip opens at `Loop/LoopStart..LoopEnd` (seconds into the sample), the edge drags out to the whole sample, and an absolute `FileRef/Path` outside the User Library is honoured |
 | Reaper | `cue ` → project markers/regions (documented) | no | — |
 | Logic | `cue ` → markers (documented) | no | — |
 | Cubase | `cue ` → markers | no | — |
@@ -581,3 +581,45 @@ the spike passes.
   capture.
 - `DEFAULT_CHECKOUT_CACHE_MB` = `0.0` by decision (owner, 2026-08-31, Task h11
   select→playable measurement (see above) replaces it.
+
+## Deviations recorded during PR i
+
+- M1: "Save trimmed" does not mint a slice. The plan's drag table names
+  the two drags only; `CheckoutManager.save` is untouched, so a saved
+  trim is still a one-off file with no checkout behind it.
+- M2: a parent whose scratch write `failed` cannot be trimmed-dragged --
+  P13 raises rather than slicing a file that is not on disk. The error
+  table said "the clip works as today"; the full (untrimmed) drag does,
+  since it exports from RAM, but the trimmed drag reports the failure.
+- An ORPHANED slice -- one whose parent left the manifests (the user
+  discarded it, or the window's count-cap eviction did) while the file
+  it named is still on disk -- is adopted as a ROOT over that file at
+  `(start_frame, n_frames)`, not skipped. `adopt_root` took a
+  `start_frame` parameter for this: a root is a slice at `(0, all)`, so
+  it is one mechanism, not two. The adopted checkout keeps the
+  `parent_id` its manifest recorded even though no parent is adopted, so
+  every later launch takes this same path. Without it the parent's WAV
+  and the slice's own manifest stayed on disk with nothing referencing
+  them, contradicting "deleting a parent leaves its file while a slice
+  references it" and decision 0009.
+- Still open after that rule: a NESTED slice whose intermediate parent
+  was discarded names a file that does not exist (`<intermediate>.wav`)
+  -- the audio is the root's. Fixing it needs a manifest field naming
+  the file-owning root, and `read_manifest` requires every field, so it
+  is a migration.
+- `Checkout.start_frame` (and the manifest field of the same name) is
+  ALWAYS absolute into the file; the Zig `checkout_slice` call is the
+  one place that is parent-relative, because Zig adds the parent's own
+  `start_frame` itself. `slice` adds, `adopt_slice` subtracts. Before
+  this, `adopt_slice` passed the absolute value, so a slice of a slice
+  re-opened `parent.start_frame` too far in -- or, past the parent's
+  end, was dropped by Zig's range guard.
+- The window's count-cap eviction (plan P5) now covers BOTH drags, not
+  the buffer drag alone: one `_with_room` helper wraps whichever call
+  mints. It exempts the clip being dragged, since a trimmed drag slices
+  from it -- evicting it would destroy the audio the drag is about.
+- `export_span` has no `handle_mb <= 0` branch: `half` is 0 there and
+  the clamps return the slice itself. The budget is floored at 0 so a
+  negative one cannot truncate the slice.
+- Live refuses a mixed `.alc` + `.wav` drop, so with the preference on
+  the drag offers only the `.alc`.

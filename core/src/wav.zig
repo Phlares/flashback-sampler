@@ -77,6 +77,12 @@ pub const Subtype = enum(u8) {
 
 pub const header_len = 44;
 
+/// What the RIFF chunk size counts BEFORE the data bytes: everything in
+/// the header past its own `RIFF` id and size field. `writeHeader`
+/// writes `riff_prefix + data_len`; `copyRange` re-patches that field to
+/// cover its marker chunks too, and must start from the same number.
+pub const riff_prefix = header_len - 8;
+
 /// The one `std.Io` every wav call uses — the synchronous singleton
 /// `writeFile` also reaches for (see its doc comment for why). Public so
 /// callers that hold a `File` from `open` can close it with the same Io.
@@ -277,16 +283,17 @@ pub fn decodeSamples(st: Subtype, bytes: []const u8, out: []f32) void {
 /// trap. Two overflow points guard against that: the `n_frames *
 /// block_align` product itself (checked with `std.math.mul`, since a
 /// plain `*` would be illegal behavior — a ReleaseSafe trap — on
-/// overflow), and the RIFF chunk size field, which stores `36 + data_len`
-/// in a u32 and so needs `data_len <= maxInt(u32) - 36`.
+/// overflow), and the RIFF chunk size field, which stores
+/// `riff_prefix + data_len` in a u32 and so needs
+/// `data_len <= maxInt(u32) - riff_prefix`.
 pub fn writeHeader(out: *[header_len]u8, rate: u32, channels: u16, st: Subtype, n_frames: u64) error{TooLong}!void {
     const bps: u32 = st.bytesPerSample();
     const block_align: u16 = @intCast(bps * channels);
     const data_len_wide: u64 = std.math.mul(u64, n_frames, block_align) catch return error.TooLong;
-    if (data_len_wide > std.math.maxInt(u32) - 36) return error.TooLong;
+    if (data_len_wide > std.math.maxInt(u32) - riff_prefix) return error.TooLong;
     const data_len: u32 = @intCast(data_len_wide);
     @memcpy(out[0..4], "RIFF");
-    std.mem.writeInt(u32, out[4..8], 36 + data_len, .little);
+    std.mem.writeInt(u32, out[4..8], riff_prefix + data_len, .little);
     @memcpy(out[8..12], "WAVE");
     @memcpy(out[12..16], "fmt ");
     std.mem.writeInt(u32, out[16..20], 16, .little);
@@ -360,22 +367,112 @@ pub fn encodeSamples(st: Subtype, samples: []const f32, out: []u8) usize {
     }
 }
 
+/// Where the slice sits inside an exported file, as three standard
+/// RIFF chunks DAWs read as markers: `cue ` (two points), `smpl` (one
+/// loop, start..end-1 inclusive, the sampler convention) and
+/// `LIST/adtl` labels. Frames are relative to the exported file. No
+/// DAW we know of turns these into clip start/end on drop (spec table);
+/// they are the portable, harmless half of "drag the edge out".
+pub const Markers = struct {
+    slice_start: u64,
+    slice_end: u64, // exclusive
+
+    /// cue (8 + 4 + 2*24) + smpl (8 + 36 + 24) + LIST (8 + 4 + 24 + 22).
+    pub const byte_len: usize = 60 + 68 + 58;
+
+    fn validate(self: Markers, n_frames: u64) error{InvalidArgument}!void {
+        if (self.slice_end <= self.slice_start or self.slice_end > n_frames) return error.InvalidArgument;
+        // Every position below is a u32 chunk field; the file itself can
+        // hold more frames than that, so the cast needs its own guard
+        // rather than riding on the clause above.
+        if (self.slice_end > std.math.maxInt(u32)) return error.InvalidArgument;
+    }
+
+    /// Fill `out` with the three chunks back to back. Caller-owned
+    /// stack memory, no allocation. `rate` is never 0 — `parseFmt`
+    /// rejects that — so the `smpl` sample-period division is safe.
+    fn write(self: Markers, out: *[byte_len]u8, rate: u32) void {
+        const s: u32 = @intCast(self.slice_start);
+        const e: u32 = @intCast(self.slice_end);
+        var w: usize = 0;
+        // cue
+        @memcpy(out[w .. w + 4], "cue ");
+        std.mem.writeInt(u32, out[w + 4 ..][0..4], 52, .little);
+        std.mem.writeInt(u32, out[w + 8 ..][0..4], 2, .little);
+        w += 12;
+        for ([_]u32{ s, e }, 1..) |pos, id| {
+            std.mem.writeInt(u32, out[w..][0..4], @intCast(id), .little); // dwName
+            std.mem.writeInt(u32, out[w + 4 ..][0..4], pos, .little); // dwPosition (play order)
+            @memcpy(out[w + 8 .. w + 12], "data"); // fccChunk
+            std.mem.writeInt(u32, out[w + 12 ..][0..4], 0, .little); // dwChunkStart
+            std.mem.writeInt(u32, out[w + 16 ..][0..4], 0, .little); // dwBlockStart
+            std.mem.writeInt(u32, out[w + 20 ..][0..4], pos, .little); // dwSampleOffset
+            w += 24;
+        }
+        // smpl
+        @memcpy(out[w .. w + 4], "smpl");
+        std.mem.writeInt(u32, out[w + 4 ..][0..4], 60, .little);
+        // manufacturer, product, sample period (ns), unity note, pitch
+        // fraction, SMPTE format, SMPTE offset, loop count, sampler data.
+        const fields = [_]u32{ 0, 0, 1_000_000_000 / rate, 60, 0, 0, 0, 1, 0 };
+        for (fields, 0..) |v, i| std.mem.writeInt(u32, out[w + 8 + i * 4 ..][0..4], v, .little);
+        w += 8 + 36;
+        const loop = [_]u32{ 1, 0, s, e - 1, 0, 0 }; // id, forward, start, end (inclusive), fraction, play count
+        for (loop, 0..) |v, i| std.mem.writeInt(u32, out[w + i * 4 ..][0..4], v, .little);
+        w += 24;
+        // LIST/adtl
+        @memcpy(out[w .. w + 4], "LIST");
+        std.mem.writeInt(u32, out[w + 4 ..][0..4], 50, .little);
+        @memcpy(out[w + 8 .. w + 12], "adtl");
+        w += 12;
+        @memcpy(out[w .. w + 4], "labl");
+        std.mem.writeInt(u32, out[w + 4 ..][0..4], 16, .little);
+        std.mem.writeInt(u32, out[w + 8 ..][0..4], 1, .little);
+        @memcpy(out[w + 12 .. w + 24], "slice start\x00");
+        w += 24;
+        @memcpy(out[w .. w + 4], "labl");
+        std.mem.writeInt(u32, out[w + 4 ..][0..4], 14, .little);
+        std.mem.writeInt(u32, out[w + 8 ..][0..4], 2, .little);
+        @memcpy(out[w + 12 .. w + 22], "slice end\x00");
+        w += 22;
+        std.debug.assert(w == byte_len);
+    }
+};
+
 /// Stream `n_frames` from `start_frame` of `src` into a new `dst` in
 /// subtype `st`. One 64 KiB read buffer, one 64 KiB encode buffer, both
 /// on the stack. The range is validated against the source BEFORE dst
 /// is created, so an OutOfRange leaves no file behind. Serialisation
 /// with other writers is the caller's job (PR h: `write_mutex`).
-pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u64, st: Subtype) !void {
+///
+/// `markers` (nullable) appends the three marker chunks after `data`,
+/// with the RIFF size widened to cover them. Its frames are relative to
+/// the EXPORTED file, so they are validated against `n_frames`, not the
+/// source.
+pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u64, st: Subtype, markers: ?Markers) !void {
     var o = try open(src);
     defer o.file.close(io);
     if (start_frame > o.info.frames or n_frames > o.info.frames - start_frame) return error.OutOfRange;
+    if (markers) |m| try m.validate(n_frames);
     const chans: u64 = o.info.channels;
     const data_len_wide: u64 = n_frames * chans * st.bytesPerSample();
-    if (data_len_wide > std.math.maxInt(u32) - header_len) return error.TooLong;
+    // Everything written AFTER `data`: the word-alignment pad byte an
+    // odd `data` needs, plus the marker chunks. It is inside the same
+    // u32 RIFF size, so the TooLong bound has to cover it too — checking
+    // `data_len_wide` alone would let the patched
+    // `riff_prefix + data_len + tail` below overflow u32 (a ReleaseSafe
+    // trap) at the very top of the range. With no markers it is 0 and
+    // the bound is exactly the pre-PR-i one.
+    const tail: u32 = if (markers != null) @intCast((data_len_wide & 1) + Markers.byte_len) else 0;
+    if (data_len_wide + tail > std.math.maxInt(u32) - header_len) return error.TooLong;
+    const data_len: u32 = @intCast(data_len_wide);
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{});
     defer out.close(io);
     var header: [header_len]u8 = undefined;
     try writeHeader(&header, o.info.rate, o.info.channels, st, n_frames);
+    // writeHeader only knows about `data`; the RIFF size must span every
+    // byte after it. A no-op when `markers` is null.
+    std.mem.writeInt(u32, header[4..8], riff_prefix + data_len + tail, .little);
     try out.writeStreamingAll(io, &header);
     const frames_per_chunk: u64 = read_chunk_bytes / (4 * chans);
     var samples: [read_chunk_bytes / 4]f32 = undefined;
@@ -388,6 +485,15 @@ pub fn copyRange(src: []const u8, dst: []const u8, start_frame: u64, n_frames: u
         const n = encodeSamples(st, samples[0..ns], &enc);
         try out.writeStreamingAll(io, enc[0..n]);
         done += take;
+    }
+    if (markers) |m| {
+        // RIFF chunks are word-aligned: an odd `data` needs its pad byte
+        // before the next chunk id, or every reader mis-parses what
+        // follows (P15).
+        if (data_len_wide & 1 == 1) try out.writeStreamingAll(io, &[_]u8{0});
+        var mb: [Markers.byte_len]u8 = undefined;
+        m.write(&mb, o.info.rate);
+        try out.writeStreamingAll(io, &mb);
     }
 }
 
@@ -875,7 +981,7 @@ test "copyRange: a sub-span, float32 -> pcm16, reads back as the quantized slice
     const src = tmpWritePath(&pa, &tmp, "src.wav");
     try writeFile(src, &in, 8_000, 1, .float32);
     const dst = tmpWritePath(&pd, &tmp, "dst.wav");
-    try copyRange(src, dst, 1, 3, .pcm_16); // frames 1..4 = 0.5, -0.5, 1.0
+    try copyRange(src, dst, 1, 3, .pcm_16, null); // frames 1..4 = 0.5, -0.5, 1.0
     var o = try open(dst);
     defer o.file.close(io);
     try std.testing.expectEqual(Subtype.pcm_16, o.info.subtype);
@@ -898,7 +1004,7 @@ test "copyRange: float32 -> float32 is byte-identical to writeFile of the slice"
     for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) * 0.01;
     const src = tmpWritePath(&pa, &tmp, "a.wav");
     try writeFile(src, &in, 48_000, 2, .float32);
-    try copyRange(src, tmpWritePath(&pd, &tmp, "b.wav"), 5, 10, .float32);
+    try copyRange(src, tmpWritePath(&pd, &tmp, "b.wav"), 5, 10, .float32, null);
     try writeFile(tmpWritePath(&pe, &tmp, "c.wav"), in[10..30], 48_000, 2, .float32);
     var b: [header_len + 80]u8 = undefined;
     var c: [header_len + 80]u8 = undefined;
@@ -915,7 +1021,7 @@ test "copyRange: past the source end is OutOfRange and creates no file" {
     const in = [_]f32{ 1, 2, 3 };
     const src = tmpWritePath(&pa, &tmp, "s.wav");
     try writeFile(src, &in, 8_000, 1, .float32);
-    try std.testing.expectError(error.OutOfRange, copyRange(src, tmpWritePath(&pd, &tmp, "never.wav"), 2, 5, .float32));
+    try std.testing.expectError(error.OutOfRange, copyRange(src, tmpWritePath(&pd, &tmp, "never.wav"), 2, 5, .float32, null));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "never.wav", .{}));
 }
 
@@ -930,8 +1036,111 @@ test "copyRange: a hostile start_frame is OutOfRange, not an unsigned-subtractio
     const in = [_]f32{ 1, 2, 3 };
     const src = tmpWritePath(&pa, &tmp, "s2.wav");
     try writeFile(src, &in, 8_000, 1, .float32);
-    try std.testing.expectError(error.OutOfRange, copyRange(src, tmpWritePath(&pd, &tmp, "never2.wav"), std.math.maxInt(u64), 1, .float32));
+    try std.testing.expectError(error.OutOfRange, copyRange(src, tmpWritePath(&pd, &tmp, "never2.wav"), std.math.maxInt(u64), 1, .float32, null));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "never2.wav", .{}));
+}
+
+/// Test helper: walk `bytes` from offset 12 and return the body offset
+/// of the first chunk with id `id`, or null.
+fn findChunk(bytes: []const u8, id: *const [4]u8) ?usize {
+    var pos: usize = 12;
+    while (pos + 8 <= bytes.len) {
+        const size: usize = std.mem.readInt(u32, bytes[pos + 4 ..][0..4], .little);
+        if (std.mem.eql(u8, bytes[pos .. pos + 4], id)) return pos + 8;
+        pos += 8 + size + (size & 1);
+    }
+    return null;
+}
+
+test "copyRange with markers: cue, smpl and LIST/adtl follow data; RIFF size covers them; open still reads frames" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    var in: [40]f32 = undefined; // 20 stereo frames
+    for (&in, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i)) * 0.01;
+    const src = tmpWritePath(&pa, &tmp, "m-src.wav");
+    try writeFile(src, &in, 48_000, 2, .float32);
+    const dst = tmpWritePath(&pd, &tmp, "m-dst.wav");
+    try copyRange(src, dst, 2, 15, .float32, .{ .slice_start = 3, .slice_end = 8 });
+    var buf: [header_len + 15 * 8 + Markers.byte_len]u8 = undefined;
+    const got = try tmp.dir.readFile(std.testing.io, "m-dst.wav", &buf);
+    try std.testing.expectEqual(buf.len, got.len);
+    try std.testing.expectEqual(@as(u32, @intCast(got.len - 8)), std.mem.readInt(u32, got[4..8], .little));
+    const cue = findChunk(got, "cue ") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, got[cue..][0..4], .little));
+    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, got[cue + 4 + 20 ..][0..4], .little)); // point 1 sample offset
+    try std.testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, got[cue + 4 + 24 + 20 ..][0..4], .little)); // point 2
+    try std.testing.expectEqualSlices(u8, "data", got[cue + 4 + 8 ..][0..4]);
+    const smpl = findChunk(got, "smpl") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1_000_000_000 / 48_000), std.mem.readInt(u32, got[smpl + 8 ..][0..4], .little)); // sample period ns
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, got[smpl + 28 ..][0..4], .little)); // one loop
+    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, got[smpl + 36 + 8 ..][0..4], .little)); // loop start
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, got[smpl + 36 + 12 ..][0..4], .little)); // loop end, inclusive
+    const list = findChunk(got, "LIST") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, "adtl", got[list..][0..4]);
+    try std.testing.expectEqualSlices(u8, "labl", got[list + 4 ..][0..4]);
+    try std.testing.expectEqualSlices(u8, "slice start\x00", got[list + 4 + 8 + 4 ..][0..12]);
+    // the reader stops at data and is not confused by what follows
+    var o = try open(dst);
+    defer o.file.close(io);
+    try std.testing.expectEqual(@as(u64, 15), o.info.frames);
+}
+
+test "copyRange with markers pads an odd data chunk before the marker chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const in = [_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5 }; // 5 mono frames
+    const src = tmpWritePath(&pa, &tmp, "odd-src.wav");
+    try writeFile(src, &in, 8_000, 1, .float32);
+    const dst = tmpWritePath(&pd, &tmp, "odd-dst.wav");
+    try copyRange(src, dst, 0, 5, .pcm_24, .{ .slice_start = 1, .slice_end = 2 }); // data = 15 bytes, odd
+    var buf: [header_len + 15 + 1 + Markers.byte_len]u8 = undefined;
+    const got = try tmp.dir.readFile(std.testing.io, "odd-dst.wav", &buf);
+    try std.testing.expectEqual(buf.len, got.len);
+    try std.testing.expectEqual(@as(u8, 0), got[header_len + 15]); // the pad byte
+    try std.testing.expectEqual(header_len + 16 + 8, findChunk(got, "cue ").?);
+    try std.testing.expectEqual(@as(u32, @intCast(got.len - 8)), std.mem.readInt(u32, got[4..8], .little));
+}
+
+test "copyRange without markers is unchanged: no chunk after data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3 };
+    const src = tmpWritePath(&pa, &tmp, "n-src.wav");
+    try writeFile(src, &in, 8_000, 1, .float32);
+    const dst = tmpWritePath(&pd, &tmp, "n-dst.wav");
+    try copyRange(src, dst, 0, 3, .float32, null);
+    var buf: [header_len + 12]u8 = undefined;
+    const got = try tmp.dir.readFile(std.testing.io, "n-dst.wav", &buf);
+    try std.testing.expectEqual(buf.len, got.len);
+}
+
+test "Markers rejects an inverted or out-of-file slice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pa: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const in = [_]f32{ 1, 2, 3 };
+    const src = tmpWritePath(&pa, &tmp, "b-src.wav");
+    try writeFile(src, &in, 8_000, 1, .float32);
+    const dst = tmpWritePath(&pd, &tmp, "b-dst.wav");
+    try std.testing.expectError(error.InvalidArgument, copyRange(src, dst, 0, 3, .float32, .{ .slice_start = 2, .slice_end = 2 }));
+    try std.testing.expectError(error.InvalidArgument, copyRange(src, dst, 0, 3, .float32, .{ .slice_start = 0, .slice_end = 4 }));
+}
+
+test "Markers.validate rejects a slice_end past u32 on its own, not via the n_frames clause" {
+    // `write` casts both positions to u32 (every cue/smpl field is u32),
+    // so the range clause above is not enough: a file with more than
+    // maxInt(u32) frames would satisfy `slice_end <= n_frames` and then
+    // trap in `@intCast`. Reaching that through `copyRange` would need a
+    // 4-billion-frame source file, so the guard is pinned here directly.
+    const m: Markers = .{ .slice_start = 0, .slice_end = @as(u64, std.math.maxInt(u32)) + 1 };
+    try std.testing.expectError(error.InvalidArgument, m.validate(std.math.maxInt(u64)));
 }
 
 test "open: a huge channel count is Unsupported, not an integer-overflow trap" {

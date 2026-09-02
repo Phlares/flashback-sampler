@@ -861,6 +861,10 @@ export fn fb_checkout_pin(s: *Scratch, co: *Checkout, on: u8) void {
     s.pin(co, on != 0);
 }
 
+/// Where the exported slice sits inside the exported file, in frames
+/// relative to that file, `slice_end` exclusive. Mirrors `wav.Markers`.
+pub const FbMarkers = extern struct { slice_start: u64, slice_end: u64 };
+
 /// Materialise `[start, start + n)` of the checkout into `dst`. From the
 /// file once the audio is safe on disk (written/adopted — no reload of
 /// an evicted clip), from the RAM copy before that. R-h1b: the range
@@ -868,22 +872,36 @@ export fn fb_checkout_pin(s: *Scratch, co: *Checkout, on: u8) void {
 /// the addition `start + n` under ReleaseSafe. R-h1d: `hold`/`release`
 /// bracket the whole read (both branches) for the same reason as
 /// fb_checkout_peak_bins, and `touch` marks the LRU use the same way.
-/// R-h6g: no trailing `FbMarkers *` yet — PR i adds region-aware export
-/// on top of this signature.
-export fn fb_checkout_export(s: *Scratch, co: *Checkout, dst: [*:0]const u8, start: u64, n: u64, subtype: c_int) FbStatus {
+///
+/// `markers` (nullable) writes the slice's `cue `/`smpl`/`LIST` chunks
+/// after `data`. Markers are a file-path-only feature: the RAM branch
+/// (`wav.writeFile`) cannot append chunks, so a marker export first
+/// waits for the scratch write to land (P13 at the engine edge) and
+/// reports `.io_error` if the audio never reaches disk.
+export fn fb_checkout_export(s: *Scratch, co: *Checkout, dst: [*:0]const u8, start: u64, n: u64, subtype: c_int, markers: ?*const FbMarkers) FbStatus {
     if (subtype < 0 or subtype > 2) return .invalid_arg;
     if (n == 0 or start > co.n_frames or n > co.n_frames - start) return .invalid_arg;
     const st: wav.Subtype = @enumFromInt(@as(u8, @intCast(subtype)));
+    const mk: ?wav.Markers = if (markers) |m| .{ .slice_start = m.slice_start, .slice_end = m.slice_end } else null;
     s.hold(co);
     defer s.release(co);
     s.touch(co);
+    // B-i1: the wait goes BEFORE the lock. The Scratch worker's
+    // `defaultWrite` takes this same `wav.write_mutex`, so waiting for
+    // the job while holding it would deadlock (PR h's rule: never wait
+    // for a job under `write_mutex`).
+    if (mk != null) s.waitJob(co);
     wav.write_mutex.lockUncancelable(wav.io);
     defer wav.write_mutex.unlock(wav.io);
     const ws = co.write_state.load(.acquire);
     if (ws == .written or ws == .adopted) {
-        wav.copyRange(co.path(), std.mem.span(dst), co.start_frame + start, n, st) catch |e| return checkoutStatus(e);
+        wav.copyRange(co.path(), std.mem.span(dst), co.start_frame + start, n, st, mk) catch |e| return checkoutStatus(e);
         return .ok;
     }
+    // Past the wait above, "not on disk" means the write failed (or no
+    // worker ever ran it). Dropping the markers silently would hand the
+    // DAW a file whose slice boundaries are gone, so say so instead.
+    if (mk != null) return .io_error;
     const frames = co.frames orelse return .io_error;
     const chans: u64 = co.channels;
     const a: usize = @intCast(start * chans);
@@ -992,7 +1010,7 @@ test "fb_checkout_export rejects a span past the checkout (R-h4b: destroy on an 
     defer fb_scratch_destroy(s); // never started: fb_checkout_destroy below must route through forget's dequeue branch
     const co = fb_checkout_create(s, ring, 0, 3, co_path, null) orelse return error.CreateFailed;
     defer fb_checkout_destroy(s, co);
-    try std.testing.expectEqual(FbStatus.invalid_arg, fb_checkout_export(s, co, out_path, 2, 2, 0));
+    try std.testing.expectEqual(FbStatus.invalid_arg, fb_checkout_export(s, co, out_path, 2, 2, 0, null));
 }
 
 test "fb_checkout_peak_bins rejects a mismatched out_len instead of trusting a caller-derived size (R-h6a/R-h6c)" {
@@ -1115,7 +1133,7 @@ test "fb_checkout_export: the RAM branch (pre-write) and the file branch (post-w
 
     var pram: [64]u8 = undefined;
     const ram_dst = std.fmt.bufPrintZ(&pram, ".zig-cache/tmp/{s}/ram.wav", .{tmp.sub_path}) catch unreachable;
-    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(&s, co, ram_dst, 2, 10, 0)); // FLOAT32
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(&s, co, ram_dst, 2, 10, 0, null)); // FLOAT32
 
     ParkedWrite.park.store(false, .release); // let the parked write finish
     s.waitJob(co);
@@ -1126,7 +1144,7 @@ test "fb_checkout_export: the RAM branch (pre-write) and the file branch (post-w
 
     var pfile: [64]u8 = undefined;
     const file_dst = std.fmt.bufPrintZ(&pfile, ".zig-cache/tmp/{s}/file.wav", .{tmp.sub_path}) catch unreachable;
-    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(&s, co, file_dst, 2, 10, 0)); // file branch now
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(&s, co, file_dst, 2, 10, 0, null)); // file branch now
 
     var oram = try wav.open(ram_dst);
     defer oram.file.close(wav.io);
@@ -1140,6 +1158,56 @@ test "fb_checkout_export: the RAM branch (pre-write) and the file branch (post-w
     try wav.readFrames(ofile.file, ofile.info, 0, &file_samples);
     try std.testing.expectEqualSlices(f32, &ram_samples, &file_samples);
     try std.testing.expectEqualSlices(f32, in[4..24], &ram_samples); // both equal the source ramp too
+}
+
+test "fb_checkout_export with markers waits for the scratch write and emits cue" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/mk.wav", .{tmp.sub_path}) catch unreachable;
+    const dst = std.fmt.bufPrintZ(&pd, ".zig-cache/tmp/{s}/mk-out.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, 2, 3, 4, 5, 6 }, 6);
+    const s = fb_scratch_create(1 << 20, null) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s);
+    try std.testing.expectEqual(FbStatus.ok, fb_scratch_start(s));
+    const co = fb_checkout_create(s, ring, 0, 6, path, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, co);
+    const mk = FbMarkers{ .slice_start = 1, .slice_end = 3 };
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(s, co, dst, 0, 6, 0, &mk));
+    var o = try wav.open(dst);
+    defer o.file.close(wav.io);
+    try std.testing.expectEqual(@as(u64, 6), o.info.frames);
+    // The marker chunks are the only thing past the 44-byte header and
+    // the 24 data bytes; a silent drop would leave the file 186 short.
+    try std.testing.expectEqual(@as(u64, 44 + 24 + wav.Markers.byte_len), try o.file.length(wav.io));
+}
+
+test "fb_checkout_export with markers fails loudly instead of dropping them on the RAM branch" {
+    // The scratch is never started, so the queued write never runs and
+    // `waitJob` returns at once (R-h4b's no-worker early-out) with the
+    // audio still RAM-only. `wav.writeFile` cannot append chunks, so a
+    // marker export must report io_error rather than hand back a file
+    // whose slice boundaries silently vanished — the same export with
+    // no markers still succeeds from RAM.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [64]u8 = undefined;
+    var pd: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pb, ".zig-cache/tmp/{s}/ramonly.wav", .{tmp.sub_path}) catch unreachable;
+    const dst = std.fmt.bufPrintZ(&pd, ".zig-cache/tmp/{s}/ramonly-out.wav", .{tmp.sub_path}) catch unreachable;
+    const ring = fb_ring_create(1000, 1, 1.0, null) orelse return error.CreateFailed;
+    defer fb_ring_destroy(ring);
+    fb_ring_write(ring, &[_]f32{ 1, 2, 3 }, 3);
+    const s = fb_scratch_create(1 << 20, null) orelse return error.CreateFailed;
+    defer fb_scratch_destroy(s);
+    const co = fb_checkout_create(s, ring, 0, 3, path, null) orelse return error.CreateFailed;
+    defer fb_checkout_destroy(s, co);
+    const mk = FbMarkers{ .slice_start = 0, .slice_end = 2 };
+    try std.testing.expectEqual(FbStatus.io_error, fb_checkout_export(s, co, dst, 0, 3, 0, &mk));
+    try std.testing.expectEqual(FbStatus.ok, fb_checkout_export(s, co, dst, 0, 3, 0, null));
 }
 
 test "fb_playback_bind_checkout rejects a span past the checkout (R-h1b subtraction guard)" {

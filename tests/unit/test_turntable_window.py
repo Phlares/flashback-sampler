@@ -586,6 +586,7 @@ def test_clip_drag_cancel_deletes_file_and_keeps_clip(qapp, state, tmp_path, mon
 
 
 def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
+    """With no handle budget the dragged file is the trimmed range alone."""
     from tests.fixtures.wavread import read_wav
     win = TurntableWindow(state)
     try:
@@ -596,6 +597,7 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         n = co.n_frames
         mgr.set_trim(co.id, n // 4, n // 2)
         win._export_pool_dir = tmp_path
+        win._drag_handle_mb = 0.0
         monkeypatch.setattr(
             "flashback_sampler.app.turntable_window.perform_file_drag",
             lambda widget, path: True,
@@ -1153,3 +1155,230 @@ def test_set_max_footprint_applies_to_state_and_persists(qapp, state, monkeypatc
     win._set_max_footprint_mb(0.0)
     assert state.max_footprint_mb == 0.0
     assert saved == [0.0]
+
+
+def test_clip_drag_of_a_trimmed_band_mints_a_slice_and_keeps_it_on_cancel_only_if_accepted(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        win._refresh_clip_side(auto_select_newest=True)
+        mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = 0.0
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: False)
+        win._on_clip_drag_out(0.25, 0.5)
+        assert [c.id for c in mgr.list()] == [co.id]  # cancelled: the slice is gone
+        assert list(tmp_path.glob("*.wav")) == []
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
+        win._on_clip_drag_out(0.25, 0.5)
+        cos = mgr.list()
+        assert len(cos) == 2 and cos[1].parent_id == co.id and cos[1].state == "saved"
+        assert mgr.get(co.id).state == "pending"  # the parent is untouched
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_buffer_drag_pulls_the_selection_plus_handles_and_marks_the_trim(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        sr = state.buffer.sample_rate
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = (sr // 2) * state.channels * 4 / 2**20  # handles = 0.5 s of frames in total
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
+        win.buffer_panel.waveform.manualSelectionChanged.emit(0.4, 0.6)  # 0.2 s selected in the middle
+        win._update_selection_display()
+        win._on_buffer_drag_out(0.4, 0.6)
+        co = state.checkout_manager.list()[0]
+        # root = selection +/- 0.25 s (half the handle budget each side), trim = the selection
+        assert abs(co.n_frames - int(0.7 * sr)) <= 2
+        assert abs(co.trim_in_samples - int(0.25 * sr)) <= 2 and abs((co.trim_out_samples - co.trim_in_samples) - int(0.2 * sr)) <= 2
+        assert co.state == "saved"
+        raw = next(tmp_path.glob("*.wav")).read_bytes()
+        assert b"cue " in raw
+    finally:
+        win.close()
+
+
+def test_buffer_drag_rebases_handles_onto_a_lapped_ring(qapp, tmp_path, monkeypatch):
+    """The ring holds only its last `buffer_size` samples, so the handle
+    span is computed in ring-relative frames and rebased back before the
+    checkout is made. Without the rebase the range has scrolled out."""
+    from flashback_sampler.app.state import AppState
+    state = AppState(buffer_seconds=0.5, sample_rate=48000, channels=2)
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)  # 1 s into a 0.5 s ring: the oldest half is gone
+        sr = state.buffer.sample_rate
+        assert state.buffer.total_written > state.buffer.buffer_size
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = (sr // 10) * state.channels * 4 / 2**20  # 0.1 s of handles
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
+        win.buffer_panel.waveform.manualSelectionChanged.emit(0.4, 0.6)  # 0.1 s of the 0.5 s window
+        win._on_buffer_drag_out(0.4, 0.6)
+        cos = state.checkout_manager.list()
+        assert len(cos) == 1
+        assert abs(cos[0].n_frames - int(0.2 * sr)) <= 2
+        assert abs(cos[0].trim_in_samples - int(0.05 * sr)) <= 2
+    finally:
+        win.close()
+        state.shutdown()
+
+
+def test_set_drag_handle_mb_persists_and_applies(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+
+    saved = []
+    monkeypatch.setattr(tw, "save_drag_handle_mb", saved.append)
+    win = TurntableWindow(state)
+    try:
+        win._set_drag_handle_mb(50)
+        assert win._drag_handle_mb == 50.0
+        assert saved == [50]
+    finally:
+        win.close()
+
+
+def _trimmed_clip_for_drag(state, win, tmp_path):
+    _write_one_second(state)
+    mgr = state.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    win._refresh_clip_side(auto_select_newest=True)
+    mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+    win._export_pool_dir = tmp_path
+    win._drag_handle_mb = 0.0
+    return co
+
+
+def test_clip_drag_with_the_alc_pref_offers_only_the_alc(qapp, state, tmp_path, monkeypatch):
+    """Live refuses a mixed .alc + .wav drop, so the pref offers the .alc
+    alone. The WAV still lands in the pool -- the .alc references it."""
+    win = TurntableWindow(state)
+    try:
+        _trimmed_clip_for_drag(state, win, tmp_path)
+        win._drag_alc_sidecar = True
+        offered = []
+
+        def fake_drag(widget, paths):
+            offered.append(paths)
+            return True
+
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", fake_drag)
+        win._on_clip_drag_out(0.25, 0.5)
+        wav = next(tmp_path.glob("*.wav"))
+        alc = wav.with_suffix(".alc")
+        assert alc.exists()
+        assert wav.exists()
+        assert offered == [[alc]]
+    finally:
+        win.close()
+
+
+def test_clip_drag_cancel_with_the_alc_pref_leaves_neither_file(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        co = _trimmed_clip_for_drag(state, win, tmp_path)
+        win._drag_alc_sidecar = True
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: False)
+        win._on_clip_drag_out(0.25, 0.5)
+        assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.alc")) == []
+        assert [c.id for c in state.checkout_manager.list()] == [co.id]
+    finally:
+        win.close()
+
+
+def test_clip_drag_without_the_alc_pref_offers_the_wav_alone(qapp, state, tmp_path, monkeypatch):
+    win = TurntableWindow(state)
+    try:
+        _trimmed_clip_for_drag(state, win, tmp_path)
+        offered = []
+
+        def fake_drag(widget, paths):
+            offered.append(paths)
+            return True
+
+        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", fake_drag)
+        win._on_clip_drag_out(0.25, 0.5)
+        assert offered == [[next(tmp_path.glob("*.wav"))]]
+        assert list(tmp_path.glob("*.alc")) == []
+    finally:
+        win.close()
+
+
+def test_set_drag_alc_sidecar_persists_and_applies(qapp, state, monkeypatch):
+    import flashback_sampler.app.turntable_window as tw
+
+    saved = []
+    monkeypatch.setattr(tw, "save_drag_alc_sidecar", saved.append)
+    win = TurntableWindow(state)
+    try:
+        assert win._drag_alc_sidecar is False
+        win._set_drag_alc_sidecar(True)
+        assert win._drag_alc_sidecar is True
+        assert saved == [True]
+    finally:
+        win.close()
+
+
+def test_clip_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, tmp_path, monkeypatch):
+    """I1: the trimmed clip-deck drag mints a slice, so it meets the same
+    per-slot count cap the buffer drag does. It must make room the same
+    way -- evict the oldest `saved` clip and retry -- not fail the drag."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.apply_checkout_caps(max_active=3)
+        mgr = state.checkout_manager
+        for _ in range(2):
+            filler = mgr.create(duration_s=0.01)
+            mgr.mark_saved(filler.id)
+        oldest_saved = mgr.list()[0].id
+        co = mgr.create(duration_s=0.5)  # at the cap now
+        mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+        win._refresh_clip_side(auto_select_newest=True)
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = 0.0
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True
+        )
+        win._on_clip_drag_out(0.25, 0.5)
+        ids = [c.id for c in mgr.list()]
+        assert oldest_saved not in ids  # room was made
+        assert [i for i in ids if mgr.get(i).parent_id == co.id]  # the slice was minted
+        assert len(list(tmp_path.glob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(qapp, state, tmp_path, monkeypatch):
+    """The dragged clip is the slice's parent, so evicting it would
+    destroy the audio the drag is about (and the mint would raise). A
+    re-drag of a `saved` clip that is also the oldest saved must skip it
+    and take the next one instead."""
+    win = TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        state.apply_checkout_caps(max_active=3)
+        mgr = state.checkout_manager
+        co = mgr.create(duration_s=0.5)
+        mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
+        mgr.mark_saved(co.id)  # oldest AND saved: the eviction candidate
+        younger = [mgr.create(duration_s=0.01) for _ in range(2)]
+        for c in younger:
+            mgr.mark_saved(c.id)
+        win._export_pool_dir = tmp_path
+        win._drag_handle_mb = 0.0
+        monkeypatch.setattr(win, "_currently_displayed_checkout", lambda: co)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True
+        )
+        win._on_clip_drag_out(0.25, 0.5)
+        ids = [c.id for c in mgr.list()]
+        assert co.id in ids  # the dragged clip survived
+        assert younger[0].id not in ids  # the next oldest saved went instead
+        assert [i for i in ids if mgr.get(i).parent_id == co.id]  # the slice was minted
+    finally:
+        win.close()
