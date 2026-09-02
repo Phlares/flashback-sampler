@@ -188,3 +188,15 @@ def test_checkout_peak_bins_passes_the_real_out_len(ring, scratch, tmp_path):
     assert len(calls) == 1
     assert calls[0][-1] == out.size // 2  # the buffer's own FbPeakBin count
     scratch.checkout_destroy(h)
+
+
+def test_closed_scratch_reports_zero_resident_bytes():
+    # #81: the tray poll reads resident_bytes after AppState.shutdown()
+    # closed the handle. A closed scratch must answer 0, not call into
+    # the library with NULL.
+    s = NativeScratch(budget_bytes=1 << 20)
+    s.start()
+    s.close()
+    assert s.resident_bytes == 0
+    s.set_budget(1)  # no-op on a closed handle
+    s.close()  # idempotent
