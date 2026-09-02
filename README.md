@@ -48,7 +48,18 @@ The window is a pair of turntables. The left deck is the live ring buffer. The r
 4. **OUT →** checks the selection out as a clip on the right deck.
 5. **Preview and trim.** Select a clip, then **PLAY** or the spacebar. The clip **− / + / ◀ / ▶** controls trim the in and out points. **LOOP** repeats the trimmed range.
 6. **SAVE** opens a file dialog (WAV, 32-bit float by default). Right-click a clip for save-full, clear-trim, or discard. **FLUSH** clears the whole buffer; checkouts are untouched.
-7. **Drag it into your DAW.** Grab inside a selection band on either deck and drag out of the window. The slice lands as a WAV wherever files drop. Ctrl+drag on the clip deck exports the whole clip. Exports live in the pool folder (Preferences → Export, default `Documents/flashback-sampler/exports`). Do not move pool files a DAW project still references.
+7. **Drag it into your DAW.** Grab inside a selection band on either deck and drag out of the window. The audio lands as a WAV wherever files drop. Ctrl+drag on the clip deck exports the whole clip. A trimmed clip-deck drag exports the trimmed range as a slice. The slice stays on the clip deck as a saved clip, so you can re-trim the parent and drag it again. The exported file carries handles: extra parent audio, split before and after the slice. The budget is the "Drag-out handles" setting (Preferences → Export, default 200 MB, 0 = slice only). Handles let you drag the clip edge out in the DAW. The slice itself is always whole. A buffer-deck drag pulls the selection plus the same handles from the ring. WAV markers (`cue`, `smpl`, `adtl` labels) mark the slice inside the file. Turn on "Also offer an Ableton Live Clip (.alc) on drag" (Preferences → Export, off by default) for a `.alc` sidecar next to the WAV. In Live, the clip opens at the slice, and its edge drags out into the handles. Exports live in the pool folder (Preferences → Export, default `Documents/flashback-sampler/exports`). Do not move pool files a DAW project still references.
+
+### What DAWs do with the markers
+
+Only Ableton Live 12 is tested (2026-09-01), by dragging a clip from the app into Live. Every other row below is untested.
+
+| DAW | Markers on drop | Clip bounds from file | Sidecar |
+|---|---|---|---|
+| Ableton Live 12 | No clip markers from the WAV. The `smpl` loop sets the arrangement loop brace. | No. | `.alc` opens the clip at the slice. Its edge drags out into the handles. |
+| Reaper | Untested. Reaper's docs say `cue` points become project markers. | Untested. | None. |
+| Logic, Cubase | Untested. Their docs say `cue` points become markers. | Untested. | None. |
+| Bitwig, FL Studio, Studio One, Pro Tools | Untested. | Untested. | None. |
 
 Set the preview output to a different device than the capture source, or the preview feeds back into the ring.
 

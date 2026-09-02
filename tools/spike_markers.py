@@ -1,4 +1,4 @@
-"""Build the two spike files for the DAW marker test (spec PR i, Task i2):
+"""Build the spike file for the DAW marker test (spec PR i, Task i2):
   spike.wav  — 30 s stereo at 48 kHz with cue/smpl markers at 10-15 s
 Run: python tools/spike_markers.py <out_dir>"""
 import sys
