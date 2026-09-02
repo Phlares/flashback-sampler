@@ -97,20 +97,14 @@ def read_manifest(path: Path | str) -> Optional[Manifest]:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    # Subset check, not equality: the TypeError catch below cannot tell
-    # a missing required field from one this reader fills in (`file`),
-    # so the guard is what enforces "every required field is present".
     if not isinstance(data, dict) or not (_REQUIRED <= set(data)):
         return None
-    # `file` arrived after the first manifests were written. An old
-    # root owns its own file; an old slice's best guess is its parent's,
-    # which is what adoption assumed then. The next rewrite stores the
-    # real value.
+    # A manifest without `file` (written before 0.4.1): a root owns its
+    # own file, a slice gets its parent's. A nested slice from then whose
+    # parent is gone stays unfindable; the next rewrite stores the real
+    # value for every other case.
     data.setdefault("file", data["parent"] or data["id"])
-    try:
-        return Manifest(**{k: data[k] for k in _FIELDS})
-    except TypeError:
-        return None
+    return Manifest(**{k: data[k] for k in _FIELDS})
 
 
 def scan(scratch_dir: Path | str) -> list[Manifest]:

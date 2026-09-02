@@ -231,14 +231,10 @@ class AppState:
                 if slot is not None:
                     co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
                 else:
-                    # A root, or an ORPHANED slice: its parent left the
-                    # manifests (the user discarded it, or the window's
-                    # count-cap eviction did) while the file it names is
-                    # still on disk, held there by this slice's own
-                    # refcount. Both open over `<m.file>.wav` at their own
-                    # span -- a root IS a slice at (0, all), so it is the
-                    # same mechanism. Skipping the orphan would leak the
-                    # root's WAV and this manifest forever.
+                    # A root, or an orphaned slice whose parent left the
+                    # manifests: both open over `<m.file>.wav` at their
+                    # own span. Skipping the orphan would pin the root's
+                    # WAV forever.
                     found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
                     if found is None:
                         continue
@@ -250,7 +246,7 @@ class AppState:
                                           buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
                             name=m.slot or "Adopted", armed=False,
                         )
-                    co = slot.checkout_manager.adopt_root(m, audio, partial, m.start_frame)
+                    co = slot.checkout_manager.adopt_root(m, audio, partial)
             except Exception:
                 # No on-disk artefact may abort a launch -- skip and continue.
                 continue
