@@ -135,6 +135,21 @@ def test_render_slice_drag_discards_the_minted_slice_when_the_export_fails(scrat
     assert co.path.exists()  # and the parent's own file survived the cleanup
 
 
+def test_render_slice_drag_on_a_failed_parent_exports_the_trim_from_ram(scratch, tmp_path, monkeypatch):
+    """#78: a parent whose scratch write failed has no file to slice,
+    but its RAM copy still exports. The trim goes out as a plain file
+    (no handles, no markers) and the drop commits the clip itself."""
+    mgr, co = _mgr_with_checkout(scratch, tmp_path)
+    mgr.set_trim(co.id, 200, 300)
+    monkeypatch.setattr(mgr, "write_state", lambda cid: "failed")
+    r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", handle_mb=1.0, alc=True, now=WHEN)
+    assert r == DragRender(r.path, co.id, False)
+    assert [c.id for c in mgr.list()] == [co.id]
+    audio, info = read_wav(r.path)
+    assert info.frames == 100 and audio[0, 0] == pytest.approx(1200.0)
+    assert b"cue " not in r.path.read_bytes()
+
+
 def test_render_slice_drag_on_an_untrimmed_clip_falls_back_to_the_root(scratch, tmp_path):
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
     r = render_slice_drag(mgr, co.id, tmp_path, "x", now=WHEN)
