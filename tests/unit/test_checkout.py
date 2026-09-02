@@ -220,11 +220,61 @@ def test_checkout_create_does_not_stall_writer(scratch, tmp_path):
 def test_save_as_wav_writes_correct_samples(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)
-    out = mgr.save(co.id, tmp_path / "out" / "clip.wav")
+    out = tmp_path / "out" / "clip.wav"
+    mgr.save(co.id, out)
     audio, info = read_wav(out)
     assert info.frames == 500 and info.subtype == "FLOAT"
     assert audio[0, 0] == pytest.approx(1000.0)
     assert mgr.get(co.id).state == "saved"
+
+
+def test_save_trimmed_mints_the_same_slice_a_drag_would(scratch, tmp_path):
+    """#78: the trim leaves as a slice checkout whichever door it takes,
+    so the user can come back for more of it. The parent is untouched,
+    like the trimmed drag leaves it."""
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.5)
+    mgr.set_trim(co.id, 100, 300)
+    saved = mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
+    assert saved.id != co.id
+    assert (saved.parent_id, saved.start_frame, saved.n_frames, saved.state) == (co.id, 100, 200, "saved")
+    assert [c.id for c in mgr.list()] == [co.id, saved.id]
+    assert mgr.get(co.id).state == "pending"
+    audio, info = read_wav(tmp_path / "t.wav")
+    assert info.frames == 200 and audio[0, 0] == pytest.approx(1100.0)
+    # An untrimmed save has no slice to mint: the clip itself is what leaves.
+    assert mgr.save(co.id, tmp_path / "f.wav", trimmed=False).id == co.id
+    assert mgr.get(co.id).state == "saved"
+
+
+def test_save_trimmed_on_a_failed_parent_exports_from_ram_without_a_slice(scratch, tmp_path, monkeypatch):
+    """A slice needs the parent's file. When the scratch write failed
+    the RAM copy still exports, so the trim leaves as a plain file and
+    the clip itself is marked saved."""
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.5)
+    mgr.set_trim(co.id, 100, 300)
+    monkeypatch.setattr(mgr, "write_state", lambda cid: "failed")
+    saved = mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
+    assert saved.id == co.id and [c.id for c in mgr.list()] == [co.id]
+    assert mgr.get(co.id).state == "saved"
+    audio, info = read_wav(tmp_path / "t.wav")
+    assert info.frames == 200 and audio[0, 0] == pytest.approx(1100.0)
+
+
+def test_save_trimmed_discards_the_minted_slice_when_the_export_fails(scratch, tmp_path, monkeypatch):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.5)
+    mgr.set_trim(co.id, 100, 300)
+
+    def boom(*a, **kw):
+        raise RuntimeError("could not export checkout; the disk is full")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
+    assert [c.id for c in mgr.list()] == [co.id]
+    assert mgr.file_refcount(co.path) == 1
 
 
 def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
@@ -232,14 +282,16 @@ def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     co = mgr.create(duration_s=0.5)
     mgr.set_trim(co.id, 100, 300)
     assert co.trim_range() == (100, 200) and co.has_trim()
-    out = mgr.save(co.id, tmp_path / "t.wav", trimmed=True, subtype="PCM_16", mark_saved=False)
+    out = tmp_path / "t.wav"
+    mgr.save(co.id, out, trimmed=True, subtype="PCM_16")
     audio, info = read_wav(out)
     assert info.frames == 200 and info.subtype == "PCM_16"
-    assert mgr.get(co.id).state == "pending"
     m = read_manifest(manifest_path(tmp_path, co.id))
     assert (m.trim_in, m.trim_out) == (100, 300)
-    full = mgr.save(co.id, tmp_path / "f.wav", trimmed=False)
+    full = tmp_path / "f.wav"
+    mgr.save(co.id, full, trimmed=False, mark_saved=False)
     assert read_wav(full)[1].frames == 500
+    assert mgr.get(co.id).state == "pending"  # mark_saved=False leaves the clip alone
 
 
 def test_save_validation(scratch, tmp_path):

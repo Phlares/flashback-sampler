@@ -610,6 +610,37 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         win.close()
 
 
+def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(qapp, state, tmp_path, monkeypatch):
+    """#78: save trimmed mints a slice like the trimmed drag, so it meets
+    the same count cap and evicts the oldest saved clip, never the clip
+    being saved. The new slice becomes the shown clip."""
+    from flashback_sampler.app import turntable_window as tw
+    from tests.fixtures.wavread import read_wav
+    win = tw.TurntableWindow(state)
+    try:
+        _write_one_second(state)
+        mgr = state.active_slot.checkout_manager
+        old = mgr.create(duration_s=0.2)
+        mgr.mark_saved(old.id)
+        co = mgr.create(duration_s=0.5)
+        state.apply_checkout_caps(max_active=2)
+        win._refresh_clip_side(auto_select_newest=True)
+        n = co.n_frames
+        mgr.set_trim(co.id, n // 4, n // 2)
+        target = tmp_path / "trim.wav"
+        monkeypatch.setattr(tw.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "")))
+        win._save_current_clip(trimmed=True)
+        ids = [c.id for c in mgr.list()]
+        assert old.id not in ids and co.id in ids and len(ids) == 2
+        s = mgr.get(ids[-1])
+        assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (co.id, n // 4, n // 4, "saved")
+        assert mgr.get(co.id).state == "pending"
+        assert read_wav(target)[1].frames == n // 4
+        assert win._currently_displayed_checkout().id == s.id
+    finally:
+        win.close()
+
+
 def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
     from flashback_sampler.app import turntable_window as tw
     win = tw.TurntableWindow(state)

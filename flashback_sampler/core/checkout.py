@@ -48,6 +48,11 @@ _VALID_SUBTYPES: tuple[str, ...] = ("FLOAT", "PCM_24", "PCM_16")
 BIN_COUNTS: tuple[int, ...] = (540, 360)
 
 
+class ScratchWriteFailed(RuntimeError):
+    """The checkout's scratch write failed, so nothing can reference its
+    file. The RAM copy still exports."""
+
+
 @dataclass
 class Checkout:
     """A frozen span of ring audio. `handle` is the Zig `*Checkout`;
@@ -241,8 +246,8 @@ class CheckoutManager:
     def slice(self, parent_id: str, start: int, n: int) -> Checkout:
         """A saved segment `(parent file, start, n)`. Waits for the
         parent's file: a slice has no RAM copy, so its bins and audio
-        come from disk (plan P13). Raises RuntimeError when the parent's
-        write failed, and KeyError when the parent was discarded while
+        come from disk (plan P13). Raises ScratchWriteFailed when the
+        parent's write failed, and KeyError when the parent was discarded while
         this call waited for that write."""
         parent = self.get(parent_id)
         if start < 0 or n <= 0 or start + n > parent.n_frames:
@@ -256,7 +261,7 @@ class CheckoutManager:
             if ws in ("written", "adopted"):
                 break
             if ws == "failed":
-                raise RuntimeError("scratch write failed for the parent; cannot slice")
+                raise ScratchWriteFailed("scratch write failed for the parent; cannot slice")
             if time.monotonic() > deadline:
                 raise RuntimeError("timed out waiting for the parent's scratch write")
             time.sleep(0.005)
@@ -508,6 +513,20 @@ class CheckoutManager:
                 raise RuntimeError(f"could not export checkout {checkout_id}; {e}") from e
         return target
 
+    def mint_trim(self, checkout_id: str) -> Optional[Checkout]:
+        """The clip's trim as a saved slice, or None when there is no
+        trim or the clip's scratch write failed: a slice needs the file,
+        while the RAM copy still exports on its own. Save and drag both
+        mint through here, so the same trim leaves as the same slice
+        whichever way it goes."""
+        co = self.get(checkout_id)
+        if not co.has_trim():
+            return None
+        try:
+            return self.slice(checkout_id, *co.trim_range())
+        except ScratchWriteFailed:
+            return None
+
     def save(
         self,
         checkout_id: str,
@@ -516,16 +535,34 @@ class CheckoutManager:
         trimmed: bool = True,
         subtype: CheckoutSubtype | None = None,
         mark_saved: bool = True,
-    ) -> Path:
+    ) -> Checkout:
+        """Write the clip, or its trim, to `target_path`. Returns the
+        checkout the file came from: the slice a trimmed save mints, or
+        the clip itself. A minted slice is already `saved` and the clip
+        stays as it was; otherwise `mark_saved` flips the clip."""
         fmt = fmt.upper()  # type: ignore[assignment]
         if fmt not in self._VALID_FORMATS:
             raise ValueError(f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}")
         co = self.get(checkout_id)
         start, n = co.trim_range() if trimmed else (0, co.n_frames)
-        target = self.export_range(checkout_id, target_path, start, n, subtype or _DEFAULT_SUBTYPE)
+        minted = self.mint_trim(checkout_id) if trimmed else None
+        try:
+            self.export_range(checkout_id, target_path, start, n, subtype or _DEFAULT_SUBTYPE)
+        except BaseException:
+            # An export that fails must not strand the slice (a `saved`
+            # manifest adoption would resurrect). Cleanup errors stay
+            # quiet so the export error is the one the caller sees.
+            if minted is not None:
+                try:
+                    self.discard(minted.id)
+                except Exception:
+                    pass
+            raise
+        if minted is not None:
+            return minted
         if mark_saved:
             self.mark_saved(checkout_id)
-        return target
+        return co
 
     def mark_saved(self, checkout_id: str) -> None:
         # R-h8l (round 2): same fetch-then-use fix as set_trim.
