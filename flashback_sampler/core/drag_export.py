@@ -169,13 +169,19 @@ def render_slice_drag(
             manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, alc=alc, now=now
         )
     start, n = co.trim_range()
-    # Mint BEFORE the export: the plan names the file for the slice, so
-    # the slice has to exist first. That leaves the export as the only
-    # step that can strand it -- the caller never receives a DragRender,
-    # so it has no id to discard, and adoption would resurrect the orphan
-    # (state `saved`, a manifest on disk, a refcount on the parent file)
-    # at the next launch. Undo the mint here, where the id is still known.
-    s = manager.slice(checkout_id, start, n)
+    s = manager.mint_trim(checkout_id)
+    if s is None:
+        # The parent's scratch write failed: there is no file to slice,
+        # so the trim goes from the RAM copy like the full drag does,
+        # without handles or markers, and the drop commits the clip.
+        target = _target(pool_dir, source_name, n / co.sample_rate, now)
+        _export(manager, checkout_id, target, start, n, bit_depth, None, alc, co.sample_rate)
+        return DragRender(target, checkout_id, False)
+    # The export is the only step left that can strand the slice: the
+    # caller never receives a DragRender, so it has no id to discard, and
+    # adoption would resurrect the orphan (state `saved`, a manifest on
+    # disk, a refcount on the parent file) at the next launch. Undo the
+    # mint here, where the id is still known.
     try:
         lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
         target = _target(pool_dir, source_name, n / co.sample_rate, now)

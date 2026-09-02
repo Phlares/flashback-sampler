@@ -775,7 +775,7 @@ def test_adoption_survives_a_range_corrupt_manifest_and_still_adopts_others(tmp_
 
     (tmp_path / "badrate.wav").write_bytes(b"\x00" * 64)  # just needs to exist
     write_manifest(tmp_path, Manifest(id="badrate", slot="Ghost", rate=0, channels=1, abs_start=0, abs_end=1,
-                                      created_at=5.0, parent=None, start_frame=0, n_frames=1, trim_in=0, trim_out=0,
+                                      created_at=5.0, parent=None, file="badrate", start_frame=0, n_frames=1, trim_in=0, trim_out=0,
                                       state="pending", partial=False, bins=None))
 
     st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)  # must not raise
@@ -799,7 +799,7 @@ def test_adoption_takes_a_part_file_as_partial_and_skips_junk(tmp_path):
     p.unlink()
     # a manifest with no audio at all, and a corrupt one
     write_manifest(tmp_path, Manifest(id="ghost", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=0.0, parent=None, start_frame=0, n_frames=1, trim_in=0, trim_out=0,
+                                      created_at=0.0, parent=None, file="ghost", start_frame=0, n_frames=1, trim_in=0, trim_out=0,
                                       state="pending", partial=False, bins=None))
     (tmp_path / "bad.json").write_text("{")
     st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
@@ -818,10 +818,10 @@ def test_adoption_of_a_slice_needs_its_parent(tmp_path):
     _written(st, co)
     st.shutdown()
     write_manifest(tmp_path, Manifest(id="sl", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=9.0, parent=co.id, start_frame=100, n_frames=50, trim_in=0, trim_out=0,
+                                      created_at=9.0, parent=co.id, file=co.id, start_frame=100, n_frames=50, trim_in=0, trim_out=0,
                                       state="saved", partial=False, bins=None))
     write_manifest(tmp_path, Manifest(id="orphan", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=9.5, parent="missing", start_frame=0, n_frames=5, trim_in=0, trim_out=0,
+                                      created_at=9.5, parent="missing", file="missing", start_frame=0, n_frames=5, trim_in=0, trim_out=0,
                                       state="saved", partial=False, bins=None))
     st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
     ids = [c.id for c in st2.slots[0].checkout_manager.list()]
@@ -875,6 +875,41 @@ def test_adoption_keeps_a_slice_whose_parent_is_gone(tmp_path):
     st2.shutdown()
 
 
+def test_adoption_keeps_a_nested_slice_whose_intermediate_parent_is_gone(tmp_path):
+    """#72: root -> s1 -> s2, discard s1, relaunch. s2's manifest names
+    s1 as its parent, but the audio lives in the root's file. Adoption
+    must open s2 over `<root>.wav` at its absolute offset; skipping it
+    strands the clip and pins the root's WAV for nothing."""
+    from flashback_sampler.core import native
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    root = mgr.create(duration_s=0.5)
+    _written(st, root)
+    s1 = mgr.slice(root.id, 100, 300)   # file frames 100..400
+    s2 = mgr.slice(s1.id, 250, 50)      # file frames 350..400
+    before = native.wav_read(mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50)
+    mgr.discard(s1.id)
+    _stamp_created_at(tmp_path, s2.id, 20.0)
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    mgr2 = st2.slots[0].checkout_manager
+    assert sorted(c.id for c in mgr2.list()) == sorted([root.id, s2.id])
+    back = mgr2.get(s2.id)
+    assert (back.path, back.start_frame, back.n_frames, back.state) == (root.path, 350, 50, "saved")
+    after = native.wav_read(mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50)
+    assert np.array_equal(after, before)
+    # The root's file is shared by both: the refcount says so, and the
+    # last discard removes it.
+    assert mgr2.file_refcount(root.path) == 2
+    mgr2.discard(root.id)
+    assert root.path.exists()
+    mgr2.discard(s2.id)
+    assert not root.path.exists()
+    st2.shutdown()
+
+
 def test_adoption_of_a_slice_of_a_slice_reads_the_same_audio(tmp_path):
     """C2: a manifest's `start_frame` is ABSOLUTE into the file, but the
     Zig slice call takes a PARENT-RELATIVE start and adds the parent's
@@ -918,7 +953,7 @@ def test_adoption_skips_a_slice_that_starts_before_its_parent(tmp_path):
     s1 = mgr.slice(co.id, 100, 300)
     _stamp_created_at(tmp_path, s1.id, 10.0)
     write_manifest(tmp_path, Manifest(id="before", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=20.0, parent=s1.id, start_frame=50, n_frames=10, trim_in=0,
+                                      created_at=20.0, parent=s1.id, file=co.id, start_frame=50, n_frames=10, trim_in=0,
                                       trim_out=0, state="saved", partial=False, bins=None))
     st.shutdown()
 

@@ -1263,12 +1263,15 @@ class TurntableWindow(QMainWindow):
         if not target:
             return
         try:
-            slot.checkout_manager.save(
+            # A trimmed save mints a slice like the trimmed drag, so it
+            # meets the same count cap; keep the clip it is cut from.
+            saved = self._with_room(slot, lambda: slot.checkout_manager.save(
                 co.id, Path(target), fmt="WAV", trimmed=trimmed
-            )
+            ), keep=co.id)
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
+        self._refresh_clip_side(auto_select_newest=saved.id != co.id)
         self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
 
     def _render_for_drag(self, slot, co, *, trimmed: bool, markers_at_trim: bool = False):
