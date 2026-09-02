@@ -2,7 +2,9 @@ name: test
 
 # Two jobs: pytest on Windows (py3.12, the version release.yml ships;
 # it builds the DLL anyway) and the Zig unit tests on Ubuntu. Hard
-# timeouts so a hung test stops in minutes. Docs-only changes skip it.
+# timeouts so a hung test stops in minutes. Every pull request runs
+# both jobs: `main` and `dev` require them, and a skipped check blocks
+# the merge. Docs-only pushes skip it; nothing requires a check there.
 on:
   push:
     branches: [main, dev]
@@ -10,9 +12,6 @@ on:
       - "**.md"
       - "docs/**"
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
   workflow_dispatch:
 
 concurrency:
