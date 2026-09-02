@@ -307,7 +307,7 @@ class CheckoutManager:
         write_manifest(self._scratch_dir, Manifest(
             id=co.id, slot=self._slot_name, rate=co.sample_rate, channels=co.channels,
             abs_start=co.abs_sample_start, abs_end=co.abs_sample_end, created_at=time.time(),
-            parent=co.parent_id, start_frame=co.start_frame, n_frames=co.n_frames,
+            parent=co.parent_id, file=co.path.stem, start_frame=co.start_frame, n_frames=co.n_frames,
             trim_in=co.trim_in_samples, trim_out=co.trim_out_samples, state=co.state,
             partial=co.partial, bins=bins_to_json(co.bins) if co.bins else None,
         ))

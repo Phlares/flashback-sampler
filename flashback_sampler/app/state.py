@@ -26,7 +26,7 @@ from flashback_sampler.app.audio_devices import (
 )
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
-from flashback_sampler.core.manifest import audio_path, resolve_audio, scan
+from flashback_sampler.core.manifest import resolve_audio, scan
 from flashback_sampler.core import native
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from flashback_sampler.core.quality_presets import QualityPreset
@@ -215,7 +215,7 @@ class AppState:
         named from the manifest (60 s ring — an arbitrary small default;
         a foreign-rate slot only exists to hold adopted checkouts, not to
         capture into); a slice goes where its parent went, or -- when its
-        parent is gone from the manifests while the file it named is
+        parent is gone from the manifests while the file it names is
         still on disk -- is opened directly over that file at its own
         span, keeping the file (and itself) alive. Anything unreadable,
         without audio, or that fails anywhere in adoption (a
@@ -231,21 +231,15 @@ class AppState:
                 if slot is not None:
                     co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
                 else:
-                    if m.parent is None:
-                        found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
-                        start = 0
-                    else:
-                        # An ORPHANED slice: its parent left the manifests
-                        # (the user discarded it, or the window's
-                        # count-cap eviction did) while the file it named
-                        # is still on disk, held there by this slice's own
-                        # refcount. Open over that file at the slice's own
-                        # span -- a root IS a slice at (0, all), so it is
-                        # the same mechanism. Skipping it would leak the
-                        # parent's WAV and this manifest forever.
-                        orphan = audio_path(self.scratch_dir, m.parent)
-                        found = (orphan, False) if orphan.exists() else None
-                        start = int(m.start_frame)
+                    # A root, or an ORPHANED slice: its parent left the
+                    # manifests (the user discarded it, or the window's
+                    # count-cap eviction did) while the file it names is
+                    # still on disk, held there by this slice's own
+                    # refcount. Both open over `<m.file>.wav` at their own
+                    # span -- a root IS a slice at (0, all), so it is the
+                    # same mechanism. Skipping the orphan would leak the
+                    # root's WAV and this manifest forever.
+                    found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
                     if found is None:
                         continue
                     audio, partial = found
@@ -256,7 +250,7 @@ class AppState:
                                           buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
                             name=m.slot or "Adopted", armed=False,
                         )
-                    co = slot.checkout_manager.adopt_root(m, audio, partial, start)
+                    co = slot.checkout_manager.adopt_root(m, audio, partial, int(m.start_frame))
             except Exception:
                 # No on-disk artefact may abort a launch -- skip and continue.
                 continue
