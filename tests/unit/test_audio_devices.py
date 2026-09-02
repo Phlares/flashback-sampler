@@ -309,6 +309,7 @@ def test_captures_preview_matches_a_process_source_only_in_our_own_tree(monkeypa
     from flashback_sampler.app.audio_devices import captures_preview
     roots = {4242: 1, 5151: 5151, os.getpid(): 1}
     monkeypatch.setattr(audio_devices.native, "resolve_root_pid", lambda pid: roots.get(pid, pid))
+    audio_devices._own_root_pid.cache_clear()
     out = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
     assert captures_preview(CaptureDevice(kind="process_loopback", name="ours", id="4242"), out)
     assert not captures_preview(CaptureDevice(kind="process_loopback", name="Spotify", id="5151"), out)

@@ -12,6 +12,7 @@ the right concrete source object.
 
 from __future__ import annotations
 
+import functools
 import os
 from dataclasses import dataclass, field, replace
 from typing import Literal
@@ -154,7 +155,14 @@ def _endpoints(device_id: str, is_default: bool) -> set[str]:
     """The keys a render endpoint answers to: its id, and "" when it is
     the OS default (picked as "follow the default" or by its own id).
     Two sides name the same endpoint when their key sets intersect."""
-    return ({device_id} if device_id else set()) | ({""} if is_default or not device_id else set())
+    return {device_id} | ({""} if is_default else set())
+
+
+@functools.cache
+def _own_root_pid() -> int:
+    """This process's same-exe root, resolved once: the check runs from
+    a 1 Hz poll and the answer never changes."""
+    return native.resolve_root_pid(os.getpid())
 
 
 def captures_preview(device: CaptureDevice, output: OutputDevice) -> bool:
@@ -167,7 +175,7 @@ def captures_preview(device: CaptureDevice, output: OutputDevice) -> bool:
         return bool(_endpoints(device.id, device.is_default or device.follow_default)
                     & _endpoints(output.id, output.is_default))
     if device.kind == "process_loopback":
-        return native.resolve_root_pid(int(device.id)) == native.resolve_root_pid(os.getpid())
+        return native.resolve_root_pid(int(device.id)) == _own_root_pid()
     return False
 
 
