@@ -81,6 +81,12 @@ class _NativeSource:
     def mix_rate(self) -> int:
         return int(self._stats().mix_rate)
 
+    def running_sources(self) -> int:
+        """Bitmask: bit i set while source i streams. A single capture
+        reports bit 0; a mixer reports one bit per source, so a dead
+        source can be named while the mix carries on (#47)."""
+        return int(self._stats().sources)
+
     def close(self) -> None:
         if self._h:
             self._call("destroy")(self._h)

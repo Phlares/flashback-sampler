@@ -33,6 +33,10 @@ hiddenimports = [
 # lives at the repo root.
 datas.append(("flashback_sampler/app/fonts", "flashback_sampler/app/fonts"))
 
+# The Ableton clip template alc.py reads at drag time. A data file, not
+# a module, so PyInstaller does not follow an import to it.
+datas.append(("flashback_sampler/core/alc_template.xml", "flashback_sampler/core"))
+
 
 a = Analysis(
     ["flashback_sampler/app/main.py"],

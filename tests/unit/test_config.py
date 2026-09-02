@@ -162,3 +162,43 @@ def test_checkout_cache_mb_roundtrip_and_floor(tmp_path):
     assert config.load_checkout_cache_mb(p) == 0.0
     config.save_config({config.CHECKOUT_CACHE_MB_KEY: "banana"}, p)
     assert config.load_checkout_cache_mb(p) == config.DEFAULT_CHECKOUT_CACHE_MB
+
+
+def test_max_footprint_default_is_a_quarter_of_physical_ram():
+    from flashback_sampler.app import config
+    # 64 GiB box -> 16384 MB; the default is derived at load, never stored.
+    assert config.default_max_footprint_mb(64 * 1024 ** 3) == 16384.0
+
+
+def test_max_footprint_roundtrip_unset_means_default_and_zero_means_uncapped(tmp_path):
+    from flashback_sampler.app import config
+    p = tmp_path / "config.json"
+    assert config.load_max_footprint_mb(p, default=1234.0) == 1234.0  # unset -> default
+    config.save_max_footprint_mb(2048, p)
+    assert config.load_max_footprint_mb(p, default=1234.0) == 2048.0
+    config.save_max_footprint_mb(0, p)
+    assert config.load_max_footprint_mb(p, default=1234.0) == 0.0  # 0 = uncapped, kept
+    config.save_max_footprint_mb(-5, p)
+    assert config.load_max_footprint_mb(p, default=1234.0) == 0.0  # negative floors to uncapped
+
+
+def test_drag_handle_mb_defaults_200_and_floors_at_zero(tmp_path):
+    from flashback_sampler.app import config
+    p = tmp_path / "c.json"
+    assert config.load_drag_handle_mb(p) == 200.0  # on by default (best out-of-the-box UX); a tunable for constrained systems
+    config.save_drag_handle_mb(0, p)
+    assert config.load_drag_handle_mb(p) == 0.0
+    config.save_drag_handle_mb(-1, p)
+    assert config.load_drag_handle_mb(p) == 0.0
+
+
+def test_drag_alc_sidecar_defaults_off_and_roundtrips(tmp_path):
+    """Off by default: the sidecar only helps Ableton users, and every
+    other drop target would see a second file it cannot read."""
+    from flashback_sampler.app import config
+    p = tmp_path / "c.json"
+    assert config.load_drag_alc_sidecar(p) is False
+    config.save_drag_alc_sidecar(True, p)
+    assert config.load_drag_alc_sidecar(p) is True
+    config.save_drag_alc_sidecar(False, p)
+    assert config.load_drag_alc_sidecar(p) is False

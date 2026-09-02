@@ -36,6 +36,7 @@ SUBTYPE_INTS = {"FLOAT": 0, "PCM_24": 1, "PCM_16": 2}
 
 _lib: C.CDLL | None = None
 _lib_tried = False
+_skipped: list[tuple[Path, str]] = []  # (candidate, why) for the not-available error
 
 
 def _candidates() -> list[Path]:
@@ -61,7 +62,14 @@ def load() -> C.CDLL | None:
             continue
         try:
             lib = C.CDLL(str(path))
-        except OSError:
+            # A library that loads but lacks an export (a stale bundled
+            # build behind the header) is the same case as one that
+            # does not load: skip it, keep looking (#48). The reason is
+            # kept so a bug inside _declare itself cannot hide as a
+            # silent "not built anywhere".
+            _declare(lib)
+        except (OSError, AttributeError) as e:
+            _skipped.append((path, f"{type(e).__name__}: {e}"))
             # Exists but won't load: an architecture mismatch, a missing
             # runtime dependency, or a corrupted/truncated file -- the
             # realistic way a BUNDLED library breaks (a dev-build path
@@ -72,7 +80,6 @@ def load() -> C.CDLL | None:
             # NativeAudioCircularBuffer raises RuntimeError without it --
             # but a crash here, mid-scan, must not take down app startup.
             continue
-        _declare(lib)
         _lib = lib
         break
     return _lib
@@ -96,7 +103,8 @@ class FbCaptureSpec(C.Structure):
 
 class FbCaptureStats(C.Structure):
     _fields_ = [("running", C.c_uint8), ("frames_written", C.c_uint64),
-                ("xruns", C.c_uint32), ("mix_rate", C.c_uint32)]
+                ("xruns", C.c_uint32), ("mix_rate", C.c_uint32),
+                ("sources", C.c_uint8)]
 
 
 class FbProcess(C.Structure):
@@ -114,6 +122,16 @@ class FbPeakBin(C.Structure):
 
 class FbWavInfo(C.Structure):
     _fields_ = [("rate", C.c_uint32), ("channels", C.c_uint16), ("subtype", C.c_uint8), ("frames", C.c_uint64)]
+
+
+class FbMemInfo(C.Structure):
+    _fields_ = [("total", C.c_uint64), ("available", C.c_uint64)]
+
+
+class FbMarkers(C.Structure):
+    """Mirrors FbMarkers in core/include/flashback_core.h: where the
+    exported slice sits inside the exported file, end exclusive."""
+    _fields_ = [("slice_start", C.c_uint64), ("slice_end", C.c_uint64)]
 
 
 class FbCheckoutInfo(C.Structure):
@@ -184,6 +202,8 @@ def _declare(lib: C.CDLL) -> None:
 
     lib.fb_wav_info.argtypes = [C.c_char_p, C.POINTER(FbWavInfo)]
     lib.fb_wav_info.restype = C.c_int
+    lib.fb_mem_info.argtypes = [C.POINTER(FbMemInfo)]
+    lib.fb_mem_info.restype = None
     # out_len (R-h6a): the callee validates this against its own
     # derived length instead of trusting a re-derived caller size.
     lib.fb_wav_read.argtypes = [C.c_char_p, C.c_uint64, C.c_size_t, f32p, C.c_size_t]
@@ -267,7 +287,8 @@ def _declare(lib: C.CDLL) -> None:
     lib.fb_checkout_peak_bins.restype = C.c_int
     lib.fb_checkout_pin.argtypes = [vp, vp, C.c_uint8]
     lib.fb_checkout_pin.restype = None
-    lib.fb_checkout_export.argtypes = [vp, vp, C.c_char_p, u64, u64, C.c_int]
+    # Trailing markers pointer is nullable: None means "no marker chunks".
+    lib.fb_checkout_export.argtypes = [vp, vp, C.c_char_p, u64, u64, C.c_int, C.POINTER(FbMarkers)]
     lib.fb_checkout_export.restype = C.c_int
     lib.fb_checkout_destroy.argtypes = [vp, vp]
     lib.fb_checkout_destroy.restype = None
@@ -336,8 +357,16 @@ def _wav_raise(status: int, path) -> None:
 def _require_lib() -> C.CDLL:
     lib = load()
     if lib is None:
-        raise RuntimeError("flashback_core library not available")
+        why = "; ".join(f"{p}: {r}" for p, r in _skipped) or "not built in any candidate location"
+        raise RuntimeError(f"flashback_core library not available ({why})")
     return lib
+
+
+def mem_info() -> tuple[int, int]:
+    """(total, available) physical bytes; 0 where the platform cannot say."""
+    info = FbMemInfo()
+    _require_lib().fb_mem_info(C.byref(info))
+    return int(info.total), int(info.available)
 
 
 def wav_info(path) -> FbWavInfo:
@@ -725,8 +754,10 @@ class NativeScratch:
     def checkout_pin(self, h: int, on: bool) -> None:
         self._lib.fb_checkout_pin(self._h, h, 1 if on else 0)
 
-    def checkout_export(self, h: int, dst, start: int, n: int, subtype: str) -> None:
-        _status_raise(self._lib.fb_checkout_export(self._h, h, str(dst).encode("utf-8"), int(start), int(n), SUBTYPE_INTS[subtype]), "fb_checkout_export")
+    def checkout_export(self, h: int, dst, start: int, n: int, subtype: str,
+                        markers: tuple[int, int] | None = None) -> None:
+        mk = None if markers is None else C.byref(FbMarkers(int(markers[0]), int(markers[1])))
+        _status_raise(self._lib.fb_checkout_export(self._h, h, str(dst).encode("utf-8"), int(start), int(n), SUBTYPE_INTS[subtype], mk), "fb_checkout_export")
 
     def checkout_destroy(self, h: int) -> None:
         self._lib.fb_checkout_destroy(self._h, h)

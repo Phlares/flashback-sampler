@@ -9,29 +9,43 @@ checkout state) lives in the window controller.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from PySide6.QtCore import QMimeData, QUrl, Qt
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import QWidget
 
 
-def build_file_drag_mime(file_path: Path | str) -> QMimeData:
+def _as_paths(file_path: Path | str | Iterable[Path | str]) -> list[Path]:
+    """One path or several. A drag can carry more than one file (a WAV
+    plus its Ableton sidecar) and every call site that offers one should
+    not have to wrap it. `os.PathLike` covers Path and any other
+    `__fspath__` object -- without it a scalar that is not a str or a
+    Path falls through to the iterable branch and is read one character
+    at a time."""
+    if isinstance(file_path, (str, os.PathLike)):
+        return [Path(file_path)]
+    return [Path(p) for p in file_path]
+
+
+def build_file_drag_mime(file_path: Path | str | Iterable[Path | str]) -> QMimeData:
     mime = QMimeData()
-    mime.setUrls([QUrl.fromLocalFile(str(Path(file_path).resolve()))])
+    mime.setUrls([QUrl.fromLocalFile(str(p.resolve())) for p in _as_paths(file_path)])
     return mime
 
 
 def perform_file_drag(
     source_widget: QWidget,
-    file_path: Path | str,
+    file_path: Path | str | Iterable[Path | str],
     exec_fn: Optional[Callable[[QDrag], Qt.DropAction]] = None,
 ) -> bool:
     """
-    Run a blocking OS drag offering `file_path`. Returns True when the
-    drop target accepted the file (any action except IgnoreAction —
-    some targets report Move/Link even though the file stays put).
+    Run a blocking OS drag offering `file_path` (one path, or several).
+    Returns True when the drop target accepted the files (any action
+    except IgnoreAction — some targets report Move/Link even though the
+    files stay put).
     """
     drag = QDrag(source_widget)
     drag.setMimeData(build_file_drag_mime(file_path))

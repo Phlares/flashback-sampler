@@ -269,32 +269,79 @@ def test_total_project_ram_includes_checkouts():
     assert st.scratch.resident_bytes == 500 * 4
 
 
-def test_add_slot_rejects_when_over_budget():
+def test_add_slot_rejects_when_over_the_max_footprint():
     from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
-    # Set a tight budget that only fits the initial slot
+    # A footprint that only fits the initial slot
     current = st.total_project_ram_mb()
-    st.set_project_ram_budget_mb(current + 1)  # tiny headroom
+    st.set_max_footprint_mb(current + 1)  # tiny headroom
 
-    with pytest.raises(RuntimeError, match="Project RAM budget exceeded"):
+    with pytest.raises(RuntimeError, match="Max footprint") as info:
         st.add_slot(preset_by_name("FULL"))
+    # The message carries both numbers the user needs to act.
+    assert f"{current + 1:.0f} MB" in str(info.value)
 
 
-def test_add_slot_succeeds_within_budget():
+def test_add_slot_succeeds_within_the_max_footprint():
     from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.set_project_ram_budget_mb(4096.0)
+    st.set_max_footprint_mb(4096.0)
     slot = st.add_slot(preset_by_name("CHAT"))
     assert slot is not None
     assert len(st.slots) == 2
 
 
-def test_set_project_ram_budget_enforces_minimum():
+def test_max_footprint_zero_means_uncapped(monkeypatch):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    import flashback_sampler.app.state as state_mod
+
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.set_project_ram_budget_mb(10)  # below 64 min
-    assert st.project_ram_budget_mb == 64.0
+    st.set_max_footprint_mb(0)
+    assert st.max_footprint_mb == 0.0
+    # Plenty of free memory reported: only the cap could refuse, and there is none.
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1 << 40))
+    assert st.add_slot(preset_by_name("FULL")) is not None
+
+
+def test_max_footprint_negative_floors_to_uncapped():
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_max_footprint_mb(-10)
+    assert st.max_footprint_mb == 0.0
+
+
+def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    import flashback_sampler.app.state as state_mod
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_max_footprint_mb(0)  # uncapped: only the free-memory clause can refuse
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1024 * 1024))  # 1 MB free
+    with pytest.raises(RuntimeError, match="free") as info:
+        st.add_slot(preset_by_name("FULL"))
+    assert "1 MB" in str(info.value)
+
+
+def test_free_memory_clause_is_skipped_when_the_platform_cannot_say(monkeypatch):
+    from flashback_sampler.core.quality_presets import preset_by_name
+    import flashback_sampler.app.state as state_mod
+
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.set_max_footprint_mb(0)
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (0, 0))
+    assert st.add_slot(preset_by_name("CHAT")) is not None
+
+
+def test_default_max_footprint_is_a_quarter_of_physical_ram(monkeypatch, tmp_path):
+    import flashback_sampler.app.state as state_mod
+    import flashback_sampler.app.config as cfg
+
+    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (64 * 1024 ** 3, 32 * 1024 ** 3))
+    monkeypatch.setattr(cfg, "load_max_footprint_mb", lambda *a, **k: k["default"])  # unset pref
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert st.max_footprint_mb == 16384.0
+    st.shutdown()
 
 
 def test_effective_capture_spec_prefers_slot_override():
@@ -670,7 +717,7 @@ def test_adoption_survives_add_slot_refusing_a_foreign_rate(tmp_path, monkeypatc
     import flashback_sampler.app.state as state_mod
 
     def raising_add_slot(self, *a, **k):
-        raise RuntimeError("Project RAM budget exceeded")
+        raise RuntimeError("Max footprint exceeded")
 
     monkeypatch.setattr(state_mod.AppState, "add_slot", raising_add_slot)
     st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
@@ -747,6 +794,103 @@ def test_adoption_of_a_slice_needs_its_parent(tmp_path):
     assert ids == [co.id, "sl"]
     sl = st2.slots[0].checkout_manager.get("sl")
     assert sl.parent_id == co.id and sl.start_frame == 100 and sl.path == st2.slots[0].checkout_manager.get(co.id).path
+    st2.shutdown()
+
+
+def _stamp_created_at(scratch_dir, checkout_id, when):
+    """Pin a manifest's creation stamp so `scan` adopts in a known order.
+    The Windows `time.time()` tick is ~15.6 ms, so two manifests written
+    in one tick would otherwise sort by id."""
+    import json
+    p = scratch_dir / f"{checkout_id}.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["created_at"] = when
+    p.write_text(json.dumps(d), encoding="utf-8")
+
+
+def test_adoption_keeps_a_slice_whose_parent_is_gone(tmp_path):
+    """C1: a trimmed drag mints a slice, then the parent is discarded --
+    by the user, or by the window's count-cap eviction. The slice is the
+    only reference keeping the parent's WAV alive, so adoption must take
+    it: as a ROOT over that file at the slice's own span. Skipping it
+    leaks both the WAV and the slice's own manifest forever."""
+    from flashback_sampler.core import native
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    _written(st, co)
+    sl = mgr.slice(co.id, 100, 50)
+    parent_wav = co.path
+    mgr.discard(co.id)  # the slice's refcount keeps the file alive
+    assert parent_wav.exists()
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    mgr2 = st2.slots[0].checkout_manager
+    assert [c.id for c in mgr2.list()] == [sl.id]
+    back = mgr2.get(sl.id)
+    assert (back.path, back.start_frame, back.n_frames, back.state) == (parent_wav, 100, 50, "saved")
+    assert back.parent_id == co.id  # recorded, so the next launch takes this same path
+    # Through the handle: the adopted checkout must read the slice's
+    # samples, not the file's first 50 frames.
+    got = native.wav_read(mgr2.export_range(back.id, tmp_path / "out" / "orphan.wav", 0, 50), 0, 50)
+    assert np.array_equal(got, native.wav_read(parent_wav, 100, 50))
+    mgr2.discard(back.id)  # the last reference to the file
+    assert not parent_wav.exists() and not (tmp_path / f"{sl.id}.json").exists()
+    st2.shutdown()
+
+
+def test_adoption_of_a_slice_of_a_slice_reads_the_same_audio(tmp_path):
+    """C2: a manifest's `start_frame` is ABSOLUTE into the file, but the
+    Zig slice call takes a PARENT-RELATIVE start and adds the parent's
+    own start itself. Re-adopting a nested slice with the absolute value
+    reads at `parent.start + start` -- the wrong audio, or (here) past
+    the parent's end, where Zig's range guard drops the slice."""
+    from flashback_sampler.core import native
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    _written(st, co)
+    s1 = mgr.slice(co.id, 100, 300)   # file frames 100..400
+    s2 = mgr.slice(s1.id, 250, 50)    # file frames 350..400
+    assert s2.start_frame == 350      # absolute into the file
+    before = native.wav_read(mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50)
+    _stamp_created_at(tmp_path, s1.id, 10.0)
+    _stamp_created_at(tmp_path, s2.id, 20.0)
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    mgr2 = st2.slots[0].checkout_manager
+    assert sorted(c.id for c in mgr2.list()) == sorted([co.id, s1.id, s2.id])
+    back = mgr2.get(s2.id)
+    assert back.start_frame == 350
+    after = native.wav_read(mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50)
+    assert np.array_equal(after, before)
+    st2.shutdown()
+
+
+def test_adoption_skips_a_slice_that_starts_before_its_parent(tmp_path):
+    """The absolute -> parent-relative conversion can only go negative on
+    a manifest that disagrees with its parent. Skip it like any other
+    corrupt manifest, and keep adopting everything else."""
+    from flashback_sampler.core.manifest import Manifest, write_manifest
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
+    mgr = st.checkout_manager
+    co = mgr.create(duration_s=0.5)
+    _written(st, co)
+    s1 = mgr.slice(co.id, 100, 300)
+    _stamp_created_at(tmp_path, s1.id, 10.0)
+    write_manifest(tmp_path, Manifest(id="before", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
+                                      created_at=20.0, parent=s1.id, start_frame=50, n_frames=10, trim_in=0,
+                                      trim_out=0, state="saved", partial=False, bins=None))
+    st.shutdown()
+
+    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    assert sorted(c.id for c in st2.slots[0].checkout_manager.list()) == sorted([co.id, s1.id])
+    assert (tmp_path / "before.json").exists()  # left in place
     st2.shutdown()
 
 

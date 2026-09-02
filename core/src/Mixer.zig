@@ -133,13 +133,29 @@ pub fn stop(self: *Mixer) void {
 
 pub fn stats(self: *const Mixer) Capture.Stats {
     var xruns = self.xruns.load(.acquire);
-    for (self.sources[0..self.n_sources]) |*s| xruns +|= s.capture.stats().xruns;
+    var sources: u8 = 0;
+    // The first PUBLISHED rate: a source whose open failed never publishes
+    // one, and since #47 it no longer stalls the mix, so its 0 must not
+    // be the mix's reported rate. A stopped source keeps its rate.
+    var mix_rate: u32 = 0;
+    for (self.sources[0..self.n_sources], 0..) |*s, i| {
+        const st = s.capture.stats();
+        xruns +|= st.xruns;
+        if (st.running != 0) sources |= bit(i);
+        if (mix_rate == 0) mix_rate = st.mix_rate;
+    }
     return .{
         .running = @intFromBool(self.running.load(.acquire)),
         .frames_written = self.frames_written.load(.acquire),
         .xruns = xruns,
-        .mix_rate = self.sources[0].capture.stats().mix_rate,
+        .mix_rate = mix_rate,
+        .sources = sources,
     };
+}
+
+/// Source i's bit in a `sources` mask (max_sources == 8 fits a u8).
+inline fn bit(i: usize) u8 {
+    return @as(u8, 1) << @intCast(i);
 }
 
 pub fn lastError(self: *const Mixer) [:0]const u8 {
@@ -170,7 +186,8 @@ fn run(self: *Mixer) void {
         // Common span: the frames EVERY stage has that we have not consumed,
         // capped at one Ring.write publish per tick.
         var n: u64 = Ring.max_write_frames;
-        for (self.sources[0..self.n_sources]) |*s| {
+        var live: u8 = 0; // bit i: source i takes part in this tick
+        for (self.sources[0..self.n_sources], 0..) |*s, i| {
             const tw = s.stage.total_written.load(.acquire);
             // Stages are never flushed, so tw only grows and this can never
             // wrap. Saturating anyway: were a stage ever reset behind us,
@@ -179,18 +196,29 @@ fn run(self: *Mixer) void {
             var avail = tw -| s.cursor;
             if (avail > s.stage.capacity) {
                 // The stage lapped our cursor: we fell more than stage_seconds
-                // behind. Resume at the oldest frame still readable.
-                s.cursor = tw - s.stage.capacity;
-                avail = s.stage.capacity;
+                // behind. Resume a margin INSIDE the readable window, not at
+                // its oldest frame: that edge is exactly what Ring.read
+                // accepts, so one publish between this load and the read
+                // below would fail the tick and charge another xrun (#46).
+                const margin = lapMargin(s.stage.capacity);
+                s.cursor = tw - s.stage.capacity + margin;
+                avail = s.stage.capacity - margin;
                 _ = self.xruns.fetchAdd(1, .monotonic);
             }
+            // A source whose worker is gone (open or stream failure) is
+            // mixed to the end of its staged tail, then leaves the common
+            // span so the others carry on (#47). A source that is merely
+            // quiet keeps its place: the span waits for it as before.
+            if (avail == 0 and s.capture.done.load(.acquire)) continue;
+            live |= bit(i);
             n = @min(n, avail);
         }
-        if (n == 0) continue;
+        if (live == 0 or n == 0) continue;
         const floats: usize = @intCast(n * ch);
         @memset(self.sum[0..floats], 0);
         var complete = true;
-        for (self.sources[0..self.n_sources]) |*s| {
+        for (self.sources[0..self.n_sources], 0..) |*s, i| {
+            if (live & bit(i) == 0) continue;
             // Seqlock read: never blocks the capture thread. A failure means
             // the stage lapped us between the check above and this copy;
             // give up the tick — the next one re-derives every cursor.
@@ -203,9 +231,21 @@ fn run(self: *Mixer) void {
         if (!complete) continue;
         for (self.sum[0..floats]) |*x| x.* = std.math.clamp(x.*, -1.0, 1.0);
         self.target.write(self.sum[0..floats]);
-        for (self.sources[0..self.n_sources]) |*s| s.cursor += n;
+        for (self.sources[0..self.n_sources], 0..) |*s, i| {
+            if (live & bit(i) != 0) s.cursor += n;
+        }
         _ = self.frames_written.fetchAdd(n, .release);
     }
+}
+
+/// Frames given up after a lap so ONE publish landing between the
+/// total_written load and the read cannot fail the tick: max_write_frames
+/// (the ring's own guard band) in real use, half the stage when a stage
+/// is smaller than that (test rates) — one formula serves both ends. More
+/// than one publish in that window still fails the read; the seqlock
+/// `complete = false` path re-derives every cursor next tick.
+fn lapMargin(capacity: u64) u64 {
+    return @min(Ring.max_write_frames, capacity / 2);
 }
 
 fn waitUntil(m: *Mixer, comptime pred: fn (*Mixer) bool) !void {
@@ -303,11 +343,15 @@ test "the sum is clipped to [-1, 1]" {
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, -1.0 }, &out);
 }
 
-test "a stage that laps the cursor counts one xrun and resumes at the oldest readable frame" {
+test "a stage that laps the cursor counts one xrun and resumes a lap margin inside the readable window" {
     var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 10.0 });
     defer target.deinit();
     // 300 frames in ONE packet against a 200-frame stage (2 s at 100 Hz):
     // frames 0..99 are gone before the mixer's first tick can read them.
+    // The resume point is not the oldest readable frame (100) but
+    // lapMargin() = min(max_write_frames, capacity / 2) = 100 frames
+    // inside it (#46), so a publish landing between the total_written
+    // load and the read cannot fail the tick and charge a second xrun.
     var big: [300]f32 = undefined;
     for (&big, 0..) |*s, i| s.* = @as(f32, @floatFromInt(i + 1)) / 1000.0;
     var src = FakeBackend.init(&.{&big});
@@ -317,16 +361,16 @@ test "a stage that laps the cursor counts one xrun and resumes at the oldest rea
     try m.start();
     try waitUntil(&m, struct {
         fn f(x: *Mixer) bool {
-            return x.frames_written.load(.acquire) == 200;
+            return x.frames_written.load(.acquire) == 100;
         }
     }.f);
     m.stop();
     try std.testing.expectEqual(@as(u32, 1), m.stats().xruns);
-    try std.testing.expectEqual(@as(u64, 300), m.sources[0].cursor); // 100 (oldest valid) + 200 read
-    try std.testing.expectEqual(@as(u64, 200), target.total_written.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 300), m.sources[0].cursor); // 200 (oldest valid + margin) + 100 read
+    try std.testing.expectEqual(@as(u64, 100), target.total_written.load(.acquire));
     var out: [1]f32 = undefined;
     try target.read(0, &out);
-    try std.testing.expectEqual(big[100], out[0]); // the target starts at stage frame 100, not 0
+    try std.testing.expectEqual(big[200], out[0]); // the target starts at stage frame 200, not 100
 }
 
 test "a flush during mixing is drained by the mixer even while the sources are idle; only post-flush frames remain" {
@@ -411,7 +455,7 @@ test "writer_active is true from start() through stop(), false after" {
     m.stop(); // idempotent
 }
 
-test "stats: xruns sums the captures' discontinuities, mix_rate is the first source's, lastError is the first non-empty" {
+test "stats: xruns sums the captures' discontinuities, mix_rate is the first published rate, lastError is the first non-empty" {
     var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
     defer target.deinit();
     var a = FakeBackend.init(&.{ &[_]f32{0}, &[_]f32{0} });
@@ -434,12 +478,97 @@ test "stats: xruns sums the captures' discontinuities, mix_rate is the first sou
     m.stop();
     const st = m.stats();
     try std.testing.expectEqual(@as(u32, 1), st.xruns);
-    // The router hands a/b out in ARRIVAL order, so which capture got
-    // 44_100 is not fixed. Pin "the first source's" against source 0
-    // itself, and that the value is one of the two scripted rates.
-    try std.testing.expectEqual(m.sources[0].capture.stats().mix_rate, st.mix_rate);
-    try std.testing.expect(st.mix_rate == 44_100 or st.mix_rate == 0); // b's open fails, so its capture never publishes a rate
+    // The router hands a/b out in ARRIVAL order, so which source got
+    // 44_100 is not fixed — but b's open fails and never publishes a
+    // rate, so the first PUBLISHED rate is a's whichever index it took.
+    try std.testing.expectEqual(@as(u32, 44_100), st.mix_rate);
     try std.testing.expectEqualStrings("open failed: FormatRejected", m.lastError());
+}
+
+test "a source whose open fails is left out of the common span; the mix carries on with the others (#47)" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    const p = [_]f32{0.25} ** 10;
+    var a = FakeBackend.init(&.{ &p, &p, &p });
+    var b = FakeBackend.init(&.{});
+    b.open_error = error.FormatRejected;
+    var router = FakeBackend.init(&.{});
+    router.children = &.{ &a, &b };
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, router.backend(), &target, &.{ test_spec, test_spec });
+    defer m.deinit();
+    try m.start();
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == 30;
+        }
+    }.f);
+    const st = m.stats();
+    m.stop();
+    try std.testing.expectEqual(@as(u64, 30), target.total_written.load(.acquire));
+    // The router hands a/b out in arrival order, so the live bit's index
+    // is not fixed — exactly one source was streaming.
+    try std.testing.expectEqual(@as(u8, 1), @popCount(st.sources));
+    try std.testing.expectEqualStrings("open failed: FormatRejected", m.lastError());
+    var out: [1]f32 = undefined;
+    try target.read(29, &out);
+    try std.testing.expectEqual(@as(f32, 0.25), out[0]);
+}
+
+test "a source that dies mid-stream is mixed to the end of its staged tail, then dropped (#47)" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    const pa = [_]f32{0.25} ** 10;
+    const pb = [_]f32{0.5} ** 10;
+    var a = FakeBackend.init(&.{ &pa, &pa, &pa, &pa, &pa });
+    var b = FakeBackend.init(&.{ &pb, &pb, &pb });
+    b.stream_error_at = 3; // 30 frames staged, then the device vanishes
+    var router = FakeBackend.init(&.{});
+    router.children = &.{ &a, &b };
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, router.backend(), &target, &.{ test_spec, test_spec });
+    defer m.deinit();
+    try m.start();
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.frames_written.load(.acquire) == 50;
+        }
+    }.f);
+    m.stop();
+    var out: [50]f32 = undefined;
+    try target.read(0, &out);
+    // Both sources for b's 30 staged frames, a alone for the last 20.
+    for (out[0..30]) |x| try std.testing.expectEqual(@as(f32, 0.75), x);
+    for (out[30..50]) |x| try std.testing.expectEqual(@as(f32, 0.25), x);
+    try std.testing.expectEqualStrings("stream failed: DeviceNotFound", m.lastError());
+}
+
+test "every source dead: nothing is written, sources == 0, the mixer thread stays up until stop (#47)" {
+    var target = try Ring.init(std.testing.allocator, .{ .sample_rate = 100, .channels = 1, .seconds = 1.0 });
+    defer target.deinit();
+    var a = FakeBackend.init(&.{});
+    a.open_error = error.DeviceNotFound;
+    var b = FakeBackend.init(&.{});
+    b.open_error = error.DeviceNotFound;
+    var router = FakeBackend.init(&.{});
+    router.children = &.{ &a, &b };
+    var m: Mixer = undefined;
+    try m.init(std.testing.allocator, router.backend(), &target, &.{ test_spec, test_spec });
+    defer m.deinit();
+    try m.start();
+    try waitUntil(&m, struct {
+        fn f(x: *Mixer) bool {
+            return x.sources[0].capture.done.load(.acquire) and x.sources[1].capture.done.load(.acquire);
+        }
+    }.f);
+    // Let a few ticks run with both sources gone.
+    std.Io.sleep(io, .fromMilliseconds(3 * tick_ms), .awake) catch {};
+    const st = m.stats();
+    try std.testing.expectEqual(@as(u8, 1), st.running);
+    try std.testing.expectEqual(@as(u8, 0), st.sources);
+    try std.testing.expectEqual(@as(u64, 0), st.frames_written);
+    try std.testing.expectEqual(@as(u64, 0), target.total_written.load(.acquire));
+    m.stop();
 }
 
 test "one tick's publish is capped at Ring.max_write_frames even when a source has 6_000 frames ready" {

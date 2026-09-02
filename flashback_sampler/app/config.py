@@ -133,6 +133,14 @@ CHECKOUT_CACHE_MB_KEY = "checkout_cache_mb"
 # stay resident; every written root drops to disk).
 DEFAULT_CHECKOUT_CACHE_MB = 0.0
 
+DRAG_ALC_SIDECAR_KEY = "drag_alc_sidecar"
+
+DRAG_HANDLE_MB_KEY = "drag_handle_mb"
+# Extra parent audio a slice drag carries around the slice, half each
+# side. On by default: a DAW user who nudges a marker wants audio there.
+# 0 = the slice alone, for constrained systems.
+DEFAULT_DRAG_HANDLE_MB = 200.0
+
 
 def default_scratch_dir() -> Path:
     """App-owned temp for scratch WAVs + manifests. Separate from the
@@ -152,6 +160,37 @@ def save_scratch_dir(scratch_dir: Path | str, path: Path | None = None) -> None:
     set_pref(SCRATCH_DIR_KEY, str(scratch_dir), path)
 
 
+MAX_FOOTPRINT_MB_KEY = "max_footprint_mb"
+# Fraction of physical RAM the footprint check allows by default. A
+# safety line, not a reservation: the user raises it, or sets 0 for no
+# cap, in Preferences (#41).
+DEFAULT_FOOTPRINT_FRACTION = 0.25
+
+
+def default_max_footprint_mb(total_physical_bytes: int) -> float:
+    """25 % of physical RAM. A platform that cannot report its RAM passes
+    0 and gets 0 = no cap, deliberately: with no number to reason from,
+    the engine's own out_of_memory at ring creation is the only honest
+    guard, and a made-up floor would refuse machines it knows nothing
+    about."""
+    return float(total_physical_bytes) * DEFAULT_FOOTPRINT_FRACTION / (1024 * 1024)
+
+
+def load_max_footprint_mb(path: Path | None = None, *, default: float) -> float:
+    """Stored value, or `default` when unset. 0 = uncapped; negatives floor to 0."""
+    raw = get_pref(MAX_FOOTPRINT_MB_KEY, None, path)
+    if raw is None:
+        return float(default)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def save_max_footprint_mb(mb: float, path: Path | None = None) -> None:
+    set_pref(MAX_FOOTPRINT_MB_KEY, max(0.0, float(mb)), path)
+
+
 def load_checkout_cache_mb(path: Path | None = None) -> float:
     try:
         return max(0.0, float(get_pref(CHECKOUT_CACHE_MB_KEY, DEFAULT_CHECKOUT_CACHE_MB, path)))
@@ -161,3 +200,25 @@ def load_checkout_cache_mb(path: Path | None = None) -> float:
 
 def save_checkout_cache_mb(mb: float, path: Path | None = None) -> None:
     set_pref(CHECKOUT_CACHE_MB_KEY, max(0.0, float(mb)), path)
+
+
+def load_drag_handle_mb(path: Path | None = None) -> float:
+    try:
+        return max(0.0, float(get_pref(DRAG_HANDLE_MB_KEY, DEFAULT_DRAG_HANDLE_MB, path)))
+    except (TypeError, ValueError):
+        return DEFAULT_DRAG_HANDLE_MB
+
+
+def save_drag_handle_mb(mb: float, path: Path | None = None) -> None:
+    set_pref(DRAG_HANDLE_MB_KEY, max(0.0, float(mb)), path)
+
+
+def load_drag_alc_sidecar(path: Path | None = None) -> bool:
+    """Whether a drag also offers an Ableton Live Clip (.alc) naming the
+    slice. Off by default: it helps only Ableton users, and every other
+    drop target sees a second file it has no use for."""
+    return bool(get_pref(DRAG_ALC_SIDECAR_KEY, False, path))
+
+
+def save_drag_alc_sidecar(enabled: bool, path: Path | None = None) -> None:
+    set_pref(DRAG_ALC_SIDECAR_KEY, bool(enabled), path)

@@ -53,7 +53,13 @@ class Checkout:
     """A frozen span of ring audio. `handle` is the Zig `*Checkout`;
     `path`/`start_frame`/`n_frames` say where the same audio lives on
     disk. `abs_sample_*` are the ring's absolute sample positions at
-    creation time (display metadata)."""
+    creation time (display metadata).
+
+    `start_frame` is ALWAYS absolute into `path` (a root is a slice at
+    `(0, all)`), and so is the manifest field of the same name. The Zig
+    `checkout_slice` call is the one place that differs: its `start` is
+    PARENT-RELATIVE and Zig adds the parent's own `start_frame` itself,
+    so every caller converts (`slice` adds, `adopt_slice` subtracts)."""
 
     id: str
     handle: int
@@ -232,6 +238,60 @@ class CheckoutManager:
                 raise RuntimeError(f"could not create checkout; {e}") from e
         return co
 
+    def slice(self, parent_id: str, start: int, n: int) -> Checkout:
+        """A saved segment `(parent file, start, n)`. Waits for the
+        parent's file: a slice has no RAM copy, so its bins and audio
+        come from disk (plan P13). Raises RuntimeError when the parent's
+        write failed, and KeyError when the parent was discarded while
+        this call waited for that write."""
+        parent = self.get(parent_id)
+        if start < 0 or n <= 0 or start + n > parent.n_frames:
+            raise ValueError(f"slice {start}+{n} is outside the parent's {parent.n_frames} frames")
+        # P13, outside self._lock: write_state takes the lock itself and
+        # threading.Lock is not reentrant, and a wait under the lock
+        # would stall every other manager call for up to 30 s.
+        deadline = time.monotonic() + 30.0
+        while True:
+            ws = self.write_state(parent_id)
+            if ws in ("written", "adopted"):
+                break
+            if ws == "failed":
+                raise RuntimeError("scratch write failed for the parent; cannot slice")
+            if time.monotonic() > deadline:
+                raise RuntimeError("timed out waiting for the parent's scratch write")
+            time.sleep(0.005)
+        with self._lock:
+            # R-h8l: re-look the parent up under the lock before touching
+            # its handle. The wait above holds no lock for up to 30 s, so
+            # a concurrent discard() can have freed the handle the `get`
+            # before it returned -- using that is a Zig-side
+            # use-after-free (a crash, not a catchable exception).
+            if parent_id not in self._checkouts:
+                raise KeyError(parent_id)
+            parent = self._checkouts[parent_id]
+            if len(self._checkouts) >= self._max_active:
+                raise RuntimeError(f"Maximum active checkouts reached ({self._max_active})")
+            handle = None
+            try:
+                handle = self._scratch.checkout_slice(parent.handle, int(start), int(n))
+                co = Checkout(
+                    id=uuid.uuid4().hex[:12], handle=handle, path=parent.path,
+                    sample_rate=parent.sample_rate, channels=parent.channels,
+                    n_frames=int(n), start_frame=int(parent.start_frame + start),
+                    abs_sample_start=parent.abs_sample_start + int(start),
+                    abs_sample_end=parent.abs_sample_start + int(start + n),
+                    parent_id=parent.id, state="saved",
+                )
+                co.bins = {str(b): self._scratch.checkout_peak_bins(handle, b) for b in BIN_COUNTS}
+                self._register(co)
+            except (RuntimeError, OSError) as e:
+                # Same rule as adopt_slice: `parent.path` is shared, owned
+                # by the parent checkout's own refcount -- only this
+                # slice's handle is ours to release.
+                _destroy_quietly(self._scratch, handle, None)
+                raise RuntimeError(f"could not slice checkout {parent_id}; {e}") from e
+        return co
+
     def _register(self, co: Checkout) -> None:
         """Lock held. Write the manifest FIRST, then commit to the
         tracking dicts -- if the manifest write raises (a disk error),
@@ -256,19 +316,31 @@ class CheckoutManager:
     # Adoption (launch)
     # ------------------------------------------------------------------
 
-    def adopt_root(self, m: Manifest, audio: Path, partial: bool) -> Checkout:
-        """A root whose file already exists. Frame count comes from the
-        file (a partial file reports its true prefix); bins from the
-        manifest when present, else computed once from the file."""
+    def adopt_root(self, m: Manifest, audio: Path, partial: bool, start_frame: int = 0) -> Checkout:
+        """A checkout opened directly over a file that already exists.
+        Frame count comes from the file (a partial file reports its true
+        prefix); bins from the manifest when present, else computed once
+        from the file.
+
+        `start_frame` is the absolute offset into `audio` this checkout
+        starts at -- 0 for a real root, since a root is a slice at
+        `(0, all)`. `adopt_scratch` passes the manifest's own value for
+        an ORPHANED slice: one whose parent left the manifests (the user
+        discarded it, or the window's count-cap eviction did) while its
+        file is still on disk, held there by this slice's refcount. Such
+        a checkout keeps the `parent_id` its manifest recorded even
+        though no parent is adopted, so the manifest rewritten here sends
+        every later launch down this same path."""
         handle = None
         try:
-            handle = self._scratch.checkout_open(audio, 0, max(1, int(m.n_frames)))
+            handle = self._scratch.checkout_open(audio, int(start_frame), max(1, int(m.n_frames)))
             info = self._scratch.checkout_info(handle)
             co = Checkout(
                 id=m.id, handle=handle, path=Path(audio),
                 sample_rate=int(info.rate), channels=int(info.channels),
-                n_frames=int(info.n_frames), start_frame=0,
+                n_frames=int(info.n_frames), start_frame=int(start_frame),
                 abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
+                parent_id=m.parent,
                 trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
                 state=m.state if m.state in ("pending", "ready", "saved") else "pending",
                 partial=bool(partial or m.partial),
@@ -287,10 +359,19 @@ class CheckoutManager:
         return co
 
     def adopt_slice(self, m: Manifest, parent: Checkout) -> Checkout:
-        """A slice of an adopted parent in THIS manager."""
+        """A slice of an adopted parent in THIS manager. `m.start_frame`
+        is absolute into the file (see the `Checkout` docstring) and
+        `checkout_slice` wants it parent-relative, so the parent's own
+        start comes off first -- without that, a slice of a slice
+        re-opens `parent.start_frame` too far in. A negative result means
+        the manifest disagrees with its parent (corruption): raise so
+        `adopt_scratch` skips it, like any other corrupt manifest."""
+        start = int(m.start_frame) - int(parent.start_frame)
+        if start < 0:
+            raise ValueError(f"slice {m.id} starts before its parent ({m.start_frame} < {parent.start_frame})")
         handle = None
         try:
-            handle = self._scratch.checkout_slice(parent.handle, int(m.start_frame), int(m.n_frames))
+            handle = self._scratch.checkout_slice(parent.handle, start, int(m.n_frames))
             co = Checkout(
                 id=m.id, handle=handle, path=parent.path,
                 sample_rate=parent.sample_rate, channels=parent.channels,
@@ -402,10 +483,16 @@ class CheckoutManager:
     # Save / discard
     # ------------------------------------------------------------------
 
-    def export_range(self, checkout_id: str, target_path: Path | str, start: int, n: int, subtype: str = _DEFAULT_SUBTYPE) -> Path:
+    def export_range(self, checkout_id: str, target_path: Path | str, start: int, n: int, subtype: str = _DEFAULT_SUBTYPE,
+                     markers: tuple[int, int] | None = None) -> Path:
         """Materialise `[start, start + n)` of the checkout into a WAV.
         Zig reads the scratch file (or the RAM copy while the write is
-        still in flight) — no audio crosses into Python."""
+        still in flight) — no audio crosses into Python.
+
+        `markers` is `(slice_start, slice_end)` in frames RELATIVE TO THE
+        EXPORTED FILE, end exclusive; Zig appends the cue/smpl/adtl
+        chunks. A marker export needs the audio on disk, so it waits for
+        the scratch write and raises if that write failed."""
         if subtype not in _VALID_SUBTYPES:
             raise ValueError(f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}")
         target = Path(target_path)
@@ -421,7 +508,7 @@ class CheckoutManager:
                 raise KeyError(checkout_id)
             handle = self._checkouts[checkout_id].handle
             try:
-                self._scratch.checkout_export(handle, target, int(start), int(n), subtype)
+                self._scratch.checkout_export(handle, target, int(start), int(n), subtype, markers)
             except (RuntimeError, OSError) as e:
                 # R-h8k: one exception type out of every engine-reaching call.
                 raise RuntimeError(f"could not export checkout {checkout_id}; {e}") from e

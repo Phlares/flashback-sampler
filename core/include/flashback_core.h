@@ -24,7 +24,8 @@ typedef struct FbCapture FbCapture; /* opaque */
 typedef struct FbMixer FbMixer; /* opaque */
 typedef struct FbDevice { uint8_t kind; uint8_t is_default; uint32_t mix_rate; uint16_t mix_channels; char id[128]; char name[128]; } FbDevice;
 typedef struct FbCaptureSpec { uint8_t kind; uint32_t pid; uint32_t rate; uint16_t channels; const char *device_id; } FbCaptureSpec;
-typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; } FbCaptureStats;
+/* sources: bit i set while source i streams (a capture: bit 0 == running; a mixer: one bit per source). */
+typedef struct FbCaptureStats { uint8_t running; uint64_t frames_written; uint32_t xruns; uint32_t mix_rate; uint8_t sources; } FbCaptureStats;
 typedef struct FbProcess { uint32_t pid; uint32_t ppid; char name[128]; } FbProcess;
 
 typedef struct FbPlayback FbPlayback; /* opaque */
@@ -80,6 +81,10 @@ typedef struct FbWavInfo { uint32_t rate; uint16_t channels; uint8_t subtype; ui
  * runs past the frames the FILE holds (a crash-truncated file reports its
  * true prefix, not the header's claim). FB_IO_ERROR: OS errors. */
 FbStatus fb_wav_info(const char *path, FbWavInfo *out);
+
+/* Physical memory: total and currently available bytes; 0 = unknown on this platform. */
+typedef struct FbMemInfo { uint64_t total; uint64_t available; } FbMemInfo;
+void       fb_mem_info(FbMemInfo *out);
 /* out holds n_frames * channels floats (channels from fb_wav_info).
  * out_len is the caller's own count of that buffer (n_frames * channels
  * as the CALLER computed it); FB_INVALID_ARG if it disagrees with the
@@ -163,12 +168,17 @@ void        fb_checkout_info(FbScratch *, FbCheckout *, FbCheckoutInfo *out);
  * mismatch rule as fb_wav_peak_bins. */
 FbStatus    fb_checkout_peak_bins(FbScratch *, FbCheckout *, size_t n_bins, FbPeakBin *out, size_t out_len);
 void        fb_checkout_pin(FbScratch *, FbCheckout *, uint8_t on);
+/* Where the exported slice sits inside the exported file, in frames
+ * relative to that file, slice_end exclusive. */
+typedef struct FbMarkers { uint64_t slice_start; uint64_t slice_end; } FbMarkers;
 /* Materialises `[start, start + n)` into `dst`: from disk once the
  * audio is safe there (written/adopted), from RAM before that.
  * FB_INVALID_ARG: n == 0, the span runs past the checkout, or a bad
- * subtype. No trailing FbMarkers* yet (R-h6g) — PR i adds region-aware
- * export on top of this signature. */
-FbStatus    fb_checkout_export(FbScratch *, FbCheckout *, const char *dst, uint64_t start, uint64_t n, FbSubtype);
+ * subtype. A non-NULL `markers` appends the slice's `cue `/`smpl`/`LIST`
+ * chunks after `data`; only the disk path can append chunks, so that
+ * call first waits for the scratch write and returns FB_IO_ERROR if the
+ * audio never lands on disk. */
+FbStatus    fb_checkout_export(FbScratch *, FbCheckout *, const char *dst, uint64_t start, uint64_t n, FbSubtype, const FbMarkers *markers /* nullable */);
 void        fb_checkout_destroy(FbScratch *, FbCheckout *);
 /* Binds `[start, start + n)` of the checkout for playback: Zig reads it
  * from RAM or the file directly, no numpy round trip. FB_INVALID_ARG:

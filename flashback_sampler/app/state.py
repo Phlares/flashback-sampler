@@ -26,7 +26,8 @@ from flashback_sampler.app.audio_devices import (
 )
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
-from flashback_sampler.core.manifest import resolve_audio, scan
+from flashback_sampler.core.manifest import audio_path, resolve_audio, scan
+from flashback_sampler.core import native
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
@@ -39,12 +40,6 @@ from flashback_sampler.core.scrub_player import NativeScrubPlayer
 DEFAULT_BUFFER_SECONDS = 5 * 60
 DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_CHANNELS = 2
-
-# Total RAM budget across all capture slots, in MB. Used by add_slot
-# as an admission-control guard. The settings dialog lets the user
-# raise or lower it. At 4 GB the default comfortably holds 10+ slots
-# of mixed FULL / MUSIC / VOICE / CHAT tracks.
-DEFAULT_PROJECT_RAM_BUDGET_MB = 4096.0
 
 
 class AppState:
@@ -104,7 +99,13 @@ class AppState:
             )
         ]
         self.active_slot_index: int = 0
-        self.project_ram_budget_mb: float = DEFAULT_PROJECT_RAM_BUDGET_MB
+        # Max footprint (#41): a safety line for the whole session's
+        # resident bytes, not a reservation. Default = 25 % of physical
+        # RAM at launch; the stored preference overrides it; 0 = no cap.
+        total_physical, _free = native.mem_info()
+        self.max_footprint_mb: float = app_config.load_max_footprint_mb(
+            default=app_config.default_max_footprint_mb(total_physical)
+        )
 
         # Master transport state. `rolling` is the global START/STOP
         # CAPTURE toggle. While rolling, every armed slot has a live
@@ -166,24 +167,34 @@ class AppState:
         the normal "Add Source" path); adoption passes False for a
         foreign-rate slot it recreates just to hold checkouts.
 
-        Raises RuntimeError if adding the new slot's ring buffer would
-        push the total project RAM footprint past
-        self.project_ram_budget_mb. `total_project_ram_bytes()` includes
-        `self.scratch.resident_bytes`, so this refusal also depends on
-        how much the scratch cache currently holds, not just ring sizes.
+        Raises RuntimeError when the new ring would push the session's
+        resident bytes past `max_footprint_mb` (when a cap is set), or
+        when the ring alone exceeds the free physical memory the engine
+        reports (skipped where the platform cannot say). Either way the
+        refusal happens BEFORE the ring is created; `fb_ring_create`'s
+        own out_of_memory status stays as the backstop (#41).
+        `total_project_ram_bytes()` includes `self.scratch.resident_bytes`,
+        so the cap clause also depends on what the scratch cache holds.
         """
+        from flashback_sampler.core.quality_presets import MB
+
         new_ring_bytes = preset.ram_bytes()
         current_bytes = self.total_project_ram_bytes()
-        budget_bytes = int(self.project_ram_budget_mb * 1024 * 1024)
-        if current_bytes + new_ring_bytes > budget_bytes:
-            from flashback_sampler.core.quality_presets import MB
-
+        cap_bytes = int(self.max_footprint_mb * MB)
+        if cap_bytes and current_bytes + new_ring_bytes > cap_bytes:
             raise RuntimeError(
-                f"Project RAM budget exceeded: adding {preset.name} "
-                f"({new_ring_bytes / MB:.0f} MB) would bring total to "
-                f"{(current_bytes + new_ring_bytes) / MB:.0f} MB, "
-                f"over the {self.project_ram_budget_mb:.0f} MB budget. "
-                f"Raise the budget in Settings or pick a lighter preset."
+                f"Max footprint exceeded: adding {preset.name} "
+                f"({new_ring_bytes / MB:.0f} MB) would bring the session to "
+                f"{(current_bytes + new_ring_bytes) / MB:.0f} MB, over the "
+                f"{self.max_footprint_mb:.0f} MB max footprint. "
+                f"Raise it (or set 0 for no cap) in Preferences, or pick a lighter preset."
+            )
+        _total, free_bytes = native.mem_info()
+        if free_bytes and new_ring_bytes > free_bytes:
+            raise RuntimeError(
+                f"Not enough free memory: {preset.name} needs "
+                f"{new_ring_bytes / MB:.0f} MB and only {free_bytes / MB:.0f} MB "
+                f"of physical memory is free. Close other programs or pick a lighter preset."
             )
 
         slot = CaptureSlot.from_quality_preset(
@@ -203,18 +214,38 @@ class AppState:
         first slot with its rate and channels, else to a new unarmed slot
         named from the manifest (60 s ring — an arbitrary small default;
         a foreign-rate slot only exists to hold adopted checkouts, not to
-        capture into); a slice goes where its parent went. Anything
-        unreadable, without audio, or that fails anywhere in adoption
-        (a corrupt-but-parseable manifest, a locked `.part` rename, a
-        RAM-budget refusal for a new slot, ...) is skipped and left on
+        capture into); a slice goes where its parent went, or -- when its
+        parent is gone from the manifests while the file it named is
+        still on disk -- is opened directly over that file at its own
+        span, keeping the file (and itself) alive. Anything unreadable,
+        without audio, or that fails anywhere in adoption (a
+        corrupt-but-parseable manifest, a locked `.part` rename, a
+        max-footprint refusal for a new slot, ...) is skipped and left on
         disk -- no on-disk artefact may abort a launch. Crash and quit
         take this same path."""
         adopted: list[Checkout] = []
         where: dict[str, CaptureSlot] = {}
         for m in scan(self.scratch_dir):
             try:
-                if m.parent is None:
-                    found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
+                slot = where.get(m.parent) if m.parent is not None else None
+                if slot is not None:
+                    co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
+                else:
+                    if m.parent is None:
+                        found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
+                        start = 0
+                    else:
+                        # An ORPHANED slice: its parent left the manifests
+                        # (the user discarded it, or the window's
+                        # count-cap eviction did) while the file it named
+                        # is still on disk, held there by this slice's own
+                        # refcount. Open over that file at the slice's own
+                        # span -- a root IS a slice at (0, all), so it is
+                        # the same mechanism. Skipping it would leak the
+                        # parent's WAV and this manifest forever.
+                        orphan = audio_path(self.scratch_dir, m.parent)
+                        found = (orphan, False) if orphan.exists() else None
+                        start = int(m.start_frame)
                     if found is None:
                         continue
                     audio, partial = found
@@ -225,12 +256,7 @@ class AppState:
                                           buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
                             name=m.slot or "Adopted", armed=False,
                         )
-                    co = slot.checkout_manager.adopt_root(m, audio, partial)
-                else:
-                    slot = where.get(m.parent)
-                    if slot is None:
-                        continue
-                    co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
+                    co = slot.checkout_manager.adopt_root(m, audio, partial, start)
             except Exception:
                 # No on-disk artefact may abort a launch -- skip and continue.
                 continue
@@ -270,8 +296,9 @@ class AppState:
     def total_project_ram_mb(self) -> float:
         return self.total_project_ram_bytes() / (1024.0 * 1024.0)
 
-    def set_project_ram_budget_mb(self, mb: float) -> None:
-        self.project_ram_budget_mb = max(64.0, float(mb))
+    def set_max_footprint_mb(self, mb: float) -> None:
+        """0 = no cap; negatives floor to 0."""
+        self.max_footprint_mb = max(0.0, float(mb))
 
     def remove_slot(self, index: int) -> None:
         """

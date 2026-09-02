@@ -71,3 +71,6 @@ captures/
 core/zig-out/
 core/.zig-cache/
 core/.zig-cache-global/
+
+# SDD workspaces + handoff prompts (local working notes, never shipped)
+.superpowers/
