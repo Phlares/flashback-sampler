@@ -21,12 +21,13 @@ from flashback_sampler.app.audio_devices import (
     OutputDevice,
     build_capture_source,
     build_mixed_capture_source,
+    captures_preview,
     default_capture_device,
     default_output_device,
 )
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
-from flashback_sampler.core.manifest import audio_path, resolve_audio, scan
+from flashback_sampler.core.manifest import resolve_audio, scan
 from flashback_sampler.core import native
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from flashback_sampler.core.quality_presets import QualityPreset
@@ -215,7 +216,7 @@ class AppState:
         named from the manifest (60 s ring — an arbitrary small default;
         a foreign-rate slot only exists to hold adopted checkouts, not to
         capture into); a slice goes where its parent went, or -- when its
-        parent is gone from the manifests while the file it named is
+        parent is gone from the manifests while the file it names is
         still on disk -- is opened directly over that file at its own
         span, keeping the file (and itself) alive. Anything unreadable,
         without audio, or that fails anywhere in adoption (a
@@ -231,21 +232,11 @@ class AppState:
                 if slot is not None:
                     co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
                 else:
-                    if m.parent is None:
-                        found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
-                        start = 0
-                    else:
-                        # An ORPHANED slice: its parent left the manifests
-                        # (the user discarded it, or the window's
-                        # count-cap eviction did) while the file it named
-                        # is still on disk, held there by this slice's own
-                        # refcount. Open over that file at the slice's own
-                        # span -- a root IS a slice at (0, all), so it is
-                        # the same mechanism. Skipping it would leak the
-                        # parent's WAV and this manifest forever.
-                        orphan = audio_path(self.scratch_dir, m.parent)
-                        found = (orphan, False) if orphan.exists() else None
-                        start = int(m.start_frame)
+                    # A root, or an orphaned slice whose parent left the
+                    # manifests: both open over `<m.file>.wav` at their
+                    # own span. Skipping the orphan would pin the root's
+                    # WAV forever.
+                    found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
                     if found is None:
                         continue
                     audio, partial = found
@@ -256,7 +247,7 @@ class AppState:
                                           buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
                             name=m.slot or "Adopted", armed=False,
                         )
-                    co = slot.checkout_manager.adopt_root(m, audio, partial, start)
+                    co = slot.checkout_manager.adopt_root(m, audio, partial)
             except Exception:
                 # No on-disk artefact may abort a launch -- skip and continue.
                 continue
@@ -422,6 +413,36 @@ class AppState:
     def armed_count(self) -> int:
         return sum(1 for s in self.slots if s.armed)
 
+    def capture_specs_for_slot(self, slot: CaptureSlot) -> list[CaptureDevice]:
+        """The devices `slot` captures from: its own `capture_specs` when
+        it has any, else the global spec (empty when none is selected)."""
+        if slot.capture_specs:
+            return list(slot.capture_specs)
+        device = self.effective_capture_spec_for_slot(slot)
+        return [] if device is None else [device]
+
+    def preview_feedback_warning(self) -> Optional[str]:
+        """One line naming the preview output and every armed slot's
+        device that records it, or None. Playing a clip through such an
+        output lands back in the ring. A warning, not a refusal: the
+        caller shows it, and someone may want the loop. The launch
+        default (follow-default loopback, default output) is one such
+        pairing, so the caller must keep this quiet, not modal."""
+        out = self.output_spec
+        if out is None:
+            return None
+        hits = [
+            (slot, d) for slot in self.slots if slot.armed
+            for d in self.capture_specs_for_slot(slot) if captures_preview(d, out)
+        ]
+        if not hits:
+            return None
+        who = "; ".join(f"{slot.name} ({d.name})" for slot, d in hits)
+        return (
+            f"{who} captures the preview output {out.name}: playing a clip records it "
+            "back into the buffer. Capture from another endpoint, or stop capture while you preview."
+        )
+
     def build_capture_for_slot(self, slot: CaptureSlot):
         """
         Instantiate a capture source wired to `slot`'s buffer.
@@ -432,15 +453,12 @@ class AppState:
         NativeMixedSource that sums all inputs into the same buffer.
         An empty list falls back to AppState's global capture_spec.
         """
-        specs = list(slot.capture_specs) if slot.capture_specs else []
+        specs = self.capture_specs_for_slot(slot)
         if not specs:
-            device = self.effective_capture_spec_for_slot(slot)
-            if device is None:
-                raise RuntimeError(
-                    "No capture device selected. Pick one from the Audio menu "
-                    "or from the slot's right-click menu."
-                )
-            specs = [device]
+            raise RuntimeError(
+                "No capture device selected. Pick one from the Audio menu "
+                "or from the slot's right-click menu."
+            )
 
         if len(specs) == 1:
             return build_capture_source(

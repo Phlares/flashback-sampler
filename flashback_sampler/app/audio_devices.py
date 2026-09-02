@@ -12,6 +12,8 @@ the right concrete source object.
 
 from __future__ import annotations
 
+import functools
+import os
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -147,6 +149,39 @@ def default_output_device() -> OutputDevice | None:
         if d.is_default:
             return d
     return devices[0] if devices else None
+
+
+def _endpoints(device_id: str, is_default: bool) -> set[str]:
+    """The keys a render endpoint answers to: its id, and "" when it is
+    the OS default (picked as "follow the default" or by its own id).
+    Two sides name the same endpoint when their key sets intersect."""
+    return {device_id} | ({""} if is_default else set())
+
+
+@functools.lru_cache(maxsize=64)
+def _root_pid(pid: int) -> int:
+    """`resolve_root_pid` memoized: a pid's same-exe root does not change
+    while the pid lives, and the check runs from a 1 Hz poll, so one
+    Toolhelp snapshot per pid is enough."""
+    return native.resolve_root_pid(pid)
+
+
+def captures_preview(device: CaptureDevice, output: OutputDevice) -> bool:
+    """True when `device` records what `output` plays, so a preview
+    through `output` lands back in the ring. A loopback matches on the
+    endpoint. A per-process source captures its target's process tree
+    (include mode, `WasapiBackend.zig`), so it matches only when that
+    tree is ours. An input never plays back what the preview renders.
+
+    `is_default` on both sides is the enumeration-time snapshot. An OS
+    default output that changes mid-session is not re-resolved here; the
+    preview device is pinned at launch the same way."""
+    if device.kind == "loopback":
+        return bool(_endpoints(device.id, device.is_default or device.follow_default)
+                    & _endpoints(output.id, output.is_default))
+    if device.kind == "process_loopback":
+        return _root_pid(int(device.id)) == _root_pid(os.getpid())
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────

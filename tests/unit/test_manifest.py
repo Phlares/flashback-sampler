@@ -16,7 +16,43 @@ def _m(**kw) -> Manifest:
                 created_at=1.0, parent=None, start_frame=0, n_frames=100, trim_in=0, trim_out=0,
                 state="pending", partial=False, bins=None)
     base.update(kw)
+    base.setdefault("file", base["parent"] or base["id"])
     return Manifest(**base)
+
+
+def test_read_manifest_fills_file_for_a_manifest_written_before_the_field(tmp_path):
+    """A manifest from before `file` existed names only its immediate
+    parent. A root owns its own file; a slice's best guess is its
+    parent's, which is what adoption assumed then. The rest of the
+    fields stay required: a manifest missing one of them is still None."""
+    root = write_manifest(tmp_path, _m(id="r1"))
+    data = json.loads(root.read_text())
+    del data["file"]
+    root.write_text(json.dumps(data))
+    assert read_manifest(root).file == "r1"
+
+    sl = write_manifest(tmp_path, _m(id="s1", parent="r1", file="r1"))
+    data = json.loads(sl.read_text())
+    del data["file"]
+    sl.write_text(json.dumps(data))
+    assert read_manifest(sl).file == "r1"
+
+    del data["n_frames"]
+    sl.write_text(json.dumps(data))
+    assert read_manifest(sl) is None
+
+
+def test_resolve_audio_looks_up_the_file_owning_checkout(tmp_path):
+    """A slice of a slice whose intermediate parent is gone: the manifest
+    names `r1` as its file, so the audio is `r1.wav`, not `<parent>.wav`
+    and not `<id>.wav`."""
+    m = _m(id="s2", parent="s1", file="r1")
+    assert resolve_audio(tmp_path, m) is None
+    (tmp_path / "s1.wav").write_bytes(b"RIFF")
+    (tmp_path / "s2.wav").write_bytes(b"RIFF")
+    assert resolve_audio(tmp_path, m) is None
+    (tmp_path / "r1.wav").write_bytes(b"RIFF")
+    assert resolve_audio(tmp_path, m) == (tmp_path / "r1.wav", False)
 
 
 def test_write_then_read_round_trips_including_bins(tmp_path):
