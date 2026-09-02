@@ -169,12 +169,10 @@ class CheckoutManager:
     # Creation
     # ------------------------------------------------------------------
 
-    def create(self, duration_s: float, anchor: str = "latest", anchor_offset_s: float = 0.0) -> Checkout:
+    def create(self, duration_s: float, anchor_offset_s: float = 0.0) -> Checkout:
         """Snapshot `duration_s` seconds ending `anchor_offset_s` ago
         (0 = now). Both clamp to what the ring holds: the offset to
         `buffered - 1 sample`, the start to the readable window."""
-        if anchor != "latest":
-            raise NotImplementedError(f"anchor={anchor!r} not yet supported")
         if duration_s <= 0:
             raise ValueError("duration_s must be positive")
         if anchor_offset_s < 0:
