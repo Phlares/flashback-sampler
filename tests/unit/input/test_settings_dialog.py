@@ -1,16 +1,9 @@
 import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.input.core import (
     Action, BindingTable, clear_registry, register,
 )
 from flashback_sampler.input.ui.settings_dialog import KeybindingsDialog
-
-
-@pytest.fixture
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 @pytest.fixture(autouse=True)

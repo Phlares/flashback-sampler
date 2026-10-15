@@ -9,18 +9,11 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.widgets.selectable_waveform import (
     EDGE_GRAB_PX,
     SelectableWaveform,
 )
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 # ─────────────────────────────────────────────────────────────────────────

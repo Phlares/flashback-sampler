@@ -54,12 +54,6 @@ def test_unregisterable_returns_none(chord):
     assert parse_hotkey(chord) is None
 
 
-@pytest.fixture
-def qapp():
-    from PySide6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
-
-
 # --- build_global_bindings: derive global hotkeys from the live BindingTable -
 
 def test_build_global_bindings_tracks_current_bindings():

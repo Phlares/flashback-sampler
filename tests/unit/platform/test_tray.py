@@ -1,5 +1,3 @@
-import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.core.source_status import Severity
 from flashback_sampler.input.core import Action, register
@@ -8,11 +6,6 @@ from flashback_sampler.platform.tray import (
     record_action_label,
     tooltip_text,
 )
-
-
-@pytest.fixture
-def qapp():
-    return QApplication.instance() or QApplication([])
 
 
 # -- pure helpers (no Qt) -------------------------------------------------

@@ -1,18 +1,12 @@
 import pytest
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.input.core import (
     Action, BindingTable, clear_registry, register,
 )
 from flashback_sampler.input.sources.qt_keyboard import KeyboardSource
-
-
-@pytest.fixture
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 @pytest.fixture(autouse=True)

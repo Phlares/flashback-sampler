@@ -1,12 +1,5 @@
-import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
-
-
-@pytest.fixture
-def qapp():
-    return QApplication.instance() or QApplication([])
 
 
 def test_checkbox_reflects_initial_state(qapp):

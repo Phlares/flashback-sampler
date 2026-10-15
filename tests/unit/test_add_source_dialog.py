@@ -2,19 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.add_source_dialog import (
     SAMPLE_RATE_CHOICES,
     AddSourceDialog,
 )
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_hi_res_rates_offered_descending():

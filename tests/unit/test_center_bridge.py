@@ -1,16 +1,8 @@
 """Tests for CenterBridge widget."""
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_center_bridge_instantiates(qapp):
