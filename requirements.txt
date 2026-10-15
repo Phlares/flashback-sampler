@@ -1,5 +1,5 @@
 numpy>=1.24
-PySide6>=6.7
+PySide6>=6.7,<6.12  # 6.12 crashes at interpreter exit: #93
 platformdirs>=4.0
 
 # dev — install with `pip install -e ".[dev]"` or directly:
