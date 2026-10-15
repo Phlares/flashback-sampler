@@ -1,16 +1,8 @@
 """Tests for WaveformPanel widget."""
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_buffer_panel_instantiates(qapp):

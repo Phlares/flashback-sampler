@@ -4,17 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.drag_out import build_file_drag_mime, perform_file_drag
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_build_file_drag_mime_carries_local_file_url(qapp, tmp_path):

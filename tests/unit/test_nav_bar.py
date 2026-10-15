@@ -1,16 +1,8 @@
 """Tests for NavBar widget."""
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.widgets.nav_bar import NavBar
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_nav_bar_instantiates(qapp):
