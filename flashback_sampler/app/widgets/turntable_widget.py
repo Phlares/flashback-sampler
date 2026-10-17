@@ -185,7 +185,7 @@ class TurntableWidget(QWidget):
             size=size,
         )
 
-    def geometry(self) -> TurntableGeometry:
+    def turntable_geometry(self) -> TurntableGeometry:
         """Public accessor for layout geometry — used by tests."""
         return self._compute_geometry()
 

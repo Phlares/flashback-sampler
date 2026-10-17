@@ -10,6 +10,7 @@ from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -1686,7 +1687,7 @@ class TurntableWindow(QMainWindow):
             default_channels=active.channels,
             parent=self,
         )
-        if dlg.exec() != AddSourceDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         preset = dlg.result_preset()
         name = dlg.result_name() or default_name
@@ -2182,7 +2183,7 @@ class TurntableWindow(QMainWindow):
         """Open the ProcessPickerDialog and, on accept, set the slot's
         capture_spec to a per-process CaptureDevice."""
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:
@@ -2191,7 +2192,7 @@ class TurntableWindow(QMainWindow):
 
     def _add_mux_input_from_process(self, slot_index: int) -> None:
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:

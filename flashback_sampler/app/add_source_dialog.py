@@ -265,7 +265,7 @@ class AddSourceDialog(QDialog):
 
     def _pick_process(self) -> None:
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:

@@ -73,16 +73,16 @@ def _disc_icon(recording: bool, severity: Severity = Severity.OK) -> QIcon:
     )
     pen.setWidthF(2.7)
     p.setPen(pen)
-    p.drawEllipse(2.0, 2.0, 28.0, 28.0)
+    p.drawEllipse(2, 2, 28, 28)
     # Centre: red dot while recording, pause bars when idle.
     p.setPen(QColor(0, 0, 0, 0))
     if recording:
         p.setBrush(QColor("#ff3b30"))
-        p.drawEllipse(11.0, 11.0, 10.0, 10.0)
+        p.drawEllipse(11, 11, 10, 10)
     else:
         p.setBrush(QColor("#cfc9ba"))
-        p.drawRoundedRect(11.4, 9.5, 3.4, 13.0, 1.3, 1.3)
-        p.drawRoundedRect(17.2, 9.5, 3.4, 13.0, 1.3, 1.3)
+        p.drawRoundedRect(11, 9, 3, 13, 1.3, 1.3)
+        p.drawRoundedRect(17, 9, 3, 13, 1.3, 1.3)
     p.end()
     return QIcon(px)
 
