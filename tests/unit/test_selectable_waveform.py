@@ -28,6 +28,12 @@ def _new_wave(qapp, width: int = 1012) -> SelectableWaveform:
     return w
 
 
+def _sel(w: SelectableWaveform) -> tuple[float, float]:
+    sel = w.manual_selection()
+    assert sel is not None
+    return sel
+
+
 def test_edge_at_returns_none_with_no_selection(qapp):
     w = _new_wave(qapp)
     assert w._edge_at(100) is None
@@ -102,7 +108,7 @@ def test_drag_start_edge_leftward_extends_selection(qapp):
     new_frac = 0.25
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_start = max(0.0, min(float(w._manual_end) - epsilon, new_frac))
+    w._manual_start = max(0.0, min(_sel(w)[1] - epsilon, new_frac))
     assert w._manual_start == pytest.approx(0.25)
     assert w._manual_end == pytest.approx(0.75)
 
@@ -115,11 +121,11 @@ def test_drag_start_edge_cannot_cross_end(qapp):
     new_frac = 0.9  # past end
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_start = max(0.0, min(float(w._manual_end) - epsilon, new_frac))
+    w._manual_start = max(0.0, min(_sel(w)[1] - epsilon, new_frac))
 
     # Should be clamped to just before end
     assert w._manual_start == pytest.approx(0.7 - epsilon)
-    assert w._manual_start < w._manual_end
+    assert w.has_manual_selection()  # only while start < end
 
 
 def test_drag_end_edge_rightward_extends_selection(qapp):
@@ -130,7 +136,7 @@ def test_drag_end_edge_rightward_extends_selection(qapp):
     new_frac = 0.8
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_end = min(1.0, max(float(w._manual_start) + epsilon, new_frac))
+    w._manual_end = min(1.0, max(_sel(w)[0] + epsilon, new_frac))
     assert w._manual_end == pytest.approx(0.8)
     assert w._manual_start == pytest.approx(0.2)
 
@@ -143,10 +149,10 @@ def test_drag_end_edge_cannot_cross_start(qapp):
     new_frac = 0.1  # past start
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_end = min(1.0, max(float(w._manual_start) + epsilon, new_frac))
+    w._manual_end = min(1.0, max(_sel(w)[0] + epsilon, new_frac))
 
     assert w._manual_end == pytest.approx(0.3 + epsilon)
-    assert w._manual_start < w._manual_end
+    assert w.has_manual_selection()  # only while start < end
 
 
 # ─────────────────────────────────────────────────────────────────────────
