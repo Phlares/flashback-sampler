@@ -74,8 +74,12 @@ def _clip(target: Path) -> ET.Element:
     return next(root.iter("AudioClip"))
 
 
-def _value(clip: ET.Element, path: str) -> str:
-    return clip.find(path).get("Value")
+def _value(clip: ET.Element, path: str, attr: str = "Value") -> str:
+    el = clip.find(path)
+    assert el is not None, path
+    value = el.get(attr)
+    assert value is not None, (path, attr)
+    return value
 
 
 @pytest.mark.skipif(
@@ -150,8 +154,8 @@ def test_render_alc_xml_escapes_a_quote_in_the_path(tmp_path):
     import xml.etree.ElementTree as _ET
 
     clip = next(_ET.fromstring(xml).iter("AudioClip"))
-    assert clip.find("SampleRef/FileRef/Path").get("Value") == '/pool/say "hi".wav'
-    assert clip.find("Name").get("Value") == 'say "hi"'
+    assert _value(clip, "SampleRef/FileRef/Path") == '/pool/say "hi".wav'
+    assert _value(clip, "Name") == 'say "hi"'
 
 
 def test_write_alc_output_is_gzipped_xml(tmp_path):
@@ -188,7 +192,7 @@ def test_rendering_leaves_the_session_level_loop_start_alone():
     `Loop/LoopStart`. A substitution matched by element name instead of
     by the captured line would move the set's loop brace."""
     root = ET.fromstring(alc.render_alc_xml(**SUBSTITUTED))
-    assert root.find("LiveSet/Transport/LoopStart").get("Value") == "8"
+    assert _value(root, "LiveSet/Transport/LoopStart") == "8"
 
 
 def test_numbers_are_plain_decimals_never_exponents():
@@ -205,10 +209,10 @@ def test_numbers_are_plain_decimals_never_exponents():
         size=44,
     )
     clip = next(ET.fromstring(xml).iter("AudioClip"))
-    start = clip.find("Loop/LoopStart").get("Value")
+    start = _value(clip, "Loop/LoopStart")
     assert "e" not in start.lower() and start.startswith("0.0000208")
-    assert "e" not in clip.find("CurrentEnd").get("Value").lower()
-    marker = clip.findall("WarpMarkers/WarpMarker")[0].get("SecTime")
+    assert "e" not in _value(clip, "CurrentEnd").lower()
+    marker = _value(clip, "WarpMarkers/WarpMarker", "SecTime")
     assert "e" not in marker.lower()
 
 

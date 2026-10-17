@@ -749,7 +749,8 @@ def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(
         )
         assert mgr.get(co.id).state == "pending"
         assert read_wav(target)[1].frames == n // 4
-        assert win._currently_displayed_checkout().id == s.id
+        shown = win._currently_displayed_checkout()
+        assert shown is not None and shown.id == s.id
     finally:
         win.close()
 

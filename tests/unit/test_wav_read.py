@@ -133,6 +133,7 @@ def test_wav_read_passes_the_real_out_len(tmp_path):
     p = tmp_path / "sized.wav"
     native.wav_write(p, _ramp(20, 2), 8_000, "FLOAT")
     lib = native.load()
+    assert lib is not None
     orig = lib.fb_wav_read
     calls = []
 
@@ -153,6 +154,7 @@ def test_wav_peak_bins_passes_the_real_out_len(tmp_path):
     p = tmp_path / "sized_peaks.wav"
     native.wav_write(p, _ramp(20, 2), 8_000, "FLOAT")
     lib = native.load()
+    assert lib is not None
     orig = lib.fb_wav_peak_bins
     calls = []
 

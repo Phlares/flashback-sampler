@@ -50,13 +50,15 @@ def test_read_manifest_fills_file_for_a_manifest_written_before_the_field(tmp_pa
     data = json.loads(root.read_text())
     del data["file"]
     root.write_text(json.dumps(data))
-    assert read_manifest(root).file == "r1"
+    back = read_manifest(root)
+    assert back is not None and back.file == "r1"
 
     sl = write_manifest(tmp_path, _m(id="s1", parent="r1", file="r1"))
     data = json.loads(sl.read_text())
     del data["file"]
     sl.write_text(json.dumps(data))
-    assert read_manifest(sl).file == "r1"
+    back = read_manifest(sl)
+    assert back is not None and back.file == "r1"
 
     del data["n_frames"]
     sl.write_text(json.dumps(data))
