@@ -350,7 +350,7 @@ class TurntableWindow(QMainWindow):
         # Drag-out export prefs — pool dir + bit depth used when rendering
         # a clip for an OS drag (see _render_for_drag).
         self._export_pool_dir: Path = load_export_pool_dir()
-        self._export_bit_depth: str = load_export_bit_depth()
+        self._export_bit_depth = load_export_bit_depth()
         self._drag_handle_mb: float = load_drag_handle_mb()
         self._drag_alc_sidecar: bool = load_drag_alc_sidecar()
 
@@ -608,8 +608,7 @@ class TurntableWindow(QMainWindow):
         save_export_pool_dir(path_str)
 
     def _set_export_bit_depth(self, depth: str) -> None:
-        self._export_bit_depth = depth
-        save_export_bit_depth(depth)
+        self._export_bit_depth = save_export_bit_depth(depth)
 
     def _set_drag_handle_mb(self, mb: float) -> None:
         self._drag_handle_mb = float(mb)

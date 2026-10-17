@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,7 @@ CAPTURE = (
 
 # What Live wrote for the capture: a 10-15 s clip of a 30 s, 48 kHz,
 # 1 440 000-frame, 8 640 230-byte spike.wav in the User Library.
-CAPTURED = dict(
+CAPTURED: dict[str, Any] = dict(
     wav_path=Path("D:/Audio/User Library/Samples/Imported/spike.wav"),
     relative_path="Samples/Imported/spike.wav",
     start_s=10.0,
@@ -35,7 +36,7 @@ CAPTURED = dict(
 
 # A clip whose every value differs from the capture's, so a substitution
 # that quietly does nothing shows up as a line that did not change.
-SUBSTITUTED = dict(
+SUBSTITUTED: dict[str, Any] = dict(
     wav_path=Path("/pool/take.wav"),
     relative_path="take.wav",
     start_s=3.25,

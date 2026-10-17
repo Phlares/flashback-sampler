@@ -40,6 +40,7 @@ class _NativeSource:
     the DLL, not a Python exception."""
 
     _api: str
+    _lib: C.CDLL
     sample_rate: int
     channels: int
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -18,7 +19,7 @@ from flashback_sampler.core.manifest import (
 
 
 def _m(**kw) -> Manifest:
-    base = dict(
+    base: dict[str, Any] = dict(
         id="abc123",
         slot="Main",
         rate=48_000,

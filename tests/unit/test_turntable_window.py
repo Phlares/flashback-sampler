@@ -1018,12 +1018,15 @@ def test_set_export_prefs_persist_and_apply(qapp, state, tmp_path, monkeypatch):
     import flashback_sampler.app.turntable_window as tw
 
     saved = {}
+
+    def save_depth(d):
+        saved["depth"] = d
+        return d
+
     monkeypatch.setattr(
         tw, "save_export_pool_dir", lambda p: saved.__setitem__("dir", str(p))
     )
-    monkeypatch.setattr(
-        tw, "save_export_bit_depth", lambda d: saved.__setitem__("depth", d)
-    )
+    monkeypatch.setattr(tw, "save_export_bit_depth", save_depth)
     win = TurntableWindow(state)
     try:
         win._set_export_pool_dir(str(tmp_path / "pool"))
