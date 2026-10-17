@@ -234,10 +234,11 @@ class AppState:
         where: dict[str, CaptureSlot] = {}
         for m in scan(self.scratch_dir):
             try:
-                slot = where.get(m.parent) if m.parent is not None else None
-                if slot is not None and m.parent is not None:
+                parent = m.parent
+                slot = where.get(parent) if parent is not None else None
+                if slot is not None and parent is not None:
                     co = slot.checkout_manager.adopt_slice(
-                        m, slot.checkout_manager.get(m.parent)
+                        m, slot.checkout_manager.get(parent)
                     )
                 else:
                     # A root, or an orphaned slice whose parent left the

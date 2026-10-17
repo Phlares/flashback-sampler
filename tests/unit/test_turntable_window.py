@@ -1640,6 +1640,7 @@ def test_tray_setup_without_app(qapp, state, monkeypatch):
         assert win._tray is not None
         assert not qapp.quitOnLastWindowClosed()
     finally:
+        win._quitting = True
         win.close()
         qapp.setQuitOnLastWindowClosed(keep)
 
