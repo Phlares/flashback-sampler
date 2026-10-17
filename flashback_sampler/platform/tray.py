@@ -65,7 +65,7 @@ def _disc_icon(recording: bool, severity: Severity = Severity.OK) -> QIcon:
     px = QPixmap(32, 32)
     px.fill(QColor(0, 0, 0, 0))
     p = QPainter(px)
-    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     # Disc fill + status ring, run right up to the edge.
     p.setBrush(QColor("#15151a"))
     pen = QPen(

@@ -105,7 +105,7 @@ class WaveformView(QWidget):
 
     def paintEvent(self, ev) -> None:  # noqa: N802
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, False)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         w = self.width()
         h = self.height()
@@ -157,7 +157,7 @@ class WaveformView(QWidget):
                 1,
                 w - 12,
                 label_strip,
-                Qt.AlignLeft | Qt.AlignVCenter,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 self._label_top.upper(),
             )
             p.drawText(
@@ -165,7 +165,7 @@ class WaveformView(QWidget):
                 1,
                 w - 12,
                 label_strip,
-                Qt.AlignRight | Qt.AlignVCenter,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                 self._label_right.upper(),
             )
 
@@ -211,7 +211,7 @@ class WaveformView(QWidget):
             if e > s:
                 x1 = inner_x + s * inner_w
                 x2 = inner_x + e * inner_w
-                p.setRenderHint(QPainter.Antialiasing, True)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 # Translucent ember fill — float-precise rect
                 fill = QColor(EREBUS["ember"])
                 fill.setAlpha(int(0.14 * 255))
@@ -220,7 +220,7 @@ class WaveformView(QWidget):
                     fill,
                 )
                 # Dashed start edge (informational)
-                dash_pen = QPen(QColor(EREBUS["ember"]), 1, Qt.DashLine)
+                dash_pen = QPen(QColor(EREBUS["ember"]), 1, Qt.PenStyle.DashLine)
                 p.setPen(dash_pen)
                 p.drawLine(QLineF(x1, float(inner_y), x1, float(inner_y + inner_h)))
                 # Solid end edge (where the commit lands)
@@ -237,16 +237,16 @@ class WaveformView(QWidget):
                         y_bot=float(inner_y + inner_h),
                         duration_seconds=dur,
                     )
-                p.setRenderHint(QPainter.Antialiasing, False)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         # ── 7. Playhead (scrub cursor for Track 2 clip playback) ─────
         if self._playhead_frac is not None:
             frac = max(0.0, min(1.0, float(self._playhead_frac)))
             x = inner_x + frac * inner_w
-            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setPen(QPen(QColor(EREBUS["ember"]), 1.2))
             p.drawLine(QLineF(x, float(inner_y), x, float(inner_y + inner_h)))
-            p.setRenderHint(QPainter.Antialiasing, False)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         # ── 8. Timeline strip (bottom edge) ──────────────────────────
         if self._timeline_total_s > 0 and timeline_strip > 0:
@@ -313,7 +313,7 @@ def _paint_selection_duration_label(
     p.drawRoundedRect(rect, 3, 3)
 
     p.setPen(QColor(EREBUS["ember"]))
-    p.drawText(rect, Qt.AlignCenter, label)
+    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
     p.restore()
 
 
@@ -410,7 +410,7 @@ def _paint_timeline(
     major_pen = QPen(QColor(168, 163, 152, int(0.55 * 255)), 1)
 
     p.save()
-    p.setRenderHint(QPainter.Antialiasing, False)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     # Baseline — thin hairline across the top of the timeline strip
     base_pen = QPen(QColor(242, 237, 223, int(0.10 * 255)), 1)
@@ -484,7 +484,9 @@ def _paint_timeline(
 
         label_rect = QRectF(x - 40, text_top, 80, text_h)
         p.setPen(QColor(EREBUS["bone"]))
-        p.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, label)
+        p.drawText(
+            label_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, label
+        )
         last_label_x = x
 
     p.restore()

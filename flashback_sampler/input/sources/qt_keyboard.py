@@ -19,7 +19,7 @@ class KeyboardSource(QObject):
         target_widget.installEventFilter(self)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if event.type() != QEvent.KeyPress:
+        if event.type() != QEvent.Type.KeyPress:
             return False
         assert isinstance(event, QKeyEvent)
         code = self._event_to_code(event)
@@ -40,7 +40,14 @@ class KeyboardSource(QObject):
     @staticmethod
     def _event_to_code(event: QKeyEvent) -> str | None:
         # Ignore modifier-only presses
-        if event.key() in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+        if event.key() in (
+            Qt.Key.Key_Control,
+            Qt.Key.Key_Shift,
+            Qt.Key.Key_Alt,
+            Qt.Key.Key_Meta,
+        ):
             return None
-        seq = QKeySequence(event.keyCombination()).toString(QKeySequence.PortableText)
+        seq = QKeySequence(event.keyCombination()).toString(
+            QKeySequence.SequenceFormat.PortableText
+        )
         return seq or None

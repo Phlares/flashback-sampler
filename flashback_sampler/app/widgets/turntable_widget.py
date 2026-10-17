@@ -191,7 +191,7 @@ class TurntableWidget(QWidget):
 
     def paintEvent(self, ev) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         g = self._compute_geometry()
         colors = self._track_colors()
@@ -211,7 +211,7 @@ class TurntableWidget(QWidget):
             ring_outline_color.setAlpha(180)
             ring_pen_w = max(g.ring_width * 0.5, 2)
             p.setPen(QPen(ring_outline_color, ring_pen_w))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
             # Waveform bars carry their own colour and opacity — no
@@ -227,7 +227,7 @@ class TurntableWidget(QWidget):
             bar_color = QColor(colors[i])
             bar_color.setAlpha(220)
             bar_pen = QPen(bar_color, 1)
-            bar_pen.setCapStyle(Qt.FlatCap)
+            bar_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(bar_pen)
             arc_span_rad = fill_frac * 2 * math.pi
             play_angle_rad = math.radians(self.header_angle_deg())
@@ -262,7 +262,7 @@ class TurntableWidget(QWidget):
             edge_color.setAlpha(200)
             edge_pen = QPen(edge_color, 1)
             p.setPen(edge_pen)
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(QPointF(g.cx, g.cy), r_sel - band_half, r_sel - band_half)
             p.drawEllipse(QPointF(g.cx, g.cy), r_sel + band_half, r_sel + band_half)
 
@@ -295,18 +295,18 @@ class TurntableWidget(QWidget):
             )
             span = -dir_sign * (end_f - start_f) * fill_frac * 360.0
             band_w = max(g.ring_width * 0.8, 3)
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
 
             body = QColor(color_hex)
             body.setAlphaF(0.25)
             body_pen = QPen(body, band_w)
-            body_pen.setCapStyle(Qt.FlatCap)
+            body_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(body_pen)
             rect_body = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
             p.drawArc(rect_body, int(start_angle * 16), int(span * 16))
 
             edge_pen = QPen(QColor(color_hex), 1)
-            edge_pen.setCapStyle(Qt.FlatCap)
+            edge_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(edge_pen)
             r_outer = r + band_w / 2
             r_inner = r - band_w / 2
@@ -329,7 +329,7 @@ class TurntableWidget(QWidget):
             hy = g.cy - r * math.sin(header_angle_rad)
             rect = QRectF(hx - header_w / 2, hy - header_h / 2, header_w, header_h)
             p.setBrush(QColor(colors[i]))
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawRect(rect)
             # Status indicator light (small circle on the header)
             status = (
@@ -353,13 +353,13 @@ class TurntableWidget(QWidget):
             else:
                 color.setAlpha(120)
             p.setBrush(color)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QPointF(chip_x, chip_y), g.spindle_chip_r, g.spindle_chip_r)
 
         # ── Needle head (directly below selected rim header) ────────────
         needle_rect = g.needle_head_rect(self._side, self._selected_track)
         p.setBrush(QColor(EREBUS["cream"]))
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.drawRect(needle_rect)
 
         # ── Arm line from needle head to bottom-inner corner ────────────

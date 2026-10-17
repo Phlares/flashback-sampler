@@ -226,6 +226,6 @@ class PreferencesDialog(QDialog):
         root.addWidget(self.footprint_hint)
 
         root.addStretch(1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)

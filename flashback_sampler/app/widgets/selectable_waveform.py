@@ -67,7 +67,7 @@ class SelectableWaveform(WaveformView):
         self._dragging_edge: str | None = None  # "start" | "end" | None
         self._drag_out_origin: QPointF | None = None
         self._drag_out_mode: str | None = None  # "selection" | "full"
-        self._idle_cursor: Qt.CursorShape = Qt.CrossCursor
+        self._idle_cursor: Qt.CursorShape = Qt.CursorShape.CrossCursor
         self.setMouseTracking(True)
         self.setCursor(self._idle_cursor)
 
@@ -169,14 +169,14 @@ class SelectableWaveform(WaveformView):
     def _refresh_hover_cursor(self, x: float) -> None:
         """Update the mouse cursor based on whether we're over an edge."""
         if self._edge_at(x) is not None:
-            self.setCursor(Qt.SizeHorCursor)
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.setCursor(self._idle_cursor)
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton:
+        if ev.button() == Qt.MouseButton.LeftButton:
             # Priority 1: Ctrl+press arms a full-clip drag-out
-            if ev.modifiers() & Qt.ControlModifier:
+            if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self._drag_out_origin = ev.position()
                 self._drag_out_mode = "full"
                 ev.accept()
@@ -187,7 +187,7 @@ class SelectableWaveform(WaveformView):
                 self._dragging_edge = edge
                 self._is_dragging = False
                 self._drag_anchor = None
-                self.setCursor(Qt.SizeHorCursor)
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
                 ev.accept()
                 return
             # Priority 3: press inside the selection arms a drag-out
@@ -201,7 +201,7 @@ class SelectableWaveform(WaveformView):
             self._is_dragging = True
             ev.accept()
             return
-        if ev.button() == Qt.RightButton:
+        if ev.button() == Qt.MouseButton.RightButton:
             # Context menu: let the host decide what to show based on
             # whether a manual selection currently exists.
             self.contextMenuRequested.emit(ev.globalPosition())
@@ -258,13 +258,13 @@ class SelectableWaveform(WaveformView):
             return
 
         # Hover: update the cursor based on proximity to an edge
-        if ev.buttons() == Qt.NoButton:
+        if ev.buttons() == Qt.MouseButton.NoButton:
             self._refresh_hover_cursor(x)
 
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton:
+        if ev.button() == Qt.MouseButton.LeftButton:
             # An armed drag-out that never crossed the threshold is a
             # plain click — disarm and leave the selection untouched.
             if self._drag_out_origin is not None:
@@ -305,7 +305,7 @@ class SelectableWaveform(WaveformView):
         super().leaveEvent(ev)
 
     def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton:
+        if ev.button() == Qt.MouseButton.LeftButton:
             self.clear_manual_selection()
             ev.accept()
             return
@@ -335,7 +335,7 @@ class SelectableWaveform(WaveformView):
             return
 
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         s = float(self._manual_start)
         e = float(self._manual_end)
         x1 = inner_x + s * inner_w

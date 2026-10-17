@@ -277,13 +277,13 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     captured = []
     chip.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
-        QEvent.MouseButtonPress,
+        QEvent.Type.MouseButtonPress,
         chip.rect().center().toPointF()
         if hasattr(chip.rect().center(), "toPointF")
         else QPoint(5, 5),
-        Qt.RightButton,
-        Qt.RightButton,
-        Qt.NoModifier,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     chip.mousePressEvent(ev)
     assert len(captured) == 1
@@ -1318,7 +1318,7 @@ def test_flush_confirm_names_the_action_not_a_stale_seconds_figure(
 
     def question(parent, title, text, *a, **k):
         asked.append(text)
-        return tw.QMessageBox.Yes
+        return tw.QMessageBox.StandardButton.Yes
 
     monkeypatch.setattr(tw.QMessageBox, "question", question)
     flushed = []

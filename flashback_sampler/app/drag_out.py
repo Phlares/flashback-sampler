@@ -49,5 +49,5 @@ def perform_file_drag(
     """
     drag = QDrag(source_widget)
     drag.setMimeData(build_file_drag_mime(file_path))
-    action = drag.exec(Qt.CopyAction) if exec_fn is None else exec_fn(drag)
-    return action != Qt.IgnoreAction
+    action = drag.exec(Qt.DropAction.CopyAction) if exec_fn is None else exec_fn(drag)
+    return action != Qt.DropAction.IgnoreAction

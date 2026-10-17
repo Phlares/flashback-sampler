@@ -120,7 +120,7 @@ class TurntableWindow(QMainWindow):
 
         self.buffer_turntable = TurntableWidget(side="buffer")
         self.buffer_turntable.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         turntable_row.addWidget(self.buffer_turntable, stretch=1)
 
@@ -128,7 +128,9 @@ class TurntableWindow(QMainWindow):
         turntable_row.addWidget(self.center_bridge)
 
         self.clip_turntable = TurntableWidget(side="clip")
-        self.clip_turntable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.clip_turntable.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         turntable_row.addWidget(self.clip_turntable, stretch=1)
 
         root.addLayout(turntable_row, stretch=6)
@@ -142,7 +144,9 @@ class TurntableWindow(QMainWindow):
 
         self.out_btn = TactileButton("OUT →", variant="primary")
         self.out_btn.setFixedWidth(56)
-        self.out_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.out_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        )
 
         # Align OUT→ vertically with the container, not the full panel height.
         # Top spacing ≈ header row height (8pt label + panel top margin + spacing).
@@ -1379,7 +1383,7 @@ class TurntableWindow(QMainWindow):
         """Render for an OS drag; returns a DragRender or None on failure
         (already reported). A clip-deck drag mints a slice when the clip
         has a trim; otherwise the whole clip goes."""
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             if trimmed:
                 # A trimmed drag MINTS a slice, so it meets the same
@@ -2245,10 +2249,10 @@ class TurntableWindow(QMainWindow):
                 "clipping.\n\n"
                 "Continue?"
             ),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return False
         self._mux_warning_shown = True
         return True
@@ -2294,10 +2298,10 @@ class TurntableWindow(QMainWindow):
             self,
             "Flush buffer?",
             f"Flush all buffered audio on {slot.name!r}?",
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         slot.buffer.flush()
 
@@ -2314,10 +2318,10 @@ class TurntableWindow(QMainWindow):
                 "Existing checkouts on this slot will also be lost — "
                 "they live in the slot's CheckoutManager."
             ),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         try:
             self._state.remove_slot(slot_index)

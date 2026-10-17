@@ -39,7 +39,7 @@ class SourceIndicator(QWidget):
         self._severity = 0  # defensive-heal severity (0 OK/INFO · 2 WARN · 3 ERROR)
         self.setFixedHeight(16)
         self.setMinimumWidth(60)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_status(self, status: str) -> None:
         self._status = status
@@ -55,18 +55,18 @@ class SourceIndicator(QWidget):
             self.update()
 
     def mousePressEvent(self, ev):
-        if ev.button() == Qt.LeftButton:
+        if ev.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
-        elif ev.button() == Qt.RightButton:
+        elif ev.button() == Qt.MouseButton.RightButton:
             self.contextMenuRequested.emit(ev.globalPosition().toPoint())
 
     def paintEvent(self, ev):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         indicator_size = 8
         p.setBrush(QColor(STATUS_COLORS.get(self._status, "#B3ACAC")))
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         y_center = h // 2
         p.drawRect(2, y_center - indicator_size // 2, indicator_size, indicator_size)
         # Health glyph — only shown when there's a problem (warning/error),
@@ -82,11 +82,21 @@ class SourceIndicator(QWidget):
             p.setFont(gfont)
             p.setPen(QColor(0, 0, 0, 170))  # carved: shadow first
             p.drawText(
-                w - 13, 2, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev]
+                w - 13,
+                2,
+                12,
+                h,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
+                SEVERITY_GLYPH[sev],
             )
             p.setPen(QColor(SEVERITY_RING_COLOR[sev]))
             p.drawText(
-                w - 13, 1, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev]
+                w - 13,
+                1,
+                12,
+                h,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
+                SEVERITY_GLYPH[sev],
             )
         p.setPen(QColor(self._color))
         fam = font_family("label").split(",")[0].strip().strip('"')
@@ -95,7 +105,9 @@ class SourceIndicator(QWidget):
         font.setPointSize(7)
         font.setBold(False)
         p.setFont(font)
-        p.drawText(indicator_size + 6, 0, name_w, h, Qt.AlignVCenter, self._name)
+        p.drawText(
+            indicator_size + 6, 0, name_w, h, Qt.AlignmentFlag.AlignVCenter, self._name
+        )
         p.end()
 
 

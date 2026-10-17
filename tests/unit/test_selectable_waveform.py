@@ -155,21 +155,30 @@ def test_drag_end_edge_cannot_cross_start(qapp):
 
 
 def _mouse_ev(
-    kind, x, y=100.0, button=Qt.LeftButton, buttons=Qt.LeftButton, mods=Qt.NoModifier
+    kind,
+    x,
+    y=100.0,
+    button=Qt.MouseButton.LeftButton,
+    buttons=Qt.MouseButton.LeftButton,
+    mods=Qt.KeyboardModifier.NoModifier,
 ):
     return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, mods)
 
 
-def _press(w, x, mods=Qt.NoModifier):
-    w.mousePressEvent(_mouse_ev(QEvent.MouseButtonPress, x, mods=mods))
+def _press(w, x, mods=Qt.KeyboardModifier.NoModifier):
+    w.mousePressEvent(_mouse_ev(QEvent.Type.MouseButtonPress, x, mods=mods))
 
 
-def _move(w, x, mods=Qt.NoModifier):
-    w.mouseMoveEvent(_mouse_ev(QEvent.MouseMove, x, button=Qt.NoButton, mods=mods))
+def _move(w, x, mods=Qt.KeyboardModifier.NoModifier):
+    w.mouseMoveEvent(
+        _mouse_ev(QEvent.Type.MouseMove, x, button=Qt.MouseButton.NoButton, mods=mods)
+    )
 
 
 def _release(w, x):
-    w.mouseReleaseEvent(_mouse_ev(QEvent.MouseButtonRelease, x, buttons=Qt.NoButton))
+    w.mouseReleaseEvent(
+        _mouse_ev(QEvent.Type.MouseButtonRelease, x, buttons=Qt.MouseButton.NoButton)
+    )
 
 
 def test_press_inside_selection_and_drag_emits_drag_out(qapp):
@@ -211,8 +220,10 @@ def test_ctrl_press_and_drag_emits_full_clip(qapp):
     w = _new_wave(qapp, width=1012)
     got = []
     w.dragFullClipRequested.connect(lambda: got.append(True))
-    _press(w, 300, mods=Qt.ControlModifier)
-    _move(w, 300 + _QApp.startDragDistance() + 1, mods=Qt.ControlModifier)
+    _press(w, 300, mods=Qt.KeyboardModifier.ControlModifier)
+    _move(
+        w, 300 + _QApp.startDragDistance() + 1, mods=Qt.KeyboardModifier.ControlModifier
+    )
     assert got == [True]
 
 
