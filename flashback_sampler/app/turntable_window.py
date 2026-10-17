@@ -405,7 +405,7 @@ class TurntableWindow(QMainWindow):
             )
             self._tray.show()
             # Keep capture alive when the last window is hidden/closed.
-            QApplication.instance().setQuitOnLastWindowClosed(False)
+            QApplication.setQuitOnLastWindowClosed(False)
         # Poll source health at 1 Hz — drives the in-app chip badges always,
         # and the tray ring/tooltip + error toasts when a tray exists.
         self._status_timer = QTimer(self)
@@ -433,7 +433,7 @@ class TurntableWindow(QMainWindow):
         self.close()
         if self._tray is not None:
             self._tray.hide()
-        QApplication.instance().quit()
+        QApplication.quit()
 
     def _sync_tray(self) -> None:
         if self._tray is not None:

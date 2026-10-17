@@ -1619,3 +1619,35 @@ def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(
         assert [i for i in ids if mgr.get(i).parent_id == co.id]  # the slice was minted
     finally:
         win.close()
+
+
+def _no_app_instance(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: None))
+
+
+def test_tray_setup_without_app(qapp, state, monkeypatch):
+    """With a tray, the window keeps the app alive past its last window.
+    That call must not need a QApplication instance."""
+    import flashback_sampler.app.turntable_window as tw
+
+    monkeypatch.setattr(tw, "tray_supported", lambda: True)
+    _no_app_instance(monkeypatch)
+    keep = qapp.quitOnLastWindowClosed()
+    win = TurntableWindow(state)
+    try:
+        assert win._tray is not None
+        assert not qapp.quitOnLastWindowClosed()
+    finally:
+        win.close()
+        qapp.setQuitOnLastWindowClosed(keep)
+
+
+def test_request_quit_without_app(qapp, state, monkeypatch):
+    """Tray Quit tears the window down even when there is no
+    QApplication instance to quit."""
+    win = TurntableWindow(state)
+    _no_app_instance(monkeypatch)
+    win._request_quit()
+    assert win._quitting
