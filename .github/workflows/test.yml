@@ -69,7 +69,7 @@ jobs:
       run: prek run --all-files --show-diff-on-failure
 
   typecheck:
-    uses: Phlares/workflows/.github/workflows/check.yml@ef4ee4741aa6ee0017a6446b55356e50bf635c49 # v1.0.0
+    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
     with:
       name: typecheck
       python-version: "3.12"
