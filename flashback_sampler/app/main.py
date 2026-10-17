@@ -77,7 +77,6 @@ def _run(app: QApplication, args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    int("x", base="ten")
     args = _parse_args(sys.argv[1:])
     app = QApplication(sys.argv)
     app.setApplicationName("flashback-sampler")
