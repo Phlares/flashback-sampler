@@ -350,9 +350,9 @@ def test_save_validation(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.1)
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")
+        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")  # pyright: ignore[reportArgumentType]  # invalid on purpose
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")
+        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")  # pyright: ignore[reportArgumentType]  # invalid on purpose
     with pytest.raises(KeyError):
         mgr.save("nope", tmp_path / "x.wav")
     with pytest.raises(KeyError):

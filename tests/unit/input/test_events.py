@@ -21,7 +21,7 @@ def test_input_event_is_frozen():
     import dataclasses
 
     try:
-        e.code = "F14"
+        e.code = "F14"  # pyright: ignore[reportAttributeAccessIssue]  # proves the field is frozen
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("InputEvent must be frozen")
