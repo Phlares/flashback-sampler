@@ -1,12 +1,13 @@
 name: test
 
-# Three jobs, all run through Phlares/workflows check.yml: pytest on
+# Four jobs, all run through Phlares/workflows check.yml: pytest on
 # Windows (py3.12, the version release.yml ships; it builds the DLL
-# anyway), the Zig unit tests on Ubuntu, and `lint`, which runs the hooks
-# in .pre-commit-config.yaml (ruff and zig fmt) on every file. Hard
-# timeouts so a hung test stops in minutes. Every pull request runs all
-# three jobs: `main` and `dev` require them, and a skipped check blocks
-# the merge. Docs-only pushes skip it; nothing requires a check there.
+# anyway), the Zig unit tests on Ubuntu, `lint`, which runs the hooks
+# in .pre-commit-config.yaml (ruff and zig fmt) on every file, and
+# `typecheck`, which runs pyright on Ubuntu. Hard timeouts so a hung test
+# stops in minutes. Every pull request runs all four jobs: `main` and
+# `dev` require them, and a skipped check blocks the merge. Docs-only
+# pushes skip it; nothing requires a check there.
 on:
   push:
     branches: [main, dev]
@@ -66,3 +67,16 @@ jobs:
       # moves both files.
       install: pip install --require-hashes -r requirements-lint.txt
       run: prek run --all-files --show-diff-on-failure
+
+  typecheck:
+    uses: Phlares/workflows/.github/workflows/check.yml@ef4ee4741aa6ee0017a6446b55356e50bf635c49 # v1.0.0
+    with:
+      name: typecheck
+      python-version: "3.12"
+      timeout-minutes: 5
+      # pyright is pinned by hash in requirements-typecheck.txt (compiled from
+      # requirements-typecheck.in); Dependabot moves both files.
+      install: |
+        pip install --require-hashes -r requirements-typecheck.txt
+        pip install -e ".[dev]"
+      run: pyright
