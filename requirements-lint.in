@@ -1,0 +1,3 @@
+# The lint runner for CI. Hook versions live in .pre-commit-config.yaml.
+# Lock: the uv command in the header of requirements-lint.txt.
+prek
