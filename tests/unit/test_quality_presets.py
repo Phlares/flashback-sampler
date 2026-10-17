@@ -119,9 +119,7 @@ def test_preset_ram_matches_function():
         assert p.ram_bytes() == compute_ram_bytes(
             p.sample_rate, p.channels, p.buffer_seconds
         )
-        assert p.ram_mb() == compute_ram_mb(
-            p.sample_rate, p.channels, p.buffer_seconds
-        )
+        assert p.ram_mb() == compute_ram_mb(p.sample_rate, p.channels, p.buffer_seconds)
 
 
 def test_presets_match_expected_ram_footprints():
@@ -131,11 +129,11 @@ def test_presets_match_expected_ram_footprints():
     bug would fail here.
     """
     expected_mb = {
-        "FULL":    329.59,   # 345_600_000 / 1024^2
-        "MUSIC":   109.86,   # 115_200_000 / 1024^2
-        "VOICE":    75.70,   #  79_380_000 / 1024^2
-        "CHAT":     36.62,   #  38_400_000 / 1024^2
-        "SCRATCH":  10.99,   #  11_520_000 / 1024^2
+        "FULL": 329.59,  # 345_600_000 / 1024^2
+        "MUSIC": 109.86,  # 115_200_000 / 1024^2
+        "VOICE": 75.70,  #  79_380_000 / 1024^2
+        "CHAT": 36.62,  #  38_400_000 / 1024^2
+        "SCRATCH": 10.99,  #  11_520_000 / 1024^2
     }
     for p in PRESETS:
         assert p.ram_mb() == pytest.approx(expected_mb[p.name], abs=0.05)

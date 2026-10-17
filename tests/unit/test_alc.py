@@ -14,7 +14,10 @@ from flashback_sampler.core import alc
 # is gitignored), so the byte-identity round trip runs only where it is.
 CAPTURE = (
     Path(__file__).resolve().parents[2]
-    / ".superpowers" / "sdd" / "2026-08-30-checkout-persistence" / "spike-capture.xml"
+    / ".superpowers"
+    / "sdd"
+    / "2026-08-30-checkout-persistence"
+    / "spike-capture.xml"
 )
 
 # What Live wrote for the capture: a 10-15 s clip of a 30 s, 48 kHz,
@@ -45,9 +48,18 @@ SUBSTITUTED = dict(
 # The elements render_alc_xml is allowed to touch, in document order.
 # `Path` and `RelativePath` are the template's two placeholders.
 SUBSTITUTED_ELEMENTS = [
-    "CurrentEnd", "LoopStart", "LoopEnd", "HiddenLoopEnd", "Name",
-    "RelativePath", "Path", "OriginalFileSize", "DefaultDuration",
-    "DefaultSampleRate", "WarpMarker", "WarpMarker",
+    "CurrentEnd",
+    "LoopStart",
+    "LoopEnd",
+    "HiddenLoopEnd",
+    "Name",
+    "RelativePath",
+    "Path",
+    "OriginalFileSize",
+    "DefaultDuration",
+    "DefaultSampleRate",
+    "WarpMarker",
+    "WarpMarker",
 ]
 
 
@@ -65,7 +77,9 @@ def _value(clip: ET.Element, path: str) -> str:
     return clip.find(path).get("Value")
 
 
-@pytest.mark.skipif(not CAPTURE.exists(), reason="spike capture is a local working note")
+@pytest.mark.skipif(
+    not CAPTURE.exists(), reason="spike capture is a local working note"
+)
 def test_the_captured_values_round_trip_to_the_capture_byte_for_byte():
     """The template is the capture with two placeholders; substituting
     Live's own values back must reproduce Live's file exactly. Anything
@@ -84,7 +98,7 @@ def test_write_alc_gzips_xml_that_reads_back_as_the_substituted_values(tmp_path)
     assert _value(clip, "Loop/LoopStart") == "1.5"
     assert _value(clip, "Loop/LoopEnd") == "3.5"
     assert _value(clip, "Loop/HiddenLoopStart") == "0"
-    assert _value(clip, "Loop/HiddenLoopEnd") == "4"          # 96000 / 24000 s
+    assert _value(clip, "Loop/HiddenLoopEnd") == "4"  # 96000 / 24000 s
     assert _value(clip, "CurrentStart") == "0"
     assert _value(clip, "CurrentEnd") == "4.266666666666667"  # 2 s at 128 BPM
     assert _value(clip, "Name") == "deck_a_20260715-130509_2.0s"
@@ -124,10 +138,16 @@ def test_render_alc_xml_escapes_a_quote_in_the_path(tmp_path):
     """A double quote would close the attribute Live reads the path from.
     Legal in a POSIX file name, so escape it rather than trust the OS."""
     xml = alc.render_alc_xml(
-        wav_path=Path('/pool/say "hi".wav'), relative_path='say "hi".wav',
-        start_s=0.0, end_s=1.0, frames=48000, rate=48000, size=44,
+        wav_path=Path('/pool/say "hi".wav'),
+        relative_path='say "hi".wav',
+        start_s=0.0,
+        end_s=1.0,
+        frames=48000,
+        rate=48000,
+        size=44,
     )
     import xml.etree.ElementTree as _ET
+
     clip = next(_ET.fromstring(xml).iter("AudioClip"))
     assert clip.find("SampleRef/FileRef/Path").get("Value") == '/pool/say "hi".wav'
     assert clip.find("Name").get("Value") == 'say "hi"'
@@ -173,8 +193,13 @@ def test_numbers_are_plain_decimals_never_exponents():
     it in exponent notation -- which the capture never contains and Live
     has never been shown to parse."""
     xml = alc.render_alc_xml(
-        wav_path=Path("/pool/take.wav"), relative_path="take.wav",
-        start_s=1 / 48000, end_s=2 / 48000, frames=48000, rate=48000, size=44,
+        wav_path=Path("/pool/take.wav"),
+        relative_path="take.wav",
+        start_s=1 / 48000,
+        end_s=2 / 48000,
+        frames=48000,
+        rate=48000,
+        size=44,
     )
     clip = next(ET.fromstring(xml).iter("AudioClip"))
     start = clip.find("Loop/LoopStart").get("Value")

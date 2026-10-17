@@ -153,12 +153,18 @@ class WaveformView(QWidget):
             p.setFont(label_font)
             p.setPen(QColor(EREBUS["bone"]))
             p.drawText(
-                6, 1, w - 12, label_strip,
+                6,
+                1,
+                w - 12,
+                label_strip,
                 Qt.AlignLeft | Qt.AlignVCenter,
                 self._label_top.upper(),
             )
             p.drawText(
-                6, 1, w - 12, label_strip,
+                6,
+                1,
+                w - 12,
+                label_strip,
                 Qt.AlignRight | Qt.AlignVCenter,
                 self._label_right.upper(),
             )
@@ -190,9 +196,7 @@ class WaveformView(QWidget):
             else:
                 mid = inner_y + inner_h / 2
                 safe_half = max(1.0, (inner_h - 4) / 2)
-                lines = _make_peak_lines(
-                    bins, 0, inner_x, bin_width, mid, safe_half
-                )
+                lines = _make_peak_lines(bins, 0, inner_x, bin_width, mid, safe_half)
                 p.setPen(QPen(signal, 1))
                 p.drawLines(lines)
 
@@ -218,14 +222,10 @@ class WaveformView(QWidget):
                 # Dashed start edge (informational)
                 dash_pen = QPen(QColor(EREBUS["ember"]), 1, Qt.DashLine)
                 p.setPen(dash_pen)
-                p.drawLine(
-                    QLineF(x1, float(inner_y), x1, float(inner_y + inner_h))
-                )
+                p.drawLine(QLineF(x1, float(inner_y), x1, float(inner_y + inner_h)))
                 # Solid end edge (where the commit lands)
                 p.setPen(QPen(QColor(EREBUS["ember"]), 2))
-                p.drawLine(
-                    QLineF(x2, float(inner_y), x2, float(inner_y + inner_h))
-                )
+                p.drawLine(QLineF(x2, float(inner_y), x2, float(inner_y + inner_h)))
                 # Duration label centered inside the band
                 if self._timeline_total_s > 0:
                     dur = (e - s) * self._timeline_total_s
@@ -245,9 +245,7 @@ class WaveformView(QWidget):
             x = inner_x + frac * inner_w
             p.setRenderHint(QPainter.Antialiasing, True)
             p.setPen(QPen(QColor(EREBUS["ember"]), 1.2))
-            p.drawLine(
-                QLineF(x, float(inner_y), x, float(inner_y + inner_h))
-            )
+            p.drawLine(QLineF(x, float(inner_y), x, float(inner_y + inner_h)))
             p.setRenderHint(QPainter.Antialiasing, False)
 
         # ── 8. Timeline strip (bottom edge) ──────────────────────────
@@ -332,8 +330,21 @@ def _pick_timeline_step(total_seconds: float, pixel_width: int) -> tuple[float, 
 
     # Candidate major step sizes in seconds, smallest to largest
     CANDIDATES: tuple[float, ...] = (
-        0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0,
-        60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
+        0.1,
+        0.2,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        15.0,
+        30.0,
+        60.0,
+        120.0,
+        300.0,
+        600.0,
+        1800.0,
+        3600.0,
     )
     target_label_spacing_px = 70
     seconds_per_pixel = total_seconds / pixel_width

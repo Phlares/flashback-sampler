@@ -70,6 +70,7 @@ def _run(app: QApplication, args: argparse.Namespace) -> int:
     if state is None:
         return 1
     from flashback_sampler.app.turntable_window import TurntableWindow
+
     window = TurntableWindow(state)
     window.show()
 

@@ -1,4 +1,5 @@
 """Tests for CenterBridge widget."""
+
 from __future__ import annotations
 
 

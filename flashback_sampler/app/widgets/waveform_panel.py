@@ -1,4 +1,5 @@
 """WaveformPanel — header labels + linear WaveformView + time readouts."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -30,9 +31,7 @@ class WaveformPanel(QWidget):
         header.addWidget(self.source_label)
 
         self.duration_label = QLabel("3:00" if side == "buffer" else "")
-        self.duration_label.setStyleSheet(
-            f"color: {EREBUS['bone']}; font-size: 8pt;"
-        )
+        self.duration_label.setStyleSheet(f"color: {EREBUS['bone']}; font-size: 8pt;")
         header.addWidget(self.duration_label)
 
         header.addStretch()
@@ -44,9 +43,7 @@ class WaveformPanel(QWidget):
         header.addWidget(self.title_label)
 
         self.clip_id_label = QLabel("" if side == "buffer" else "XYZ123")
-        self.clip_id_label.setStyleSheet(
-            f"color: {EREBUS['cream']}; font-size: 8pt;"
-        )
+        self.clip_id_label.setStyleSheet(f"color: {EREBUS['cream']}; font-size: 8pt;")
         header.addWidget(self.clip_id_label)
 
         layout.addLayout(header)
@@ -70,15 +67,11 @@ class WaveformPanel(QWidget):
         # Time readouts
         time_row = QHBoxLayout()
         self.time_left_label = QLabel("-07:31" if side == "buffer" else "00:00")
-        self.time_left_label.setStyleSheet(
-            f"color: {EREBUS['ash']}; font-size: 7pt;"
-        )
+        self.time_left_label.setStyleSheet(f"color: {EREBUS['ash']}; font-size: 7pt;")
         time_row.addWidget(self.time_left_label)
         time_row.addStretch()
         self.time_right_label = QLabel("" if side == "buffer" else "14:55")
-        self.time_right_label.setStyleSheet(
-            f"color: {EREBUS['ash']}; font-size: 7pt;"
-        )
+        self.time_right_label.setStyleSheet(f"color: {EREBUS['ash']}; font-size: 7pt;")
         time_row.addWidget(self.time_right_label)
         inner.addLayout(time_row)
 
@@ -107,6 +100,10 @@ class WaveformPanel(QWidget):
         # Shape (n_bins, 2, channels): first inner index is min, second is max
         bins = np.zeros((n_bins, 2, channels), dtype=np.float32)
         for ch in range(channels):
-            bins[:, 0, ch] = (base - 0.1 - 0.05 * rng.standard_normal(n_bins)).astype(np.float32)
-            bins[:, 1, ch] = (base + 0.1 + 0.05 * rng.standard_normal(n_bins)).astype(np.float32)
+            bins[:, 0, ch] = (base - 0.1 - 0.05 * rng.standard_normal(n_bins)).astype(
+                np.float32
+            )
+            bins[:, 1, ch] = (base + 0.1 + 0.05 * rng.standard_normal(n_bins)).astype(
+                np.float32
+            )
         self.waveform.set_data(bins)

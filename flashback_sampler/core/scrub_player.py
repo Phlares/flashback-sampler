@@ -8,6 +8,7 @@ through atomics (core/src/Playback.zig). Nothing here touches frames.
 that rate and the OS resamples to the mix rate. Playback auto-stops at
 the end of the clip (no loop); `play` at the end rewinds.
 """
+
 from __future__ import annotations
 
 import ctypes as C
@@ -39,9 +40,13 @@ class NativeScrubPlayer:
             if lib is None:
                 raise RuntimeError("flashback_core library not available")
             self._lib = lib
-            self._h = lib.fb_playback_create(self.device.encode("utf-8"), self.sample_rate, self.channels)
+            self._h = lib.fb_playback_create(
+                self.device.encode("utf-8"), self.sample_rate, self.channels
+            )
             if not self._h:
-                raise RuntimeError("fb_playback_create failed (bad args, or no render backend on this OS)")
+                raise RuntimeError(
+                    "fb_playback_create failed (bad args, or no render backend on this OS)"
+                )
         return self._h
 
     # -- transport ------------------------------------------------------
@@ -50,22 +55,32 @@ class NativeScrubPlayer:
             return
         audio = native._frames2d(audio)
         n_frames, channels = audio.shape
-        status = self._lib.fb_playback_bind(self._h, native._as_f32p(audio), n_frames, int(sample_rate), channels)
+        status = self._lib.fb_playback_bind(
+            self._h, native._as_f32p(audio), n_frames, int(sample_rate), channels
+        )
         if status == native._INVALID_ARG:
-            raise ValueError(f"fb_playback_bind rejected {n_frames} frames x {channels} ch at {sample_rate} Hz")
+            raise ValueError(
+                f"fb_playback_bind rejected {n_frames} frames x {channels} ch at {sample_rate} Hz"
+            )
         if status == native._OUT_OF_MEMORY:
-            raise MemoryError(f"fb_playback_bind: could not allocate {audio.nbytes} bytes")
+            raise MemoryError(
+                f"fb_playback_bind: could not allocate {audio.nbytes} bytes"
+            )
         if status != native._OK:
             raise RuntimeError(f"fb_playback_bind failed with status {status}")
         self.sample_rate = int(sample_rate)
         self.channels = int(channels)
 
-    def bind_checkout(self, scratch, h: int, start: int, n: int, sample_rate: int, channels: int) -> None:
+    def bind_checkout(
+        self, scratch, h: int, start: int, n: int, sample_rate: int, channels: int
+    ) -> None:
         """Bind `[start, start + n)` of a checkout handle: Zig copies from
         the checkout's RAM copy or reads its file — no numpy round trip."""
         if not self._handle():
             return
-        status = self._lib.fb_playback_bind_checkout(self._h, scratch.handle, h, int(start), int(n))
+        status = self._lib.fb_playback_bind_checkout(
+            self._h, scratch.handle, h, int(start), int(n)
+        )
         if status == native._INVALID_ARG:
             raise ValueError(f"fb_playback_bind_checkout rejected span {start}+{n}")
         if status == native._OUT_OF_MEMORY:
@@ -80,7 +95,9 @@ class NativeScrubPlayer:
             return
         status = self._lib.fb_playback_play(self._h)
         if status != native._OK:
-            raise RuntimeError(f"fb_playback_play failed with status {status}: {self.last_error() or ''}")
+            raise RuntimeError(
+                f"fb_playback_play failed with status {status}: {self.last_error() or ''}"
+            )
 
     def pause(self) -> None:
         if self._h:

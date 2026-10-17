@@ -34,8 +34,10 @@ BYTES_PER_SAMPLE = {"FLOAT": 4, "PCM_24": 3, "PCM_16": 2}
 @dataclass(frozen=True)
 class DragRender:
     path: Path
-    checkout_id: str  # the checkout the drop commits (a minted slice, or the clip itself)
-    minted: bool      # True when the render created a slice checkout
+    checkout_id: (
+        str  # the checkout the drop commits (a minted slice, or the clip itself)
+    )
+    minted: bool  # True when the render created a slice checkout
     sidecar: Path | None = None  # the .alc offered alongside `path`, when written
 
 
@@ -107,18 +109,26 @@ def _export(
         if not (alc and markers):
             return None
         return write_alc(
-            target.with_suffix(".alc"), target,
-            markers[0] / rate, markers[1] / rate, frames=n, rate=rate,
+            target.with_suffix(".alc"),
+            target,
+            markers[0] / rate,
+            markers[1] / rate,
+            frames=n,
+            rate=rate,
         )
     except BaseException:
         target.unlink(missing_ok=True)
         raise
 
 
-def _target(pool_dir: Path | str, source_name: str, duration_s: float, now: datetime | None) -> Path:
+def _target(
+    pool_dir: Path | str, source_name: str, duration_s: float, now: datetime | None
+) -> Path:
     pool = Path(pool_dir)
     pool.mkdir(parents=True, exist_ok=True)
-    return resolve_collision(pool / drag_filename(source_name, now or datetime.now(), duration_s))
+    return resolve_collision(
+        pool / drag_filename(source_name, now or datetime.now(), duration_s)
+    )
 
 
 def render_root_drag(
@@ -143,7 +153,15 @@ def render_root_drag(
         markers = (start, start + n)
     target = _target(pool_dir, source_name, co.duration_seconds, now)
     sidecar = _export(
-        manager, checkout_id, target, 0, co.n_frames, bit_depth, markers, alc, co.sample_rate
+        manager,
+        checkout_id,
+        target,
+        0,
+        co.n_frames,
+        bit_depth,
+        markers,
+        alc,
+        co.sample_rate,
     )
     return DragRender(target, checkout_id, False, sidecar)
 
@@ -166,7 +184,13 @@ def render_slice_drag(
     co = manager.get(checkout_id)
     if not co.has_trim():
         return render_root_drag(
-            manager, checkout_id, pool_dir, source_name, bit_depth=bit_depth, alc=alc, now=now
+            manager,
+            checkout_id,
+            pool_dir,
+            source_name,
+            bit_depth=bit_depth,
+            alc=alc,
+            now=now,
         )
     start, n = co.trim_range()
     s = manager.mint_trim(checkout_id)
@@ -175,7 +199,9 @@ def render_slice_drag(
         # so the trim goes from the RAM copy like the full drag does,
         # without handles or markers, and the drop commits the clip.
         target = _target(pool_dir, source_name, n / co.sample_rate, now)
-        _export(manager, checkout_id, target, start, n, bit_depth, None, alc, co.sample_rate)
+        _export(
+            manager, checkout_id, target, start, n, bit_depth, None, alc, co.sample_rate
+        )
         return DragRender(target, checkout_id, False)
     # The export is the only step left that can strand the slice: the
     # caller never receives a DragRender, so it has no id to discard, and
@@ -183,12 +209,26 @@ def render_slice_drag(
     # disk, a refcount on the parent file) at the next launch. Undo the
     # mint here, where the id is still known.
     try:
-        lo, hi = export_span(co.n_frames, start, start + n, co.channels, BYTES_PER_SAMPLE[bit_depth], handle_mb)
+        lo, hi = export_span(
+            co.n_frames,
+            start,
+            start + n,
+            co.channels,
+            BYTES_PER_SAMPLE[bit_depth],
+            handle_mb,
+        )
         target = _target(pool_dir, source_name, n / co.sample_rate, now)
         # Markers are relative to the EXPORTED file, so rebase by lo.
         sidecar = _export(
-            manager, checkout_id, target, lo, hi - lo, bit_depth,
-            (start - lo, start + n - lo), alc, co.sample_rate,
+            manager,
+            checkout_id,
+            target,
+            lo,
+            hi - lo,
+            bit_depth,
+            (start - lo, start + n - lo),
+            alc,
+            co.sample_rate,
         )
     except BaseException:
         # discard() drops the manifest and the refcount; the parent's file

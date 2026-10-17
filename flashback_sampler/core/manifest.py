@@ -42,7 +42,9 @@ class Manifest:
     abs_end: int
     created_at: float
     parent: Optional[str]
-    file: str  # id of the checkout whose `<id>.wav` holds the audio; a root names itself
+    file: (
+        str  # id of the checkout whose `<id>.wav` holds the audio; a root names itself
+    )
     start_frame: int
     n_frames: int
     trim_in: int
@@ -140,7 +142,9 @@ def resolve_audio(scratch_dir: Path | str, m: Manifest) -> Optional[tuple[Path, 
 
 
 def bins_to_json(bins: dict[str, np.ndarray]) -> dict:
-    return {k: np.asarray(v, dtype=np.float32).ravel().tolist() for k, v in bins.items()}
+    return {
+        k: np.asarray(v, dtype=np.float32).ravel().tolist() for k, v in bins.items()
+    }
 
 
 def bins_from_json(d: Optional[dict], channels: int) -> dict[str, np.ndarray]:

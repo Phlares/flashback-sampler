@@ -96,9 +96,7 @@ class ProcessPickerDialog(QDialog):
         root.addWidget(self._list, 1)
 
         # OK / Cancel
-        btns = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
@@ -107,7 +105,9 @@ class ProcessPickerDialog(QDialog):
         if not hasattr(self, "_list"):
             return
         self._all_rows = native.list_processes()
-        self._apply_filter(self._filter_edit.text() if hasattr(self, "_filter_edit") else "")
+        self._apply_filter(
+            self._filter_edit.text() if hasattr(self, "_filter_edit") else ""
+        )
 
     def _on_filter_changed(self, text: str) -> None:
         self._apply_filter(text)

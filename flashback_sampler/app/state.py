@@ -56,7 +56,11 @@ class AppState:
         # One per AppState; every slot's CheckoutManager writes through
         # it. Checkouts scratch to <scratch_dir>/<id>.wav on creation
         # (epic #53). Budget in bytes; 0 = only pinned/in-flight stay.
-        requested_scratch_dir = Path(scratch_dir) if scratch_dir is not None else app_config.load_scratch_dir()
+        requested_scratch_dir = (
+            Path(scratch_dir)
+            if scratch_dir is not None
+            else app_config.load_scratch_dir()
+        )
         # F1: an uncreatable configured scratch dir (bad drive letter, no
         # permission, a stale removable-media path, ...) must not brick
         # every launch. Fall back to the app-owned cache dir, which is
@@ -73,7 +77,11 @@ class AppState:
                 f"Could not use scratch folder {requested_scratch_dir}: {e}. "
                 f"Using {self.scratch_dir} instead."
             )
-        cache_mb = app_config.load_checkout_cache_mb() if checkout_cache_mb is None else float(checkout_cache_mb)
+        cache_mb = (
+            app_config.load_checkout_cache_mb()
+            if checkout_cache_mb is None
+            else float(checkout_cache_mb)
+        )
         self.scratch = NativeScratch(budget_bytes=int(cache_mb * 1024 * 1024))
         self.scratch.start()
 
@@ -230,22 +238,39 @@ class AppState:
             try:
                 slot = where.get(m.parent) if m.parent is not None else None
                 if slot is not None:
-                    co = slot.checkout_manager.adopt_slice(m, slot.checkout_manager.get(m.parent))
+                    co = slot.checkout_manager.adopt_slice(
+                        m, slot.checkout_manager.get(m.parent)
+                    )
                 else:
                     # A root, or an orphaned slice whose parent left the
                     # manifests: both open over `<m.file>.wav` at their
                     # own span. Skipping the orphan would pin the root's
                     # WAV forever.
-                    found = resolve_audio(self.scratch_dir, m)  # renames a lone .wav.part into place
+                    found = resolve_audio(
+                        self.scratch_dir, m
+                    )  # renames a lone .wav.part into place
                     if found is None:
                         continue
                     audio, partial = found
-                    slot = next((s for s in self.slots if s.sample_rate == m.rate and s.channels == m.channels), None)
+                    slot = next(
+                        (
+                            s
+                            for s in self.slots
+                            if s.sample_rate == m.rate and s.channels == m.channels
+                        ),
+                        None,
+                    )
                     if slot is None:
                         slot = self.add_slot(
-                            QualityPreset(name="ADOPTED", sample_rate=int(m.rate), channels=int(m.channels),
-                                          buffer_seconds=60.0, description="Slot recreated for adopted checkouts"),
-                            name=m.slot or "Adopted", armed=False,
+                            QualityPreset(
+                                name="ADOPTED",
+                                sample_rate=int(m.rate),
+                                channels=int(m.channels),
+                                buffer_seconds=60.0,
+                                description="Slot recreated for adopted checkouts",
+                            ),
+                            name=m.slot or "Adopted",
+                            armed=False,
                         )
                     co = slot.checkout_manager.adopt_root(m, audio, partial)
             except Exception:
@@ -255,7 +280,9 @@ class AppState:
             adopted.append(co)
         return adopted
 
-    def effective_capture_spec_for_slot(self, slot: CaptureSlot) -> Optional[CaptureDevice]:
+    def effective_capture_spec_for_slot(
+        self, slot: CaptureSlot
+    ) -> Optional[CaptureDevice]:
         """
         Return the capture device that should actually be used to open
         a source for `slot`. Slot-level override wins; falls back to
@@ -432,8 +459,11 @@ class AppState:
         if out is None:
             return None
         hits = [
-            (slot, d) for slot in self.slots if slot.armed
-            for d in self.capture_specs_for_slot(slot) if captures_preview(d, out)
+            (slot, d)
+            for slot in self.slots
+            if slot.armed
+            for d in self.capture_specs_for_slot(slot)
+            if captures_preview(d, out)
         ]
         if not hits:
             return None

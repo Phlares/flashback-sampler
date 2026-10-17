@@ -15,7 +15,10 @@ def default_storage_path() -> Path:
     # as the author segment (…/flashback-sampler/flashback-sampler). This is
     # only the fallback when no path is injected; the app injects a path that
     # co-locates bindings.json with its config.json.
-    return Path(platformdirs.user_config_dir("flashback-sampler", appauthor=False)) / "bindings.json"
+    return (
+        Path(platformdirs.user_config_dir("flashback-sampler", appauthor=False))
+        / "bindings.json"
+    )
 
 
 class BindingTable:
@@ -56,8 +59,11 @@ class BindingTable:
         }
         # …and any explicit-null override on this action's own default code.
         a = actions.get(action_id)
-        if (a is not None and a.default_binding in new_overrides
-                and new_overrides[a.default_binding] is None):
+        if (
+            a is not None
+            and a.default_binding in new_overrides
+            and new_overrides[a.default_binding] is None
+        ):
             del new_overrides[a.default_binding]
         # Re-derive through the single normalization path so the suppression
         # set never goes stale (e.g. when actions share a default code).
@@ -79,7 +85,8 @@ class BindingTable:
         editing in the dialog is identical to reloading from disk.
         """
         self._overrides = {
-            str(code): aid for code, aid in overrides.items()
+            str(code): aid
+            for code, aid in overrides.items()
             if aid is None or isinstance(aid, str)
         }
         self._overridden_action_ids = {
@@ -152,6 +159,9 @@ class BindingTable:
             code = a.default_binding
             # Default applies only if its code isn't overridden (by a null or by
             # another action) and the action's default isn't suppressed.
-            if code not in self._overrides and action_id not in self._overridden_action_ids:
+            if (
+                code not in self._overrides
+                and action_id not in self._overridden_action_ids
+            ):
                 return code
         return None

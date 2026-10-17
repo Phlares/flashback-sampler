@@ -111,9 +111,7 @@ class TactileButton(QPushButton):
             # Round only the bottom corners of the bar to match the
             # button's rounded rectangle
             bar_h = 2
-            p.drawRoundedRect(
-                0, h - bar_h - 1, w, bar_h + 1, radius, radius
-            )
+            p.drawRoundedRect(0, h - bar_h - 1, w, bar_h + 1, radius, radius)
             # Paint over the top of the rounded bar so we only see the
             # bottom rounded corners (a flat top edge meeting the fill)
             p.setBrush(fill)

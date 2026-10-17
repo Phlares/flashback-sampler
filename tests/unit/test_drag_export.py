@@ -12,8 +12,14 @@ from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScrat
 from flashback_sampler.core.checkout import CheckoutManager, CheckoutSubtype
 from flashback_sampler.core import drag_export
 from flashback_sampler.core.drag_export import (
-    BYTES_PER_SAMPLE, DragRender, drag_filename, export_span, render_root_drag,
-    render_slice_drag, resolve_collision, sanitize_source_name,
+    BYTES_PER_SAMPLE,
+    DragRender,
+    drag_filename,
+    export_span,
+    render_root_drag,
+    render_slice_drag,
+    resolve_collision,
+    sanitize_source_name,
 )
 from tests.fixtures.sine_source import ramp_block
 from tests.fixtures.wavread import read_wav
@@ -44,10 +50,7 @@ def test_sanitize_source_name():
 
 
 def test_drag_filename_format():
-    assert (
-        drag_filename("My Deck", WHEN, 3.52)
-        == "my_deck_20260715-130509_3.5s.wav"
-    )
+    assert drag_filename("My Deck", WHEN, 3.52) == "my_deck_20260715-130509_3.5s.wav"
 
 
 def test_resolve_collision_appends_suffix(tmp_path):
@@ -66,25 +69,64 @@ def test_bytes_per_sample_covers_every_export_subtype():
     assert set(BYTES_PER_SAMPLE) == set(get_args(CheckoutSubtype))
 
 
-@pytest.mark.parametrize("parent,s,e,handle_mb,expect", [
-    (1000, 400, 500, 0.0, (400, 500)),          # budget 0 = slice only
-    (1000, 400, 500, 1e9, (0, 1000)),           # budget ∞ = whole parent
-    (1000, 400, 500, 300 * 4 / 2**20, (250, 650)),   # 300 extra mono float frames: 150 each side
-    (1000, 50, 150, 300 * 4 / 2**20, (0, 300)),      # clamped at the start; the unused half is not moved
-    (1000, 900, 950, 300 * 4 / 2**20, (750, 1000)),  # clamped at the end
-    (1000, 400, 500, 50 * 4 / 2**20, (375, 525)),    # a budget smaller than the slice still adds handles; the slice is whole
-    (1000, 0, 1000, 10 * 4 / 2**20, (0, 1000)),      # a slice that IS the parent is never truncated
-    (1000, 400, 500, -1.0, (400, 500)),              # a negative budget is 0, never a truncation
-])
+@pytest.mark.parametrize(
+    "parent,s,e,handle_mb,expect",
+    [
+        (1000, 400, 500, 0.0, (400, 500)),  # budget 0 = slice only
+        (1000, 400, 500, 1e9, (0, 1000)),  # budget ∞ = whole parent
+        (
+            1000,
+            400,
+            500,
+            300 * 4 / 2**20,
+            (250, 650),
+        ),  # 300 extra mono float frames: 150 each side
+        (
+            1000,
+            50,
+            150,
+            300 * 4 / 2**20,
+            (0, 300),
+        ),  # clamped at the start; the unused half is not moved
+        (1000, 900, 950, 300 * 4 / 2**20, (750, 1000)),  # clamped at the end
+        (
+            1000,
+            400,
+            500,
+            50 * 4 / 2**20,
+            (375, 525),
+        ),  # a budget smaller than the slice still adds handles; the slice is whole
+        (
+            1000,
+            0,
+            1000,
+            10 * 4 / 2**20,
+            (0, 1000),
+        ),  # a slice that IS the parent is never truncated
+        (
+            1000,
+            400,
+            500,
+            -1.0,
+            (400, 500),
+        ),  # a negative budget is 0, never a truncation
+    ],
+)
 def test_export_span(parent, s, e, handle_mb, expect):
     assert export_span(parent, s, e, 1, 4, handle_mb) == expect
 
 
-def test_render_root_drag_exports_the_whole_clip_with_markers_at_the_trim(scratch, tmp_path):
+def test_render_root_drag_exports_the_whole_clip_with_markers_at_the_trim(
+    scratch, tmp_path
+):
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
     mgr.set_trim(co.id, 100, 300)
-    r = render_root_drag(mgr, co.id, tmp_path / "pool", "Deck A", markers_at_trim=True, now=WHEN)
-    assert r == DragRender(tmp_path / "pool" / "deck_a_20260715-130509_0.5s.wav", co.id, False)
+    r = render_root_drag(
+        mgr, co.id, tmp_path / "pool", "Deck A", markers_at_trim=True, now=WHEN
+    )
+    assert r == DragRender(
+        tmp_path / "pool" / "deck_a_20260715-130509_0.5s.wav", co.id, False
+    )
     audio, info = read_wav(r.path)
     assert info.frames == 500 and info.subtype == "FLOAT"
     raw = r.path.read_bytes()
@@ -106,10 +148,19 @@ def test_render_slice_drag_mints_a_saved_slice_and_exports_the_span(scratch, tmp
     r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", handle_mb=handles, now=WHEN)
     assert r.minted and r.checkout_id != co.id
     s = mgr.get(r.checkout_id)
-    assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (co.id, 200, 100, "saved")
-    assert r.path.name == "deck_a_20260715-130509_0.1s.wav"  # named for the slice, not the span
+    assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (
+        co.id,
+        200,
+        100,
+        "saved",
+    )
+    assert (
+        r.path.name == "deck_a_20260715-130509_0.1s.wav"
+    )  # named for the slice, not the span
     audio, info = read_wav(r.path)
-    assert info.frames == 200 and audio[0, 0] == pytest.approx(1150.0)  # span 150..350 = slice 200..300 + 50 each side
+    assert info.frames == 200 and audio[0, 0] == pytest.approx(
+        1150.0
+    )  # span 150..350 = slice 200..300 + 50 each side
     raw = r.path.read_bytes()
     assert b"cue " in raw
     # The only test that pins the ctypes markers path with a real value:
@@ -117,7 +168,9 @@ def test_render_slice_drag_mints_a_saved_slice_and_exports_the_span(scratch, tmp
     assert struct.unpack_from("<I", raw, raw.index(b"cue ") + 8 + 4 + 20)[0] == 50
 
 
-def test_render_slice_drag_discards_the_minted_slice_when_the_export_fails(scratch, tmp_path, monkeypatch):
+def test_render_slice_drag_discards_the_minted_slice_when_the_export_fails(
+    scratch, tmp_path, monkeypatch
+):
     """A failing export (full disk, an unwritable pool dir) must not
     strand the slice: the caller never gets a DragRender, so it has no id
     to discard, and adoption would resurrect the orphan at next launch."""
@@ -135,14 +188,18 @@ def test_render_slice_drag_discards_the_minted_slice_when_the_export_fails(scrat
     assert co.path.exists()  # and the parent's own file survived the cleanup
 
 
-def test_render_slice_drag_on_a_failed_parent_exports_the_trim_from_ram(scratch, tmp_path, monkeypatch):
+def test_render_slice_drag_on_a_failed_parent_exports_the_trim_from_ram(
+    scratch, tmp_path, monkeypatch
+):
     """#78: a parent whose scratch write failed has no file to slice,
     but its RAM copy still exports. The trim goes out as a plain file
     (no handles, no markers) and the drop commits the clip itself."""
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
     mgr.set_trim(co.id, 200, 300)
     monkeypatch.setattr(mgr, "write_state", lambda cid: "failed")
-    r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", handle_mb=1.0, alc=True, now=WHEN)
+    r = render_slice_drag(
+        mgr, co.id, tmp_path, "Deck A", handle_mb=1.0, alc=True, now=WHEN
+    )
     assert r == DragRender(r.path, co.id, False)
     assert [c.id for c in mgr.list()] == [co.id]
     audio, info = read_wav(r.path)
@@ -150,7 +207,9 @@ def test_render_slice_drag_on_a_failed_parent_exports_the_trim_from_ram(scratch,
     assert b"cue " not in r.path.read_bytes()
 
 
-def test_render_slice_drag_on_an_untrimmed_clip_falls_back_to_the_root(scratch, tmp_path):
+def test_render_slice_drag_on_an_untrimmed_clip_falls_back_to_the_root(
+    scratch, tmp_path
+):
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
     r = render_slice_drag(mgr, co.id, tmp_path, "x", now=WHEN)
     assert r == DragRender(r.path, co.id, False)
@@ -166,6 +225,7 @@ def test_render_creates_pool_dir(scratch, tmp_path):
 
 def _alc_clip(path):
     import gzip, xml.etree.ElementTree as ET
+
     with gzip.open(path, "rb") as fh:
         return next(ET.fromstring(fh.read()).iter("AudioClip"))
 
@@ -176,14 +236,18 @@ def test_render_slice_drag_writes_an_alc_sidecar_at_the_slice(scratch, tmp_path)
     mgr, co = _mgr_with_checkout(scratch, tmp_path)  # 1000 Hz mono
     mgr.set_trim(co.id, 200, 300)
     handles = 100 * 4 / 2**20  # 50 extra frames each side
-    r = render_slice_drag(mgr, co.id, tmp_path, "Deck A", handle_mb=handles, alc=True, now=WHEN)
+    r = render_slice_drag(
+        mgr, co.id, tmp_path, "Deck A", handle_mb=handles, alc=True, now=WHEN
+    )
     assert r.sidecar == r.path.with_suffix(".alc") and r.sidecar.exists()
     clip = _alc_clip(r.sidecar)
     # span 150..350, slice 200..300 -> 0.05 s .. 0.15 s into the export
     assert clip.find("Loop/LoopStart").get("Value") == "0.05"
     assert clip.find("Loop/LoopEnd").get("Value") == "0.15"
     assert clip.find("Loop/HiddenLoopEnd").get("Value") == "0.2"  # 200 exported frames
-    assert clip.find("SampleRef/FileRef/Path").get("Value") == r.path.resolve().as_posix()
+    assert (
+        clip.find("SampleRef/FileRef/Path").get("Value") == r.path.resolve().as_posix()
+    )
     assert clip.find("SampleRef/DefaultDuration").get("Value") == "200"
 
 
@@ -231,7 +295,9 @@ def test_render_slice_drag_cleans_up_the_wav_and_the_slice_when_the_sidecar_fail
     assert co.path.exists()
 
 
-def test_render_root_drag_unlinks_the_wav_when_the_export_fails(scratch, tmp_path, monkeypatch):
+def test_render_root_drag_unlinks_the_wav_when_the_export_fails(
+    scratch, tmp_path, monkeypatch
+):
     """A reported failure must leave nothing in the pool: a part-written
     WAV is a file the caller was never told about and cannot delete."""
     mgr, co = _mgr_with_checkout(scratch, tmp_path)
@@ -247,7 +313,9 @@ def test_render_root_drag_unlinks_the_wav_when_the_export_fails(scratch, tmp_pat
     assert list(pool.glob("*")) == []
 
 
-def test_export_touches_no_sidecar_path_when_the_pref_is_off(scratch, tmp_path, monkeypatch):
+def test_export_touches_no_sidecar_path_when_the_pref_is_off(
+    scratch, tmp_path, monkeypatch
+):
     """With alc off there is no sidecar to write or clean up, so a
     failing export must not go near a .alc path at all."""
     mgr, co = _mgr_with_checkout(scratch, tmp_path)

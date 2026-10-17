@@ -1,4 +1,5 @@
 """Tests for TurntableWindow layout assembly."""
+
 from __future__ import annotations
 
 import pytest
@@ -9,6 +10,7 @@ from flashback_sampler.app.turntable_window import TurntableWindow
 @pytest.fixture
 def state():
     from flashback_sampler.app.state import AppState
+
     s = AppState(buffer_seconds=60.0, sample_rate=48000, channels=2)
     yield s
     s.shutdown()
@@ -66,6 +68,7 @@ def test_window_has_loop_button(qapp, state):
 
 def test_buffer_selection_updates_disc(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     # Simulate some buffered audio so the drag can capture abs samples.
     # A real write (not a fake total_written assignment) so the test
@@ -89,6 +92,7 @@ def test_buffer_selection_updates_disc(qapp, state):
 
 def test_clip_selection_updates_disc(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
     # Populate buffer and create a checkout so a clip is displayed.
@@ -109,6 +113,7 @@ def test_clip_selection_updates_disc(qapp, state):
 
 
 # ── Phase-1 wiring tests ──────────────────────────────────────────────────────
+
 
 def test_constructor_mirrors_slot_count(qapp, state):
     win = TurntableWindow(state)
@@ -138,9 +143,13 @@ def test_stop_button_calls_stop_rolling(qapp, state):
 def test_track_selected_updates_active_slot(qapp, state):
     # Add a second slot so we have indices 0, 1
     from flashback_sampler.core.quality_presets import QualityPreset
+
     preset = QualityPreset(
-        name="CUSTOM", sample_rate=48000, channels=2,
-        buffer_seconds=30.0, description="test"
+        name="CUSTOM",
+        sample_rate=48000,
+        channels=2,
+        buffer_seconds=30.0,
+        description="test",
     )
     state.add_slot(preset, name="Source 2")
     win = TurntableWindow(state)
@@ -157,9 +166,13 @@ def test_track_selected_updates_active_slot(qapp, state):
 def test_arm_all_arms_every_slot(qapp, state):
     # Start with 1 armed=False, add a second also armed=False
     from flashback_sampler.core.quality_presets import QualityPreset
+
     preset = QualityPreset(
-        name="CUSTOM", sample_rate=48000, channels=2,
-        buffer_seconds=30.0, description="test"
+        name="CUSTOM",
+        sample_rate=48000,
+        channels=2,
+        buffer_seconds=30.0,
+        description="test",
     )
     state.add_slot(preset, name="Source 2")
     for s in state.slots:
@@ -182,9 +195,13 @@ def test_navbar_chip_reflects_slot_name(qapp, state):
 
 def test_track_selected_updates_buffer_panel_label(qapp, state):
     from flashback_sampler.core.quality_presets import QualityPreset
+
     preset = QualityPreset(
-        name="CUSTOM", sample_rate=48000, channels=2,
-        buffer_seconds=30.0, description="test"
+        name="CUSTOM",
+        sample_rate=48000,
+        channels=2,
+        buffer_seconds=30.0,
+        description="test",
     )
     state.add_slot(preset, name="Game")
     win = TurntableWindow(state)
@@ -200,27 +217,42 @@ def test_tick_timer_runs_without_crash(qapp, state):
     win._tick()  # should handle empty/not-started capture gracefully
 
 
-def test_status_poll_warns_once_each_time_the_preview_output_is_captured(qapp, state, monkeypatch):
+def test_status_poll_warns_once_each_time_the_preview_output_is_captured(
+    qapp, state, monkeypatch
+):
     """#77: the 1 Hz health poll surfaces the feedback check, so arming a
     source and changing the preview output both reach it. The status bar
     line shows once per pairing, and again when the pairing comes back."""
     from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
+
     warnings = []
-    state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
-    state.capture_spec = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True)
+    state.output_spec = OutputDevice(
+        id="{spk}", name="Speakers", max_output_channels=2, is_default=True
+    )
+    state.capture_spec = CaptureDevice(
+        kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True
+    )
     state.slots[0].armed = False
     win = TurntableWindow(state)
-    monkeypatch.setattr(win.statusBar(), "showMessage", lambda msg, *a: warnings.append(msg))
+    monkeypatch.setattr(
+        win.statusBar(), "showMessage", lambda msg, *a: warnings.append(msg)
+    )
     try:
         win._poll_source_status()
         assert warnings == []
         state.slots[0].armed = True
         win._poll_source_status()
         win._poll_source_status()
-        assert len(warnings) == 1 and "Speakers" in warnings[0] and "Main" in warnings[0]
-        state.output_spec = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
+        assert (
+            len(warnings) == 1 and "Speakers" in warnings[0] and "Main" in warnings[0]
+        )
+        state.output_spec = OutputDevice(
+            id="{hp}", name="Headphones", max_output_channels=2
+        )
         win._poll_source_status()
-        state.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+        state.output_spec = OutputDevice(
+            id="{spk}", name="Speakers", max_output_channels=2, is_default=True
+        )
         win._poll_source_status()
         assert len(warnings) == 2
     finally:
@@ -239,13 +271,18 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     from PySide6.QtCore import QPoint, Qt, QEvent
     from PySide6.QtGui import QMouseEvent
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+
     chip = SourceIndicator(0, "Test")
     captured = []
     chip.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
         QEvent.MouseButtonPress,
-        chip.rect().center().toPointF() if hasattr(chip.rect().center(), "toPointF") else QPoint(5, 5),
-        Qt.RightButton, Qt.RightButton, Qt.NoModifier,
+        chip.rect().center().toPointF()
+        if hasattr(chip.rect().center(), "toPointF")
+        else QPoint(5, 5),
+        Qt.RightButton,
+        Qt.RightButton,
+        Qt.NoModifier,
     )
     chip.mousePressEvent(ev)
     assert len(captured) == 1
@@ -253,9 +290,13 @@ def test_right_click_chip_emits_context_menu_request(qapp):
 
 def test_switch_to_slot_updates_active_and_mirrors(qapp, state):
     from flashback_sampler.core.quality_presets import QualityPreset
+
     preset = QualityPreset(
-        name="CUSTOM", sample_rate=48000, channels=2,
-        buffer_seconds=30.0, description="test",
+        name="CUSTOM",
+        sample_rate=48000,
+        channels=2,
+        buffer_seconds=30.0,
+        description="test",
     )
     state.add_slot(preset, name="Game")
     win = TurntableWindow(state)
@@ -269,13 +310,16 @@ def test_switch_to_slot_updates_active_and_mirrors(qapp, state):
 
 def test_default_buffer_selection_applied_at_init(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     # Default slot has duration_preset_idx=4 (180s) and anchor_offset_s=0.
     # New semantics: the selection is painted against buffered_seconds,
     # not buffer capacity. Simulate some audio being present so the
     # display update has something to show, then check the selection.
     buf = state.active_slot.buffer
-    buf.write(np.zeros((int(60 * buf.sample_rate), buf.channels), dtype=np.float32))  # 60s buffered
+    buf.write(
+        np.zeros((int(60 * buf.sample_rate), buf.channels), dtype=np.float32)
+    )  # 60s buffered
     win._update_selection_display()
     sel = win.buffer_panel.waveform.manual_selection()
     assert sel is not None
@@ -290,6 +334,7 @@ def test_default_buffer_selection_skipped_if_buffer_too_small(qapp):
     start_frac clamps to 0."""
     import numpy as np
     from flashback_sampler.app.state import AppState
+
     s = AppState(buffer_seconds=10.0, sample_rate=48000, channels=2)  # only 10s
     try:
         win = TurntableWindow(s)
@@ -322,6 +367,7 @@ def test_tick_updates_time_labels(qapp, state):
 
 def test_user_drag_captures_absolute_samples(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     # The buffer has recorded 60s of audio
     buf = state.active_slot.buffer
@@ -343,6 +389,7 @@ def test_user_selection_drifts_with_buffer(qapp):
     display window moves forward."""
     import numpy as np
     from flashback_sampler.app.state import AppState
+
     # Need a buffer capacity >= 120s so the displayed window can grow to 120s.
     s = AppState(buffer_seconds=240.0, sample_rate=48000, channels=2)
     try:
@@ -372,6 +419,7 @@ def test_user_selection_drifts_with_buffer(qapp):
 
 def test_clear_selection_returns_to_default(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
     buf.write(np.zeros((60 * buf.sample_rate, buf.channels), dtype=np.float32))
@@ -385,9 +433,13 @@ def test_clear_selection_returns_to_default(qapp, state):
 def test_switching_tracks_resets_selection_mode(qapp, state):
     import numpy as np
     from flashback_sampler.core.quality_presets import QualityPreset
+
     preset = QualityPreset(
-        name="CUSTOM", sample_rate=48000, channels=2,
-        buffer_seconds=30.0, description="test",
+        name="CUSTOM",
+        sample_rate=48000,
+        channels=2,
+        buffer_seconds=30.0,
+        description="test",
     )
     state.add_slot(preset, name="Game")
     win = TurntableWindow(state)
@@ -410,6 +462,7 @@ def test_out_button_creates_checkout(qapp, state):
     sr = buf.sample_rate
     # Simulate 5 seconds of recorded audio
     import numpy as np
+
     samples = np.random.standard_normal((5 * sr, buf.channels)).astype(np.float32) * 0.3
     buf.write(samples)
     # Set a user selection covering the last portion of the buffer
@@ -425,6 +478,7 @@ def test_out_button_creates_checkout(qapp, state):
 
 def test_out_button_in_default_mode_uses_preset(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
     sr = buf.sample_rate
@@ -443,6 +497,7 @@ def test_out_button_in_default_mode_uses_preset(qapp, state):
 
 def test_new_checkout_adds_outermost_ring(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
     sr = buf.sample_rate
@@ -458,6 +513,7 @@ def test_new_checkout_adds_outermost_ring(qapp, state):
 
 def test_clip_ring_click_shows_that_clip_in_panel(qapp, state):
     import numpy as np
+
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
     sr = buf.sample_rate
@@ -475,9 +531,13 @@ def test_clip_ring_click_does_not_change_active_slot(qapp, state):
     """Clicking a clip-side ring must NOT change which slot is active."""
     import numpy as np
     from flashback_sampler.core.quality_presets import QualityPreset
+
     preset = QualityPreset(
-        name="CUSTOM", sample_rate=48000, channels=2,
-        buffer_seconds=30.0, description="test"
+        name="CUSTOM",
+        sample_rate=48000,
+        channels=2,
+        buffer_seconds=30.0,
+        description="test",
     )
     state.add_slot(preset, name="Source 2")
     win = TurntableWindow(state)
@@ -499,9 +559,12 @@ def test_drag_in_progress_not_overwritten_by_tick(qapp, state):
     """During an active drag on the buffer panel, _tick must not overwrite
     the in-progress manual selection on the linear waveform."""
     import numpy as np
+
     win = TurntableWindow(state)
     buf = state.active_slot.buffer
-    buf.write(np.zeros((60 * buf.sample_rate, buf.channels), dtype=np.float32))  # 60s "buffered"
+    buf.write(
+        np.zeros((60 * buf.sample_rate, buf.channels), dtype=np.float32)
+    )  # 60s "buffered"
     # Simulate the user mid-drag by flipping the flag directly. Set a
     # user selection that the tick would normally re-apply.
     win.buffer_panel.waveform._is_dragging = True
@@ -518,8 +581,10 @@ def test_drag_in_progress_not_overwritten_by_tick(qapp, state):
 
 # ── Record gain + source rename (PR B) ─────────────────────────────────
 
+
 def test_gain_menu_builds_with_unity_checked(qapp, state):
     from PySide6.QtWidgets import QMenu
+
     win = TurntableWindow(state)
     menu = QMenu()
     win._populate_gain_menu(menu, state.slots[0])
@@ -531,6 +596,7 @@ def test_gain_menu_builds_with_unity_checked(qapp, state):
 
 def test_gain_menu_action_sets_slot_gain(qapp, state):
     from PySide6.QtWidgets import QMenu
+
     win = TurntableWindow(state)
     menu = QMenu()
     win._populate_gain_menu(menu, state.slots[0])
@@ -544,8 +610,11 @@ def test_gain_menu_action_sets_slot_gain(qapp, state):
 
 def test_rename_slot_updates_name_and_nav(qapp, state, monkeypatch):
     from PySide6.QtWidgets import QInputDialog
+
     win = TurntableWindow(state)
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Chrome", True)))
+    monkeypatch.setattr(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("Chrome", True))
+    )
     win._rename_slot(0)
     assert state.slots[0].name == "Chrome"
     assert win.nav_bar.source_slots[0]._name == "CHROME"  # nav uppercases
@@ -553,15 +622,19 @@ def test_rename_slot_updates_name_and_nav(qapp, state, monkeypatch):
 
 def test_rename_slot_cancel_keeps_name(qapp, state, monkeypatch):
     from PySide6.QtWidgets import QInputDialog
+
     win = TurntableWindow(state)
     original = state.slots[0].name
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
+    )
     win._rename_slot(0)
     assert state.slots[0].name == original
 
 
 def _write_one_second(state):
     import numpy as np
+
     state.active_slot.buffer.write(
         np.zeros((state.active_slot.buffer.sample_rate, 2), dtype=np.float32)
     )
@@ -586,7 +659,9 @@ def test_clip_drag_full_exports_and_marks_saved(qapp, state, tmp_path, monkeypat
         win.close()
 
 
-def test_clip_drag_cancel_deletes_file_and_keeps_clip(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_cancel_deletes_file_and_keeps_clip(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -608,6 +683,7 @@ def test_clip_drag_cancel_deletes_file_and_keeps_clip(qapp, state, tmp_path, mon
 def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
     """With no handle budget the dragged file is the trimmed range alone."""
     from tests.fixtures.wavread import read_wav
+
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -630,12 +706,15 @@ def test_clip_drag_out_uses_trimmed_range(qapp, state, tmp_path, monkeypatch):
         win.close()
 
 
-def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(qapp, state, tmp_path, monkeypatch):
+def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(
+    qapp, state, tmp_path, monkeypatch
+):
     """#78: save trimmed mints a slice like the trimmed drag, so it meets
     the same count cap and evicts the oldest saved clip, never the clip
     being saved. The new slice becomes the shown clip."""
     from flashback_sampler.app import turntable_window as tw
     from tests.fixtures.wavread import read_wav
+
     win = tw.TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -648,12 +727,21 @@ def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(qapp, state, tmp_p
         n = co.n_frames
         mgr.set_trim(co.id, n // 4, n // 2)
         target = tmp_path / "trim.wav"
-        monkeypatch.setattr(tw.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "")))
+        monkeypatch.setattr(
+            tw.QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(target), "")),
+        )
         win._save_current_clip(trimmed=True)
         ids = [c.id for c in mgr.list()]
         assert old.id not in ids and co.id in ids and len(ids) == 2
         s = mgr.get(ids[-1])
-        assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (co.id, n // 4, n // 4, "saved")
+        assert (s.parent_id, s.start_frame, s.n_frames, s.state) == (
+            co.id,
+            n // 4,
+            n // 4,
+            "saved",
+        )
         assert mgr.get(co.id).state == "pending"
         assert read_wav(target)[1].frames == n // 4
         assert win._currently_displayed_checkout().id == s.id
@@ -663,6 +751,7 @@ def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(qapp, state, tmp_p
 
 def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
     from flashback_sampler.app import turntable_window as tw
+
     win = tw.TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -674,7 +763,9 @@ def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
             seen.update(default_path=default_path, filter_spec=filter_spec)
             return "", ""
 
-        monkeypatch.setattr(tw.QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
+        monkeypatch.setattr(
+            tw.QFileDialog, "getSaveFileName", staticmethod(fake_dialog)
+        )
         win._save_current_clip()
         assert seen["filter_spec"] == "WAV audio (*.wav)"
         assert seen["default_path"].endswith(".wav")
@@ -682,7 +773,9 @@ def test_save_dialog_offers_wav_only(qapp, state, tmp_path, monkeypatch):
         win.close()
 
 
-def test_buffer_drag_out_persists_saved_checkout_on_accept(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_out_persists_saved_checkout_on_accept(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -703,7 +796,9 @@ def test_buffer_drag_out_persists_saved_checkout_on_accept(qapp, state, tmp_path
         win.close()
 
 
-def test_buffer_drag_out_cancel_discards_checkout_and_file(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_out_cancel_discards_checkout_and_file(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -722,7 +817,9 @@ def test_buffer_drag_out_cancel_discards_checkout_and_file(qapp, state, tmp_path
         win.close()
 
 
-def test_buffer_drag_out_default_mode_drags_duration_window(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_out_default_mode_drags_duration_window(
+    qapp, state, tmp_path, monkeypatch
+):
     """The automatic (default-mode) selection band must be draggable —
     it resolves to the same anchor/duration window the OUT button uses.
     Regression: the handler used to silently drop non-"user" drags even
@@ -822,7 +919,9 @@ def test_refresh_clip_side_keeps_cache_for_inactive_slots(qapp, state):
 
         state.add_slot(
             QualityPreset(
-                name="CUSTOM", sample_rate=48000, channels=2,
+                name="CUSTOM",
+                sample_rate=48000,
+                channels=2,
                 buffer_seconds=60.0,
             ),
             name="second",
@@ -833,7 +932,9 @@ def test_refresh_clip_side_keeps_cache_for_inactive_slots(qapp, state):
         win.close()
 
 
-def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(
+    qapp, state, tmp_path, monkeypatch
+):
     """The sample-bank flow mints a checkout per drag; at the manager's
     active-checkout cap the oldest `saved` clip is evicted (its pool file
     is the durable record) so drags keep working."""
@@ -864,7 +965,9 @@ def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(qapp, state, tmp_pa
         win.close()
 
 
-def test_buffer_drag_out_at_cap_without_saved_clips_reports_failure(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_out_at_cap_without_saved_clips_reports_failure(
+    qapp, state, tmp_path, monkeypatch
+):
     """Pending (unsaved) clips are the user's working set — never evicted."""
     win = TurntableWindow(state)
     try:
@@ -908,6 +1011,7 @@ def test_buffer_drag_out_with_empty_buffer_is_noop(qapp, state, tmp_path, monkey
 
 def test_set_export_prefs_persist_and_apply(qapp, state, tmp_path, monkeypatch):
     import flashback_sampler.app.turntable_window as tw
+
     saved = {}
     monkeypatch.setattr(
         tw, "save_export_pool_dir", lambda p: saved.__setitem__("dir", str(p))
@@ -972,6 +1076,7 @@ def _fake_player(monkeypatch, state):
 
 def _checkout(state):
     import numpy as np
+
     audio = np.zeros((4800, 2), dtype=np.float32)
     audio[:, 0] = 0.5
     state.buffer.write(audio)
@@ -1012,7 +1117,9 @@ def test_play_click_with_no_checkout_does_nothing(qapp, state, monkeypatch):
     fake = _fake_player(monkeypatch, state)
     win = TurntableWindow(state)
     win._on_play_clip_clicked()
-    assert not [n for n, _ in fake.calls if n in ("fb_playback_bind", "fb_playback_play")]
+    assert not [
+        n for n, _ in fake.calls if n in ("fb_playback_bind", "fb_playback_play")
+    ]
 
 
 def test_play_click_binds_the_checkout_at_its_rate_and_plays(qapp, state, monkeypatch):
@@ -1021,11 +1128,19 @@ def test_play_click_binds_the_checkout_at_its_rate_and_plays(qapp, state, monkey
     co = _checkout(state)
     co.sample_rate = 96_000  # pin a non-default rate so the bind-rate assert is real
     win._tick()
-    fake.state = (0, 0, 0, co.n_frames, 48_000)  # not playing: the click must take the play branch
+    fake.state = (
+        0,
+        0,
+        0,
+        co.n_frames,
+        48_000,
+    )  # not playing: the click must take the play branch
     win._on_play_clip_clicked()
     assert fake.bound_checkout == (co.handle, 0, co.n_frames)
     assert state.scrub_player.sample_rate == co.sample_rate
-    assert [n_ for n_, _ in fake.calls if n_ == "fb_playback_play"] == ["fb_playback_play"]
+    assert [n_ for n_, _ in fake.calls if n_ == "fb_playback_play"] == [
+        "fb_playback_play"
+    ]
     assert win._intending_playback is True
     assert win.clip_controls[0].text() == "STOP"
 
@@ -1037,12 +1152,16 @@ def test_play_click_while_playing_pauses_and_drops_intent(qapp, state, monkeypat
     win._intending_playback = True
     fake.state = (1, 1, 100, 4800, 48_000)
     win._on_play_clip_clicked()
-    assert [n for n, _ in fake.calls if n == "fb_playback_pause"] == ["fb_playback_pause"]
+    assert [n for n, _ in fake.calls if n == "fb_playback_pause"] == [
+        "fb_playback_pause"
+    ]
     assert win._intending_playback is False
     assert not [n for n, _ in fake.calls if n == "fb_playback_bind"]
 
 
-def test_update_playback_state_drives_the_playhead_from_the_native_cursor(qapp, state, monkeypatch):
+def test_update_playback_state_drives_the_playhead_from_the_native_cursor(
+    qapp, state, monkeypatch
+):
     fake = _fake_player(monkeypatch, state)
     win = TurntableWindow(state)
     co = _checkout(state)
@@ -1137,7 +1256,11 @@ def test_selecting_a_clip_pins_it_and_bins_come_from_the_handle(qapp, state):
         win.clip_turntable.select_track(0)
         win._refresh_clip_side()
         assert mgr._pinned_id == a.id  # noqa: SLF001
-        assert win._clip_bins_cache[a.id]["panel_bins"].shape == (360, 2, state.channels)
+        assert win._clip_bins_cache[a.id]["panel_bins"].shape == (
+            360,
+            2,
+            state.channels,
+        )
         assert win._clip_bins_cache[a.id]["ring_amp"].shape == (540,)
     finally:
         win.close()
@@ -1157,13 +1280,18 @@ def test_play_with_a_trim_binds_the_trim_range(qapp, state, monkeypatch):
         win.close()
 
 
-def test_buffer_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, monkeypatch, tmp_path):
+def test_buffer_drag_at_the_count_cap_evicts_the_oldest_saved(
+    qapp, state, monkeypatch, tmp_path
+):
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
         state.apply_checkout_caps(max_active=1)
         win._export_pool_dir = tmp_path
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: True,
+        )
         win._on_buffer_drag_out(0.0, 0.5)
         first = state.checkout_manager.list()[0].id
         win._on_buffer_drag_out(0.0, 0.5)
@@ -1173,7 +1301,9 @@ def test_buffer_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, monke
         win.close()
 
 
-def test_flush_confirm_names_the_action_not_a_stale_seconds_figure(qapp, state, monkeypatch):
+def test_flush_confirm_names_the_action_not_a_stale_seconds_figure(
+    qapp, state, monkeypatch
+):
     """#40: the flush clears the whole ring, so the confirm must not quote a
     buffered-seconds figure that is stale by the time the flush runs."""
     import flashback_sampler.app.turntable_window as tw
@@ -1208,7 +1338,9 @@ def test_set_max_footprint_applies_to_state_and_persists(qapp, state, monkeypatc
     assert saved == [0.0]
 
 
-def test_clip_drag_of_a_trimmed_band_mints_a_slice_and_keeps_it_on_cancel_only_if_accepted(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_of_a_trimmed_band_mints_a_slice_and_keeps_it_on_cancel_only_if_accepted(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
@@ -1218,11 +1350,17 @@ def test_clip_drag_of_a_trimmed_band_mints_a_slice_and_keeps_it_on_cancel_only_i
         mgr.set_trim(co.id, co.n_frames // 4, co.n_frames // 2)
         win._export_pool_dir = tmp_path
         win._drag_handle_mb = 0.0
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: False)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: False,
+        )
         win._on_clip_drag_out(0.25, 0.5)
         assert [c.id for c in mgr.list()] == [co.id]  # cancelled: the slice is gone
         assert list(tmp_path.glob("*.wav")) == []
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: True,
+        )
         win._on_clip_drag_out(0.25, 0.5)
         cos = mgr.list()
         assert len(cos) == 2 and cos[1].parent_id == co.id and cos[1].state == "saved"
@@ -1232,21 +1370,33 @@ def test_clip_drag_of_a_trimmed_band_mints_a_slice_and_keeps_it_on_cancel_only_i
         win.close()
 
 
-def test_buffer_drag_pulls_the_selection_plus_handles_and_marks_the_trim(qapp, state, tmp_path, monkeypatch):
+def test_buffer_drag_pulls_the_selection_plus_handles_and_marks_the_trim(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         _write_one_second(state)
         sr = state.buffer.sample_rate
         win._export_pool_dir = tmp_path
-        win._drag_handle_mb = (sr // 2) * state.channels * 4 / 2**20  # handles = 0.5 s of frames in total
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
-        win.buffer_panel.waveform.manualSelectionChanged.emit(0.4, 0.6)  # 0.2 s selected in the middle
+        win._drag_handle_mb = (
+            (sr // 2) * state.channels * 4 / 2**20
+        )  # handles = 0.5 s of frames in total
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: True,
+        )
+        win.buffer_panel.waveform.manualSelectionChanged.emit(
+            0.4, 0.6
+        )  # 0.2 s selected in the middle
         win._update_selection_display()
         win._on_buffer_drag_out(0.4, 0.6)
         co = state.checkout_manager.list()[0]
         # root = selection +/- 0.25 s (half the handle budget each side), trim = the selection
         assert abs(co.n_frames - int(0.7 * sr)) <= 2
-        assert abs(co.trim_in_samples - int(0.25 * sr)) <= 2 and abs((co.trim_out_samples - co.trim_in_samples) - int(0.2 * sr)) <= 2
+        assert (
+            abs(co.trim_in_samples - int(0.25 * sr)) <= 2
+            and abs((co.trim_out_samples - co.trim_in_samples) - int(0.2 * sr)) <= 2
+        )
         assert co.state == "saved"
         raw = next(tmp_path.glob("*.wav")).read_bytes()
         assert b"cue " in raw
@@ -1259,6 +1409,7 @@ def test_buffer_drag_rebases_handles_onto_a_lapped_ring(qapp, tmp_path, monkeypa
     span is computed in ring-relative frames and rebased back before the
     checkout is made. Without the rebase the range has scrolled out."""
     from flashback_sampler.app.state import AppState
+
     state = AppState(buffer_seconds=0.5, sample_rate=48000, channels=2)
     win = TurntableWindow(state)
     try:
@@ -1266,9 +1417,16 @@ def test_buffer_drag_rebases_handles_onto_a_lapped_ring(qapp, tmp_path, monkeypa
         sr = state.buffer.sample_rate
         assert state.buffer.total_written > state.buffer.buffer_size
         win._export_pool_dir = tmp_path
-        win._drag_handle_mb = (sr // 10) * state.channels * 4 / 2**20  # 0.1 s of handles
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True)
-        win.buffer_panel.waveform.manualSelectionChanged.emit(0.4, 0.6)  # 0.1 s of the 0.5 s window
+        win._drag_handle_mb = (
+            (sr // 10) * state.channels * 4 / 2**20
+        )  # 0.1 s of handles
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: True,
+        )
+        win.buffer_panel.waveform.manualSelectionChanged.emit(
+            0.4, 0.6
+        )  # 0.1 s of the 0.5 s window
         win._on_buffer_drag_out(0.4, 0.6)
         cos = state.checkout_manager.list()
         assert len(cos) == 1
@@ -1304,7 +1462,9 @@ def _trimmed_clip_for_drag(state, win, tmp_path):
     return co
 
 
-def test_clip_drag_with_the_alc_pref_offers_only_the_alc(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_with_the_alc_pref_offers_only_the_alc(
+    qapp, state, tmp_path, monkeypatch
+):
     """Live refuses a mixed .alc + .wav drop, so the pref offers the .alc
     alone. The WAV still lands in the pool -- the .alc references it."""
     win = TurntableWindow(state)
@@ -1317,7 +1477,9 @@ def test_clip_drag_with_the_alc_pref_offers_only_the_alc(qapp, state, tmp_path, 
             offered.append(paths)
             return True
 
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", fake_drag)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag", fake_drag
+        )
         win._on_clip_drag_out(0.25, 0.5)
         wav = next(tmp_path.glob("*.wav"))
         alc = wav.with_suffix(".alc")
@@ -1328,12 +1490,17 @@ def test_clip_drag_with_the_alc_pref_offers_only_the_alc(qapp, state, tmp_path, 
         win.close()
 
 
-def test_clip_drag_cancel_with_the_alc_pref_leaves_neither_file(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_cancel_with_the_alc_pref_leaves_neither_file(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         co = _trimmed_clip_for_drag(state, win, tmp_path)
         win._drag_alc_sidecar = True
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: False)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: False,
+        )
         win._on_clip_drag_out(0.25, 0.5)
         assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.alc")) == []
         assert [c.id for c in state.checkout_manager.list()] == [co.id]
@@ -1341,7 +1508,9 @@ def test_clip_drag_cancel_with_the_alc_pref_leaves_neither_file(qapp, state, tmp
         win.close()
 
 
-def test_clip_drag_without_the_alc_pref_offers_the_wav_alone(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_without_the_alc_pref_offers_the_wav_alone(
+    qapp, state, tmp_path, monkeypatch
+):
     win = TurntableWindow(state)
     try:
         _trimmed_clip_for_drag(state, win, tmp_path)
@@ -1351,7 +1520,9 @@ def test_clip_drag_without_the_alc_pref_offers_the_wav_alone(qapp, state, tmp_pa
             offered.append(paths)
             return True
 
-        monkeypatch.setattr("flashback_sampler.app.turntable_window.perform_file_drag", fake_drag)
+        monkeypatch.setattr(
+            "flashback_sampler.app.turntable_window.perform_file_drag", fake_drag
+        )
         win._on_clip_drag_out(0.25, 0.5)
         assert offered == [[next(tmp_path.glob("*.wav"))]]
         assert list(tmp_path.glob("*.alc")) == []
@@ -1374,7 +1545,9 @@ def test_set_drag_alc_sidecar_persists_and_applies(qapp, state, monkeypatch):
         win.close()
 
 
-def test_clip_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_at_the_count_cap_evicts_the_oldest_saved(
+    qapp, state, tmp_path, monkeypatch
+):
     """I1: the trimmed clip-deck drag mints a slice, so it meets the same
     per-slot count cap the buffer drag does. It must make room the same
     way -- evict the oldest `saved` clip and retry -- not fail the drag."""
@@ -1393,7 +1566,8 @@ def test_clip_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, tmp_pat
         win._export_pool_dir = tmp_path
         win._drag_handle_mb = 0.0
         monkeypatch.setattr(
-            "flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: True,
         )
         win._on_clip_drag_out(0.25, 0.5)
         ids = [c.id for c in mgr.list()]
@@ -1404,7 +1578,9 @@ def test_clip_drag_at_the_count_cap_evicts_the_oldest_saved(qapp, state, tmp_pat
         win.close()
 
 
-def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(qapp, state, tmp_path, monkeypatch):
+def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(
+    qapp, state, tmp_path, monkeypatch
+):
     """The dragged clip is the slice's parent, so evicting it would
     destroy the audio the drag is about (and the mint would raise). A
     re-drag of a `saved` clip that is also the oldest saved must skip it
@@ -1424,7 +1600,8 @@ def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(qapp, state, t
         win._drag_handle_mb = 0.0
         monkeypatch.setattr(win, "_currently_displayed_checkout", lambda: co)
         monkeypatch.setattr(
-            "flashback_sampler.app.turntable_window.perform_file_drag", lambda w, p: True
+            "flashback_sampler.app.turntable_window.perform_file_drag",
+            lambda w, p: True,
         )
         win._on_clip_drag_out(0.25, 0.5)
         ids = [c.id for c in mgr.list()]

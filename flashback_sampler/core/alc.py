@@ -111,23 +111,46 @@ def render_alc_xml(
     wav_path = Path(wav_path)
     beat_s = 60.0 / TEMPLATE_TEMPO
     subs = (
-        ('<CurrentEnd Value="10.666666666666666" />',
-         f'<CurrentEnd Value="{_num((end_s - start_s) / beat_s)}" />'),
+        (
+            '<CurrentEnd Value="10.666666666666666" />',
+            f'<CurrentEnd Value="{_num((end_s - start_s) / beat_s)}" />',
+        ),
         ('<LoopStart Value="10" />', f'<LoopStart Value="{_num(start_s)}" />'),
         ('<LoopEnd Value="15" />', f'<LoopEnd Value="{_num(end_s)}" />'),
-        ('<HiddenLoopEnd Value="30" />', f'<HiddenLoopEnd Value="{_num(frames / rate)}" />'),
+        (
+            '<HiddenLoopEnd Value="30" />',
+            f'<HiddenLoopEnd Value="{_num(frames / rate)}" />',
+        ),
         ('<Name Value="spike" />', f'<Name Value="{_attr(wav_path.stem)}" />'),
-        ('<RelativePath Value="SAMPLE_NAME" />',
-         f'<RelativePath Value="{_attr(relative_path)}" />'),
-        ('<Path Value="SAMPLE_PATH" />', f'<Path Value="{_attr(wav_path.as_posix())}" />'),
-        ('<OriginalFileSize Value="8640230" />', f'<OriginalFileSize Value="{int(size)}" />'),
-        ('<DefaultDuration Value="1440000" />', f'<DefaultDuration Value="{int(frames)}" />'),
-        ('<DefaultSampleRate Value="48000" />', f'<DefaultSampleRate Value="{int(rate)}" />'),
-        ('<WarpMarker Id="87" SecTime="10" BeatTime="0" />',
-         f'<WarpMarker Id="87" SecTime="{_num(start_s)}" BeatTime="0" />'),
-        ('<WarpMarker Id="88" SecTime="10.0146484375" BeatTime="0.03125" />',
-         f'<WarpMarker Id="88" SecTime="{_num(start_s + beat_s * _SECOND_MARKER_BEATS)}"'
-         f' BeatTime="{_num(_SECOND_MARKER_BEATS)}" />'),
+        (
+            '<RelativePath Value="SAMPLE_NAME" />',
+            f'<RelativePath Value="{_attr(relative_path)}" />',
+        ),
+        (
+            '<Path Value="SAMPLE_PATH" />',
+            f'<Path Value="{_attr(wav_path.as_posix())}" />',
+        ),
+        (
+            '<OriginalFileSize Value="8640230" />',
+            f'<OriginalFileSize Value="{int(size)}" />',
+        ),
+        (
+            '<DefaultDuration Value="1440000" />',
+            f'<DefaultDuration Value="{int(frames)}" />',
+        ),
+        (
+            '<DefaultSampleRate Value="48000" />',
+            f'<DefaultSampleRate Value="{int(rate)}" />',
+        ),
+        (
+            '<WarpMarker Id="87" SecTime="10" BeatTime="0" />',
+            f'<WarpMarker Id="87" SecTime="{_num(start_s)}" BeatTime="0" />',
+        ),
+        (
+            '<WarpMarker Id="88" SecTime="10.0146484375" BeatTime="0.03125" />',
+            f'<WarpMarker Id="88" SecTime="{_num(start_s + beat_s * _SECOND_MARKER_BEATS)}"'
+            f' BeatTime="{_num(_SECOND_MARKER_BEATS)}" />',
+        ),
     )
     text = template_text()
     for old, new in subs:

@@ -158,11 +158,10 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication as _QApp
 
 
-def _mouse_ev(kind, x, y=100.0, button=Qt.LeftButton,
-              buttons=Qt.LeftButton, mods=Qt.NoModifier):
-    return QMouseEvent(
-        kind, QPointF(x, y), QPointF(x, y), button, buttons, mods
-    )
+def _mouse_ev(
+    kind, x, y=100.0, button=Qt.LeftButton, buttons=Qt.LeftButton, mods=Qt.NoModifier
+):
+    return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, mods)
 
 
 def _press(w, x, mods=Qt.NoModifier):
@@ -170,15 +169,11 @@ def _press(w, x, mods=Qt.NoModifier):
 
 
 def _move(w, x, mods=Qt.NoModifier):
-    w.mouseMoveEvent(_mouse_ev(
-        QEvent.MouseMove, x, button=Qt.NoButton, mods=mods
-    ))
+    w.mouseMoveEvent(_mouse_ev(QEvent.MouseMove, x, button=Qt.NoButton, mods=mods))
 
 
 def _release(w, x):
-    w.mouseReleaseEvent(_mouse_ev(
-        QEvent.MouseButtonRelease, x, buttons=Qt.NoButton
-    ))
+    w.mouseReleaseEvent(_mouse_ev(QEvent.MouseButtonRelease, x, buttons=Qt.NoButton))
 
 
 def test_press_inside_selection_and_drag_emits_drag_out(qapp):

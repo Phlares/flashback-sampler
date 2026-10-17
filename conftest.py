@@ -14,6 +14,7 @@ def _clear_action_registry():
     tests that instantiate TurntableWindow (which registers transport
     actions) do not collide with each other."""
     from flashback_sampler.input.core.actions import clear_registry
+
     clear_registry()
     yield
     clear_registry()

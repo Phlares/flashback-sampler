@@ -2,6 +2,7 @@
 earlier tests are still alive (#93). These two tests run in file order:
 the first leaks a widget the way a real test does, the second checks
 that the suite's teardown deleted it."""
+
 from PySide6.QtWidgets import QWidget
 
 _held = []

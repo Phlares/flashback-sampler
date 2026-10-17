@@ -166,9 +166,7 @@ class CaptureSlot:
 
     def start_capture(self) -> None:
         if self.capture_source is None:
-            raise RuntimeError(
-                f"CaptureSlot {self.name!r} has no capture source bound"
-            )
+            raise RuntimeError(f"CaptureSlot {self.name!r} has no capture source bound")
         self.capture_source.start()
 
     def stop_capture(self) -> None:
@@ -179,10 +177,7 @@ class CaptureSlot:
                 pass
 
     def is_capturing(self) -> bool:
-        return (
-            self.capture_source is not None
-            and self.capture_source.is_running()
-        )
+        return self.capture_source is not None and self.capture_source.is_running()
 
     def xrun_count(self) -> int:
         if self.capture_source is None:
@@ -209,14 +204,10 @@ class CaptureSlot:
         RAM held by THIS slot's ring buffer (excluding checkouts — the
         scratch cache accounts for those).
         """
-        return compute_ram_bytes(
-            self.sample_rate, self.channels, self.buffer_seconds
-        )
+        return compute_ram_bytes(self.sample_rate, self.channels, self.buffer_seconds)
 
     def ram_mb(self) -> float:
-        return compute_ram_mb(
-            self.sample_rate, self.channels, self.buffer_seconds
-        )
+        return compute_ram_mb(self.sample_rate, self.channels, self.buffer_seconds)
 
     def buffered_seconds(self) -> float:
         return self.buffer.buffered_seconds

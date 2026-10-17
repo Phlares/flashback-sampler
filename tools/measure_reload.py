@@ -6,6 +6,7 @@ disk. Run: python tools/measure_reload.py 192000 900 ; and 48000 180.
 This is owner-run instrumentation, not shipped code: no test suite,
 run it by hand and paste the two output lines on the PR h sub-issue.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -39,15 +40,21 @@ def main(rate: int, seconds: int) -> None:
     h: int | None = None
     player: NativeScrubPlayer | None = None
     try:
-        buf = NativeAudioCircularBuffer(duration_seconds=seconds, sample_rate=rate, channels=2)
-        block = (np.random.default_rng(1).standard_normal((4096, 2)) * 0.1).astype(np.float32)
+        buf = NativeAudioCircularBuffer(
+            duration_seconds=seconds, sample_rate=rate, channels=2
+        )
+        block = (np.random.default_rng(1).standard_normal((4096, 2)) * 0.1).astype(
+            np.float32
+        )
         for _ in range(seconds * rate // 4096 + 1):
             buf.write(block)
         s = NativeScratch(budget_bytes=0)
         s.start()
         path = scratch_dir / "measure.wav"
         t0 = time.perf_counter()
-        h = s.checkout_create(buf, buf.total_written - seconds * rate, buf.total_written, path)
+        h = s.checkout_create(
+            buf, buf.total_written - seconds * rate, buf.total_written, path
+        )
         t_copy = time.perf_counter() - t0
         while True:
             write_state = s.checkout_info(h).write_state
@@ -72,7 +79,9 @@ def main(rate: int, seconds: int) -> None:
         bind_line = "no render backend -- bind timing not measurable on this box"
         try:
             t2 = time.perf_counter()
-            player.bind_checkout(s, h, 0, n, rate, 2)  # fallback: from file, on this thread
+            player.bind_checkout(
+                s, h, 0, n, rate, 2
+            )  # fallback: from file, on this thread
             t_bind_file = time.perf_counter() - t2
             # R-h11-1: on a box with no default output device,
             # bind_checkout can no-op instead of raising. A real bind
@@ -103,6 +112,8 @@ def main(rate: int, seconds: int) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print(f"usage: python {sys.argv[0]} <sample_rate_hz> <seconds>", file=sys.stderr)
+        print(
+            f"usage: python {sys.argv[0]} <sample_rate_hz> <seconds>", file=sys.stderr
+        )
         raise SystemExit(2)
     main(int(sys.argv[1]), int(sys.argv[2]))

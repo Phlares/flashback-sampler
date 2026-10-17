@@ -1,6 +1,7 @@
 """Hardware playback tests: the real default render endpoint. Run by hand:
     pytest tests/hw -m audio_hw -s
 You should hear a 1 s 440 Hz tone twice (48 kHz clip, then 96 kHz clip)."""
+
 import time
 
 import numpy as np

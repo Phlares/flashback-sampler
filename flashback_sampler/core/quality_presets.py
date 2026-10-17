@@ -31,6 +31,7 @@ class QualityPreset:
     selecting FULL and then editing the buffer duration to 12 min
     produces a slot with quality_preset="FULL" but buffer_seconds=720.
     """
+
     name: str
     sample_rate: int
     channels: int
@@ -38,14 +39,10 @@ class QualityPreset:
     description: str = ""
 
     def ram_bytes(self) -> int:
-        return compute_ram_bytes(
-            self.sample_rate, self.channels, self.buffer_seconds
-        )
+        return compute_ram_bytes(self.sample_rate, self.channels, self.buffer_seconds)
 
     def ram_mb(self) -> float:
-        return compute_ram_mb(
-            self.sample_rate, self.channels, self.buffer_seconds
-        )
+        return compute_ram_mb(self.sample_rate, self.channels, self.buffer_seconds)
 
 
 # Ordered as they appear in the UI cluster: heaviest at the top,
@@ -118,10 +115,7 @@ def compute_ram_bytes(
     if sample_rate <= 0 or channels <= 0 or buffer_seconds <= 0:
         return 0
     return int(
-        float(buffer_seconds)
-        * int(sample_rate)
-        * int(channels)
-        * BYTES_PER_SAMPLE
+        float(buffer_seconds) * int(sample_rate) * int(channels) * BYTES_PER_SAMPLE
     )
 
 

@@ -148,7 +148,10 @@ def default_scratch_dir() -> Path:
     there."""
     import platformdirs
 
-    return Path(platformdirs.user_cache_dir("flashback-sampler", appauthor=False)) / "scratch"
+    return (
+        Path(platformdirs.user_cache_dir("flashback-sampler", appauthor=False))
+        / "scratch"
+    )
 
 
 def load_scratch_dir(path: Path | None = None) -> Path:
@@ -193,7 +196,9 @@ def save_max_footprint_mb(mb: float, path: Path | None = None) -> None:
 
 def load_checkout_cache_mb(path: Path | None = None) -> float:
     try:
-        return max(0.0, float(get_pref(CHECKOUT_CACHE_MB_KEY, DEFAULT_CHECKOUT_CACHE_MB, path)))
+        return max(
+            0.0, float(get_pref(CHECKOUT_CACHE_MB_KEY, DEFAULT_CHECKOUT_CACHE_MB, path))
+        )
     except (TypeError, ValueError):
         return DEFAULT_CHECKOUT_CACHE_MB
 
@@ -204,7 +209,9 @@ def save_checkout_cache_mb(mb: float, path: Path | None = None) -> None:
 
 def load_drag_handle_mb(path: Path | None = None) -> float:
     try:
-        return max(0.0, float(get_pref(DRAG_HANDLE_MB_KEY, DEFAULT_DRAG_HANDLE_MB, path)))
+        return max(
+            0.0, float(get_pref(DRAG_HANDLE_MB_KEY, DEFAULT_DRAG_HANDLE_MB, path))
+        )
     except (TypeError, ValueError):
         return DEFAULT_DRAG_HANDLE_MB
 

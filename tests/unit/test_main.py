@@ -1,4 +1,5 @@
 """Tests for the app entry point's missing-native-core path."""
+
 from __future__ import annotations
 
 from PySide6.QtWidgets import QMessageBox

@@ -1,6 +1,7 @@
 """tests/fixtures/wavread.py is the WAV oracle for fb_wav_write. It must
 decode what wav.zig writes today (plain 44-byte header, tags 1/3) and a
 WAVE_FORMAT_EXTENSIBLE header with a padded odd-sized chunk in front."""
+
 from __future__ import annotations
 
 import struct
@@ -16,7 +17,12 @@ def test_float32_round_trips_bit_exact(tmp_path):
     native.wav_write(tmp_path / "f.wav", audio, 48_000, "FLOAT")
     got, info = read_wav(tmp_path / "f.wav")
     np.testing.assert_array_equal(got, audio)
-    assert (info.samplerate, info.channels, info.subtype, info.frames) == (48_000, 2, "FLOAT", 2)
+    assert (info.samplerate, info.channels, info.subtype, info.frames) == (
+        48_000,
+        2,
+        "FLOAT",
+        2,
+    )
 
 
 def test_pcm16_decodes_the_documented_quantizer(tmp_path):
@@ -24,7 +30,9 @@ def test_pcm16_decodes_the_documented_quantizer(tmp_path):
     audio = np.array([1.0, 0.5, -1.0, 0.0], dtype=np.float32)[:, None]
     native.wav_write(tmp_path / "p.wav", audio, 44_100, "PCM_16")
     got, info = read_wav(tmp_path / "p.wav")
-    expected = np.array([32767, 16384, -32767, 0], dtype=np.float32) / np.float32(32768.0)
+    expected = np.array([32767, 16384, -32767, 0], dtype=np.float32) / np.float32(
+        32768.0
+    )
     np.testing.assert_array_equal(got[:, 0], expected)
     assert (info.subtype, info.frames, info.channels) == ("PCM_16", 4, 1)
 
@@ -45,7 +53,9 @@ def test_extensible_header_and_odd_chunk_padding(tmp_path):
     # (IEEE float), then one float frame.
     fmt = struct.pack("<HHIIHH", 0xFFFE, 1, 8000, 32000, 4, 32)
     fmt += struct.pack("<HHI", 22, 32, 0x4)
-    fmt += struct.pack("<H", 3) + bytes.fromhex("0000000010008000 00AA00389B71".replace(" ", ""))
+    fmt += struct.pack("<H", 3) + bytes.fromhex(
+        "0000000010008000 00AA00389B71".replace(" ", "")
+    )
     assert len(fmt) == 40
     data = struct.pack("<f", 0.75)
     body = b"WAVE"

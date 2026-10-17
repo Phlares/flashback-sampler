@@ -1,4 +1,5 @@
 """Tests for TurntableWidget."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -87,8 +88,8 @@ def test_arm_target_is_bottom_inner_corner_buffer(qapp):
     g = tt.geometry()
     x, y = g.arm_target("buffer", 400.0, 300.0)
     # Bottom-right-ish (buffer arm points right-inward toward OUT→ column)
-    assert abs(x - 398) < 5    # near right edge
-    assert abs(y - 298) < 5    # near bottom edge
+    assert abs(x - 398) < 5  # near right edge
+    assert abs(y - 298) < 5  # near bottom edge
 
 
 def test_arm_target_is_bottom_inner_corner_clip(qapp):
@@ -141,7 +142,9 @@ def test_set_track_waveform_clamps_fill_fraction(qapp):
 def test_paint_with_partial_fill_no_exceptions(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(300, 300)
-    tt.set_track_waveform(0, np.array([0.5, 0.7, 0.3], dtype=np.float32), fill_fraction=0.25)
+    tt.set_track_waveform(
+        0, np.array([0.5, 0.7, 0.3], dtype=np.float32), fill_fraction=0.25
+    )
     tt.repaint()
 
 

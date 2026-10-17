@@ -5,6 +5,7 @@ The suite requires the built flashback_core library: there is no Python
 ring buffer, so a missing library exits the session with the build
 command instead of skipping.
 """
+
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication

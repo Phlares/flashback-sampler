@@ -21,13 +21,16 @@ from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
 @pytest.fixture
 def scratch():
     from flashback_sampler.core.native import NativeScratch
+
     s = NativeScratch(budget_bytes=1 << 30)
     yield s
     s.close()
 
 
 def _slot(scratch, tmp_path, preset, name=""):
-    return CaptureSlot.from_quality_preset(preset, name=name, scratch=scratch, scratch_dir=tmp_path)
+    return CaptureSlot.from_quality_preset(
+        preset, name=name, scratch=scratch, scratch_dir=tmp_path
+    )
 
 
 def test_from_quality_preset_builds_buffer_and_manager(scratch, tmp_path):
