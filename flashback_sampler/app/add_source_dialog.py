@@ -205,7 +205,7 @@ class AddSourceDialog(QDialog):
     # Result accessors
     # ------------------------------------------------------------------
 
-    def result_preset(self) -> QualityPreset | None:
+    def result_preset(self) -> QualityPreset:
         sr, ch, secs = self._current_inputs()
         return QualityPreset(
             name="CUSTOM",

@@ -56,6 +56,7 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+from flashback_sampler.core.checkout import CheckoutSubtype
 from flashback_sampler.core.drag_export import (
     BYTES_PER_SAMPLE,
     export_span,
@@ -350,7 +351,7 @@ class TurntableWindow(QMainWindow):
         # Drag-out export prefs — pool dir + bit depth used when rendering
         # a clip for an OS drag (see _render_for_drag).
         self._export_pool_dir: Path = load_export_pool_dir()
-        self._export_bit_depth = load_export_bit_depth()
+        self._export_bit_depth: CheckoutSubtype = load_export_bit_depth()
         self._drag_handle_mb: float = load_drag_handle_mb()
         self._drag_alc_sidecar: bool = load_drag_alc_sidecar()
 
@@ -1688,8 +1689,6 @@ class TurntableWindow(QMainWindow):
         if dlg.exec() != AddSourceDialog.Accepted:
             return
         preset = dlg.result_preset()
-        if preset is None:
-            return
         name = dlg.result_name() or default_name
         device = dlg.result_device()
         preset = self._probe_and_notify(preset, device)
