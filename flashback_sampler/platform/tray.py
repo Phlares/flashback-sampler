@@ -22,11 +22,11 @@ in-window buttons drive exactly the same actions.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QSystemTrayIcon, QMenu
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from flashback_sampler.core.quality_presets import MB
 from flashback_sampler.core.source_status import SEVERITY_RING_COLOR, Severity

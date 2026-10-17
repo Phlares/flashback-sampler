@@ -3,7 +3,6 @@ fb_playback_* symbol is a Python stub that records calls and serves a
 scripted state. The fill logic lives in Zig (core/src/Playback.zig) and
 is tested there."""
 
-import ctypes as C
 
 import numpy as np
 import pytest

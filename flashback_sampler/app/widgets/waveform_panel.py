@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from flashback_sampler.app.theme import EREBUS, font_family
+from flashback_sampler.app.theme import EREBUS
 from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
 
 

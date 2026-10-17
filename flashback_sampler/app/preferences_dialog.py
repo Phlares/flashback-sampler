@@ -6,7 +6,7 @@ so there's no OK/Apply step — Close just dismisses.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtWidgets import (
     QCheckBox,

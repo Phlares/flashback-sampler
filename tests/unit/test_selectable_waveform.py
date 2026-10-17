@@ -15,7 +15,6 @@ from flashback_sampler.app.widgets.selectable_waveform import (
     SelectableWaveform,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────
 # _edge_at
 # ─────────────────────────────────────────────────────────────────────────

@@ -5,8 +5,6 @@ timestamp formatter used across the UI.
 
 from __future__ import annotations
 
-import pytest
-
 from flashback_sampler.app.time_format import (
     format_time_cs,
     format_time_signed_cs,

@@ -8,10 +8,8 @@ also conform.
 
 from __future__ import annotations
 
-import pytest
-
-from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.capture_source import CaptureSource
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 
 
 def _minimal_buffer() -> NativeAudioCircularBuffer:

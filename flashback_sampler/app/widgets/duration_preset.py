@@ -14,7 +14,6 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from flashback_sampler.app.theme import EREBUS
 
-
 DEFAULT_PRESETS: tuple[float, ...] = (
     15.0,
     30.0,

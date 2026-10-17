@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -27,8 +26,6 @@ from flashback_sampler.app.audio_devices import (
     apply_rate_probe,
     list_capture_devices,
 )
-from flashback_sampler.app.time_format import format_time_signed_cs
-from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
     load_drag_alc_sidecar,
@@ -49,8 +46,10 @@ from flashback_sampler.app.config import (
 )
 from flashback_sampler.app.drag_out import perform_file_drag
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
+from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
 from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
 from flashback_sampler.app.widgets.nav_bar import NavBar

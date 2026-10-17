@@ -11,13 +11,11 @@ from flashback_sampler.core.quality_presets import (
     DEFAULT_PRESET_NAME,
     MB,
     PRESETS,
-    QualityPreset,
     compute_ram_bytes,
     compute_ram_mb,
     default_preset,
     preset_by_name,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # compute_ram_bytes / compute_ram_mb

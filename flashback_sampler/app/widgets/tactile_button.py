@@ -15,7 +15,7 @@ Spec (from the frontend-design skill pass):
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QPushButton
 

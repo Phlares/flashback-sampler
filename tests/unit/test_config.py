@@ -114,6 +114,7 @@ def test_export_pool_dir_defaults_to_documents(tmp_path):
 
 def test_export_bit_depth_roundtrip_and_validation(tmp_path):
     import pytest
+
     from flashback_sampler.app.config import (
         load_export_bit_depth,
         save_export_bit_depth,
@@ -131,8 +132,8 @@ def test_export_bit_depth_ignores_garbage_in_file(tmp_path):
     from flashback_sampler.app.config import (
         EXPORT_BIT_DEPTH_KEY,
         load_export_bit_depth,
+        save_config,
     )
-    from flashback_sampler.app.config import save_config
 
     cfg = tmp_path / "config.json"
     save_config({EXPORT_BIT_DEPTH_KEY: "banana"}, cfg)

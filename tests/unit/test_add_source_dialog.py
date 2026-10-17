@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from flashback_sampler.app.add_source_dialog import (
     SAMPLE_RATE_CHOICES,
     AddSourceDialog,

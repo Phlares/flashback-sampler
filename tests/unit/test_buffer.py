@@ -626,7 +626,6 @@ def test_buffer_gain_defaults_to_unity(buffer_cls):
 
 
 def test_buffer_gain_boost_scales_written_frames(buffer_cls):
-    import math
     import numpy as np
 
     buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
@@ -639,7 +638,6 @@ def test_buffer_gain_boost_scales_written_frames(buffer_cls):
 
 
 def test_buffer_gain_db_roundtrips_and_mutes(buffer_cls):
-    import math
 
     buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     buf.gain_db = -6.0

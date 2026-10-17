@@ -14,7 +14,7 @@ RegisterHotKey round-trip is testable on any platform.
 from __future__ import annotations
 
 import ctypes
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtWidgets import QApplication

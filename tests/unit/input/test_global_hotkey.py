@@ -174,8 +174,8 @@ def test_source_dispatch_invokes_bound_action(qapp):
 
 
 def test_source_close_unregisters_all(qapp):
-    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
     from flashback_sampler.input.core import Action, register
+    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
 
     register(
         Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None)
@@ -256,8 +256,8 @@ def test_native_event_filter_dispatches_despite_falsy_pointer(qapp):
 
 
 def test_failed_registration_is_skipped(qapp):
-    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
     from flashback_sampler.input.core import Action, register
+    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
 
     register(
         Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None)

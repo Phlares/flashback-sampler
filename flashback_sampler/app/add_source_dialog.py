@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
@@ -40,7 +39,6 @@ from flashback_sampler.core.quality_presets import (
     QualityPreset,
     compute_ram_mb,
 )
-
 
 # Sample rate options, ordered high → low. The default (48k) is
 # selected by value via findData, not by position.

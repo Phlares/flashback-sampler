@@ -24,7 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 
@@ -38,7 +38,6 @@ from flashback_sampler.core.manifest import (
     write_manifest,
 )
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
-
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
 CheckoutFormat = Literal["WAV"]
@@ -80,7 +79,7 @@ class Checkout:
     start_frame: int
     abs_sample_start: int
     abs_sample_end: int
-    parent_id: Optional[str] = None
+    parent_id: str | None = None
     trim_in_samples: int = 0
     trim_out_samples: int = 0
     state: CheckoutState = "pending"
@@ -107,7 +106,7 @@ class Checkout:
 
 
 def _destroy_quietly(
-    scratch: NativeScratch, handle: Optional[int], path: Optional[Path] = None
+    scratch: NativeScratch, handle: int | None, path: Path | None = None
 ) -> None:
     """Best-effort cleanup after a failed checkout create/adopt. Swallows
     every error -- cleanup must not mask the original failure the caller
@@ -179,7 +178,7 @@ class CheckoutManager:
         self._lock = threading.Lock()
         self._checkouts: dict[str, Checkout] = {}
         self._file_refs: dict[Path, int] = {}
-        self._pinned_id: Optional[str] = None
+        self._pinned_id: str | None = None
 
     # ------------------------------------------------------------------
     # Creation
@@ -534,7 +533,7 @@ class CheckoutManager:
             )
             self._write_manifest(co)  # takes no lock of its own -- safe to call here
 
-    def pin(self, checkout_id: Optional[str]) -> None:
+    def pin(self, checkout_id: str | None) -> None:
         """The selected clip: pinned (never evicted) and preloaded. One
         at a time per manager; None unpins."""
         # R-h8l (round 2): the previous shape released the lock between
@@ -608,7 +607,7 @@ class CheckoutManager:
                 ) from e
         return target
 
-    def mint_trim(self, checkout_id: str) -> Optional[Checkout]:
+    def mint_trim(self, checkout_id: str) -> Checkout | None:
         """The clip's trim as a saved slice, or None when there is no
         trim or the clip's scratch write failed: a slice needs the file,
         while the RAM copy still exports on its own. Save and drag both

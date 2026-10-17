@@ -13,7 +13,6 @@ so unit tests can drive it headless.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from flashback_sampler.app import config as app_config
 from flashback_sampler.app.audio_devices import (
@@ -25,14 +24,13 @@ from flashback_sampler.app.audio_devices import (
     default_capture_device,
     default_output_device,
 )
+from flashback_sampler.core import native
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
 from flashback_sampler.core.manifest import resolve_audio, scan
-from flashback_sampler.core import native
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
-
 
 # Default capture target: 5-minute rolling buffer at 48 kHz stereo.
 # Size: 5 * 60 * 48_000 * 2 * 4 bytes ≈ 110 MB. main.py's --buffer-minutes
@@ -66,7 +64,7 @@ class AppState:
         # every launch. Fall back to the app-owned cache dir, which is
         # always creatable, and record what happened so the window can
         # tell the user instead of silently redirecting their scratch.
-        self.scratch_dir_error: Optional[str] = None
+        self.scratch_dir_error: str | None = None
         try:
             requested_scratch_dir.mkdir(parents=True, exist_ok=True)
             self.scratch_dir = requested_scratch_dir
@@ -131,8 +129,8 @@ class AppState:
 
         # Device selections. Start with the system defaults and let
         # the main window override them from config.json on startup.
-        self.capture_spec: Optional[CaptureDevice] = default_capture_device()
-        self.output_spec: Optional[OutputDevice] = default_output_device()
+        self.capture_spec: CaptureDevice | None = default_capture_device()
+        self.output_spec: OutputDevice | None = default_output_device()
         if self.output_spec is not None:
             self.scrub_player.set_device(self.output_spec.id)
 
@@ -161,7 +159,7 @@ class AppState:
         preset: QualityPreset,
         name: str = "",
         max_active_checkouts: int = 16,
-        capture_spec: Optional[CaptureDevice] = None,
+        capture_spec: CaptureDevice | None = None,
         armed: bool = True,
     ) -> CaptureSlot:
         """
@@ -282,7 +280,7 @@ class AppState:
 
     def effective_capture_spec_for_slot(
         self, slot: CaptureSlot
-    ) -> Optional[CaptureDevice]:
+    ) -> CaptureDevice | None:
         """
         Return the capture device that should actually be used to open
         a source for `slot`. Slot-level override wins; falls back to
@@ -395,7 +393,7 @@ class AppState:
     # Master transport — START / STOP CAPTURE for every armed slot
     # ------------------------------------------------------------------
 
-    def start_rolling(self) -> tuple[int, Optional[Exception]]:
+    def start_rolling(self) -> tuple[int, Exception | None]:
         """
         Enter the rolling state: for every armed slot that isn't
         already capturing, build + bind + start a capture source.
@@ -403,7 +401,7 @@ class AppState:
         partial failures without aborting the whole operation.
         """
         started = 0
-        first_error: Optional[Exception] = None
+        first_error: Exception | None = None
         for slot in self.slots:
             if not slot.armed:
                 continue
@@ -448,7 +446,7 @@ class AppState:
         device = self.effective_capture_spec_for_slot(slot)
         return [] if device is None else [device]
 
-    def preview_feedback_warning(self) -> Optional[str]:
+    def preview_feedback_warning(self) -> str | None:
         """One line naming the preview output and every armed slot's
         device that records it, or None. Playing a clip through such an
         output lands back in the ring. A warning, not a refusal: the

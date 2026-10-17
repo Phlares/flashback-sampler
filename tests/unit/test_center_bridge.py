@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
 
 

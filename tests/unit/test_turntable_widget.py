@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, QEvent
-from PySide6.QtGui import QMouseEvent
 
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 

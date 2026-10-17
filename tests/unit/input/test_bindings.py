@@ -1,8 +1,9 @@
 import pytest
+
 from flashback_sampler.input.core.actions import (
     Action,
-    register,
     clear_registry,
+    register,
 )
 from flashback_sampler.input.core.bindings import BindingTable
 from flashback_sampler.input.core.events import InputEvent

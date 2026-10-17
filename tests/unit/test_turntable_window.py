@@ -268,8 +268,9 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     the developer's desktop during VSCode's auto-test-on-save runs,
     which is exactly what we don't want.
     """
-    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtCore import QEvent, QPoint, Qt
     from PySide6.QtGui import QMouseEvent
+
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
 
     chip = SourceIndicator(0, "Test")
@@ -333,6 +334,7 @@ def test_default_buffer_selection_skipped_if_buffer_too_small(qapp):
     """If the buffered audio is shorter than the preset duration,
     start_frac clamps to 0."""
     import numpy as np
+
     from flashback_sampler.app.state import AppState
 
     s = AppState(buffer_seconds=10.0, sample_rate=48000, channels=2)  # only 10s
@@ -388,6 +390,7 @@ def test_user_selection_drifts_with_buffer(qapp):
     buffer advances to T=120s, because absolute samples are fixed but the
     display window moves forward."""
     import numpy as np
+
     from flashback_sampler.app.state import AppState
 
     # Need a buffer capacity >= 120s so the displayed window can grow to 120s.
@@ -432,6 +435,7 @@ def test_clear_selection_returns_to_default(qapp, state):
 
 def test_switching_tracks_resets_selection_mode(qapp, state):
     import numpy as np
+
     from flashback_sampler.core.quality_presets import QualityPreset
 
     preset = QualityPreset(
@@ -530,6 +534,7 @@ def test_clip_ring_click_shows_that_clip_in_panel(qapp, state):
 def test_clip_ring_click_does_not_change_active_slot(qapp, state):
     """Clicking a clip-side ring must NOT change which slot is active."""
     import numpy as np
+
     from flashback_sampler.core.quality_presets import QualityPreset
 
     preset = QualityPreset(
@@ -1059,9 +1064,9 @@ def test_add_source_applies_rate_probe(qapp, state, monkeypatch):
 def _fake_player(monkeypatch, state):
     """Swap state.scrub_player for a NativeScrubPlayer bound to a fake lib.
     The ring buffers stay on the real library; only the player is faked."""
-    from tests.unit.test_scrub_player import _FakePlaybackLib
     from flashback_sampler.core import native
     from flashback_sampler.core.scrub_player import NativeScrubPlayer
+    from tests.unit.test_scrub_player import _FakePlaybackLib
 
     fake = _FakePlaybackLib()
     with monkeypatch.context() as m:

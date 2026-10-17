@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 BYTES_PER_SAMPLE = 4  # float32 — deferred: per-slot dtype config
 MB = 1024 * 1024
 

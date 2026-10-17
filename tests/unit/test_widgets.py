@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────
 # DurationPreset — format + step logic (no Qt needed)
 # ─────────────────────────────────────────────────────────────────────────

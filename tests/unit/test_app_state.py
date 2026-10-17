@@ -297,8 +297,8 @@ def test_add_slot_succeeds_within_the_max_footprint():
 
 
 def test_max_footprint_zero_means_uncapped(monkeypatch):
-    from flashback_sampler.core.quality_presets import preset_by_name
     import flashback_sampler.app.state as state_mod
+    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)
@@ -315,8 +315,8 @@ def test_max_footprint_negative_floors_to_uncapped():
 
 
 def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
-    from flashback_sampler.core.quality_presets import preset_by_name
     import flashback_sampler.app.state as state_mod
+    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)  # uncapped: only the free-memory clause can refuse
@@ -329,8 +329,8 @@ def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
 
 
 def test_free_memory_clause_is_skipped_when_the_platform_cannot_say(monkeypatch):
-    from flashback_sampler.core.quality_presets import preset_by_name
     import flashback_sampler.app.state as state_mod
+    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)
@@ -339,8 +339,8 @@ def test_free_memory_clause_is_skipped_when_the_platform_cannot_say(monkeypatch)
 
 
 def test_default_max_footprint_is_a_quarter_of_physical_ram(monkeypatch, tmp_path):
-    import flashback_sampler.app.state as state_mod
     import flashback_sampler.app.config as cfg
+    import flashback_sampler.app.state as state_mod
 
     monkeypatch.setattr(
         state_mod.native, "mem_info", lambda: (64 * 1024**3, 32 * 1024**3)
@@ -451,10 +451,9 @@ def test_build_capture_for_slot_uses_override_path():
     Verify the delegation without touching real hardware: swap out
     build_capture_source with a stub that records which spec it saw.
     """
+    import flashback_sampler.app.state as state_mod
     from flashback_sampler.app.audio_devices import CaptureDevice
     from flashback_sampler.core.quality_presets import preset_by_name
-
-    import flashback_sampler.app.state as state_mod
 
     captured_device = {}
 
@@ -620,10 +619,9 @@ def test_rebuild_buffer_preserves_record_gain():
 def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
     """Two or more capture_specs go to build_mixed_capture_source with the
     devices themselves — no factories, no staging buffers in Python."""
+    import flashback_sampler.app.state as state_mod
     from flashback_sampler.app.audio_devices import CaptureDevice
     from flashback_sampler.core.quality_presets import preset_by_name
-
-    import flashback_sampler.app.state as state_mod
 
     seen = {}
 
@@ -704,8 +702,9 @@ def test_uncreatable_scratch_dir_falls_back_to_default_and_continues(
     denied, stale removable-media path, ...) must not brick launch --
     AppState falls back to config.default_scratch_dir() and records what
     happened instead of raising out of __init__."""
-    import flashback_sampler.app.state as state_mod
     from pathlib import Path as _Path
+
+    import flashback_sampler.app.state as state_mod
 
     bad_dir = tmp_path / "unwritable"
     fallback_dir = tmp_path / "fallback"

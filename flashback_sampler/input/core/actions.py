@@ -1,5 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 RepeatPolicy = Literal["fire", "ignore_repeat"]
 

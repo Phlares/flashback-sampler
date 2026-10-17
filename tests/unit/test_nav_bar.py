@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from flashback_sampler.app.widgets.nav_bar import NavBar
 
 
@@ -53,8 +52,9 @@ def test_set_source_names_empty_uses_defaults(qapp):
 
 
 def test_source_indicator_right_click_emits_context_menu(qapp):
-    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtCore import QEvent, QPoint, Qt
     from PySide6.QtGui import QMouseEvent
+
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
 
     ind = SourceIndicator(0, "SOURCE 1")
@@ -72,8 +72,9 @@ def test_source_indicator_right_click_emits_context_menu(qapp):
 
 
 def test_source_indicator_left_click_only_emits_clicked(qapp):
-    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtCore import QEvent, QPoint, Qt
     from PySide6.QtGui import QMouseEvent
+
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
 
     ind = SourceIndicator(0, "SOURCE 1")

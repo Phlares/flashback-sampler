@@ -6,7 +6,6 @@ from flashback_sampler.platform.tray import (
     tooltip_text,
 )
 
-
 # -- pure helpers (no Qt) -------------------------------------------------
 
 

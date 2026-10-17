@@ -11,8 +11,8 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPen, QMouseEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.theme import EREBUS
@@ -82,7 +82,7 @@ class TurntableWidget(QWidget):
         self._track_count = 3
         self._selected_track = 0
         self._track_statuses: list[str] = ["armed", "armed", "paused"]
-        self._track_waveforms: dict[int, tuple["np.ndarray", float]] = {}
+        self._track_waveforms: dict[int, tuple[np.ndarray, float]] = {}
         self._track_selections: dict[int, tuple[float, float, str]] = {}
         self.setMinimumSize(200, 200)
 
@@ -126,7 +126,7 @@ class TurntableWidget(QWidget):
         return -1 if self._side == "buffer" else +1
 
     def set_track_waveform(
-        self, track_idx: int, samples: "np.ndarray", fill_fraction: float = 1.0
+        self, track_idx: int, samples: np.ndarray, fill_fraction: float = 1.0
     ) -> None:
         """Store normalized amplitudes [0, 1] to plot as perpendicular bars
         along the track's ring arc. fill_fraction in [0, 1] = what portion

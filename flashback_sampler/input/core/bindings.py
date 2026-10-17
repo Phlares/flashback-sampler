@@ -6,7 +6,6 @@ import platformdirs
 from flashback_sampler.input.core import actions
 from flashback_sampler.input.core.events import InputEvent
 
-
 SCHEMA_VERSION = 1
 
 

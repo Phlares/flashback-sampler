@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 APP_DIR_NAME = "flashback-sampler"
 CONFIG_FILE_NAME = "config.json"
 

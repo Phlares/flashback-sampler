@@ -32,11 +32,12 @@ def test_action_with_default_binding_and_repeat_policy():
 
 
 import pytest
+
 from flashback_sampler.input.core.actions import (
-    register,
-    get,
     all_actions,
     clear_registry,
+    get,
+    register,
 )
 
 

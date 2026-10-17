@@ -398,6 +398,7 @@ def test_captures_preview_matches_a_process_source_only_in_our_own_tree(
     """Per-process loopback captures the target's process tree (include
     mode), so it records the preview only when that tree is ours."""
     import os
+
     from flashback_sampler.app.audio_devices import captures_preview
 
     roots = {4242: 1, 5151: 5151, os.getpid(): 1}

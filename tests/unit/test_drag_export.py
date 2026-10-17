@@ -8,9 +8,8 @@ from typing import get_args
 
 import pytest
 
-from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
-from flashback_sampler.core.checkout import CheckoutManager, CheckoutSubtype
 from flashback_sampler.core import drag_export
+from flashback_sampler.core.checkout import CheckoutManager, CheckoutSubtype
 from flashback_sampler.core.drag_export import (
     BYTES_PER_SAMPLE,
     DragRender,
@@ -21,6 +20,7 @@ from flashback_sampler.core.drag_export import (
     resolve_collision,
     sanitize_source_name,
 )
+from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from tests.fixtures.sine_source import ramp_block
 from tests.fixtures.wavread import read_wav
 
@@ -224,7 +224,8 @@ def test_render_creates_pool_dir(scratch, tmp_path):
 
 
 def _alc_clip(path):
-    import gzip, xml.etree.ElementTree as ET
+    import gzip
+    import xml.etree.ElementTree as ET
 
     with gzip.open(path, "rb") as fh:
         return next(ET.fromstring(fh.read()).iter("AudioClip"))

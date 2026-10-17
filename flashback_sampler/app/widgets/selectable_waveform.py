@@ -16,7 +16,7 @@ even as the live waveform scrolls).
 from __future__ import annotations
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.theme import EREBUS
@@ -24,7 +24,6 @@ from flashback_sampler.app.widgets.waveform_view import (
     WaveformView,
     _paint_selection_duration_label,
 )
-
 
 # How close (in widget pixels) the cursor must be to an existing
 # selection edge to grab it for dragging. 6 px is comfortable with a

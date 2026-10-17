@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
 
 

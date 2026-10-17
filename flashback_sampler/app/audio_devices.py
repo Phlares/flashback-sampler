@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import functools
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from flashback_sampler.core import native
 from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.platform.capabilities import loopback_supported
-
 
 CaptureKind = Literal["loopback", "input", "process_loopback"]
 

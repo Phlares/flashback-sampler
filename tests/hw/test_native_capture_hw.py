@@ -8,8 +8,7 @@ import pytest
 
 from flashback_sampler.core import native
 from flashback_sampler.core.native import NativeAudioCircularBuffer
-from flashback_sampler.core.native_capture import NativeCaptureSource
-from flashback_sampler.core.native_capture import NativeMixedSource
+from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource
 
 pytestmark = pytest.mark.audio_hw
 

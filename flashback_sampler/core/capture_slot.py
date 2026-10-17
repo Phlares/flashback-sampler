@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
@@ -64,7 +63,7 @@ class CaptureSlot:
     quality_preset: str  # name of the QualityPreset used (for display / presets)
     buffer: NativeAudioCircularBuffer
     checkout_manager: CheckoutManager
-    capture_source: Optional[CaptureSource] = None
+    capture_source: CaptureSource | None = None
     # Per-slot capture routing. `capture_specs` is the canonical list:
     # empty means follow AppState's global spec; one entry means a
     # standard single-source route; two-or-more entries are passed to
@@ -83,7 +82,7 @@ class CaptureSlot:
     # slot. Restored when the user switches back so each source
     # remembers its own "which clip was I looking at" state. Cleared
     # when the referenced checkout is discarded or saved out.
-    focused_checkout_id: Optional[str] = None
+    focused_checkout_id: str | None = None
 
     # ------------------------------------------------------------------
     # Backwards-compatible single-spec access
@@ -116,7 +115,7 @@ class CaptureSlot:
         *,
         scratch: NativeScratch,
         scratch_dir,
-    ) -> "CaptureSlot":
+    ) -> CaptureSlot:
         """
         Build a new slot from a QualityPreset. The ring buffer and
         checkout manager are constructed immediately; the capture
@@ -184,7 +183,7 @@ class CaptureSlot:
             return 0
         return self.capture_source.xrun_count()
 
-    def last_error(self) -> Optional[str]:
+    def last_error(self) -> str | None:
         if self.capture_source is None:
             return None
         fn = getattr(self.capture_source, "last_error", None)

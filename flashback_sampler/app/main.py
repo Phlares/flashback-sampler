@@ -15,8 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from flashback_sampler.app.state import DEFAULT_BUFFER_SECONDS, AppState
