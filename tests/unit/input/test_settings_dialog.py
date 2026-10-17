@@ -200,11 +200,7 @@ def test_filter_hides_non_matching_rows(qapp, tmp_path):
     table = BindingTable(storage_path=tmp_path / "b.json")
     dialog = KeybindingsDialog(table)
     dialog._apply_filter("alp")
-    visible = {
-        r.action.id
-        for r in dialog._rows
-        if not r.binding_label.parentWidget().isHidden()
-    }
+    visible = {r.action.id for r in dialog._rows if not r.container.isHidden()}
     assert visible == {"t.a"}
 
 

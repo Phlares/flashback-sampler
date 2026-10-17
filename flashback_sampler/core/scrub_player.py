@@ -49,13 +49,19 @@ class NativeScrubPlayer:
                 )
         return self._h
 
+    @property
+    def _core(self) -> C.CDLL:
+        # _handle() sets _lib before _h exists, and callers check _h first.
+        assert self._lib is not None
+        return self._lib
+
     # -- transport ------------------------------------------------------
     def bind(self, audio: np.ndarray, sample_rate: int) -> None:
         if not self._handle():
             return
         audio = native._frames2d(audio)
         n_frames, channels = audio.shape
-        status = self._lib.fb_playback_bind(
+        status = self._core.fb_playback_bind(
             self._h, native._as_f32p(audio), n_frames, int(sample_rate), channels
         )
         if status == native._INVALID_ARG:
@@ -78,7 +84,7 @@ class NativeScrubPlayer:
         the checkout's RAM copy or reads its file — no numpy round trip."""
         if not self._handle():
             return
-        status = self._lib.fb_playback_bind_checkout(
+        status = self._core.fb_playback_bind_checkout(
             self._h, scratch.handle, h, int(start), int(n)
         )
         if status == native._INVALID_ARG:
@@ -93,7 +99,7 @@ class NativeScrubPlayer:
     def play(self) -> None:
         if not self._handle():
             return
-        status = self._lib.fb_playback_play(self._h)
+        status = self._core.fb_playback_play(self._h)
         if status != native._OK:
             raise RuntimeError(
                 f"fb_playback_play failed with status {status}: {self.last_error() or ''}"
@@ -101,7 +107,7 @@ class NativeScrubPlayer:
 
     def pause(self) -> None:
         if self._h:
-            self._lib.fb_playback_pause(self._h)
+            self._core.fb_playback_pause(self._h)
 
     def stop(self) -> None:
         self.pause()
@@ -110,7 +116,7 @@ class NativeScrubPlayer:
     def seek_samples(self, pos: int) -> None:
         if self._h:
             # The ABI takes u64; a negative int must not wrap on the wire.
-            self._lib.fb_playback_seek(self._h, max(0, int(pos)))
+            self._core.fb_playback_seek(self._h, max(0, int(pos)))
 
     def seek(self, seconds: float) -> None:
         self.seek_samples(int(round(seconds * self.sample_rate)))
@@ -118,7 +124,7 @@ class NativeScrubPlayer:
     def set_device(self, device: str) -> None:
         self.device = device
         if self._h:
-            self._lib.fb_playback_set_device(self._h, device.encode("utf-8"))
+            self._core.fb_playback_set_device(self._h, device.encode("utf-8"))
 
     # -- state ----------------------------------------------------------
     @property
@@ -140,19 +146,19 @@ class NativeScrubPlayer:
     def last_error(self) -> str | None:
         if not self._h:
             return None
-        raw = self._lib.fb_playback_last_error(self._h)
+        raw = self._core.fb_playback_last_error(self._h)
         return raw.decode("utf-8", "replace") if raw else None
 
     def close(self) -> None:
         self._closed = True
         if self._h:
-            self._lib.fb_playback_destroy(self._h)
+            self._core.fb_playback_destroy(self._h)
             self._h = None
 
     def _state(self) -> native.FbPlaybackState:
         st = native.FbPlaybackState()
         if self._h:
-            self._lib.fb_playback_state(self._h, C.byref(st))
+            self._core.fb_playback_state(self._h, C.byref(st))
         return st
 
     def __del__(self):

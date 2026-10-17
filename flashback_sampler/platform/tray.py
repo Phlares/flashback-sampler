@@ -176,9 +176,10 @@ class SystemTray(QObject):
 
         self._menu.addSeparator()
 
-        if self._on_settings is not None:
+        on_settings = self._on_settings
+        if on_settings is not None:
             act_settings = QAction("Settings…", self)
-            act_settings.triggered.connect(lambda: self._on_settings())
+            act_settings.triggered.connect(lambda: on_settings())
             self._menu.addAction(act_settings)
 
         act_quit = QAction("Quit flashback-sampler", self)

@@ -108,6 +108,7 @@ def _win_register(hwnd: int, hotkey_id: int, mods: int, vk: int) -> bool:
     # message Qt delivers reliably via the native filter, even while the window
     # is minimized/hidden. argtypes are mandatory — without HWND typing the
     # 64-bit handle gets truncated to 32 bits and RegisterHotKey targets nothing.
+    assert _wintypes is not None  # Windows-only path; wintypes imports there
     user32 = ctypes.windll.user32
     user32.RegisterHotKey.argtypes = [
         _wintypes.HWND,
@@ -120,6 +121,7 @@ def _win_register(hwnd: int, hotkey_id: int, mods: int, vk: int) -> bool:
 
 
 def _win_unregister(hwnd: int, hotkey_id: int) -> None:
+    assert _wintypes is not None  # Windows-only path; wintypes imports there
     user32 = ctypes.windll.user32
     user32.UnregisterHotKey.argtypes = [_wintypes.HWND, ctypes.c_int]
     user32.UnregisterHotKey(_wintypes.HWND(hwnd), hotkey_id)

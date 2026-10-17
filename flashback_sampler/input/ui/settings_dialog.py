@@ -26,6 +26,7 @@ from flashback_sampler.input.sources.global_hotkey import parse_hotkey
 @dataclass
 class _Row:
     action: Action
+    container: QWidget
     binding_label: QLabel
     rebind_btn: QPushButton
     clear_btn: QPushButton
@@ -149,6 +150,7 @@ class KeybindingsDialog(QDialog):
         self._rows.append(
             _Row(
                 action=action,
+                container=container,
                 binding_label=binding_label,
                 rebind_btn=rebind_btn,
                 clear_btn=clear_btn,
@@ -262,12 +264,11 @@ class KeybindingsDialog(QDialog):
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
         for row in self._rows:
-            container = row.binding_label.parentWidget()
             if not needle:
-                container.setVisible(True)
+                row.container.setVisible(True)
                 continue
             hay = f"{row.action.name} {row.action.category} {row.action.id}".lower()
-            container.setVisible(needle in hay)
+            row.container.setVisible(needle in hay)
 
     def accept(self) -> None:
         # Commit the edit buffer through the table's single normalization path.
