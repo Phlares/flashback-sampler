@@ -1,0 +1,19 @@
+# Commit hook and CI lint job (test.yml `lint`) run this one file with prek.
+# Install once per main checkout: prek install --allow-missing-config
+# (the flag keeps commits working on branches older than this file).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+        # The upstream hook also formats code blocks in Markdown files.
+        types_or: [python, pyi, jupyter]
+  - repo: local
+    hooks:
+      - id: zig-fmt
+        name: zig fmt
+        entry: zig fmt
+        language: system
+        files: ^core/.*\.zig$
