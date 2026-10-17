@@ -1,6 +1,6 @@
 """Tests for CenterBridge widget."""
-from __future__ import annotations
 
+from __future__ import annotations
 
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
 

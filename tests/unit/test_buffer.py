@@ -79,7 +79,9 @@ def test_write_pos_wraps_at_the_physical_buffer_size_after_a_real_wrap(buffer_cl
     correct 804 at these exact numbers; see the Task 7 fix report's
     mutation record)."""
     buf = buffer_cls(duration_seconds=1.0, sample_rate=100, channels=1)
-    chunk = np.zeros((100, 1), dtype=np.float32)  # == buffer_size: one write() call per lap, no multi-wrap
+    chunk = np.zeros(
+        (100, 1), dtype=np.float32
+    )  # == buffer_size: one write() call per lap, no multi-wrap
     for _ in range(50):  # 5000 frames total, past storage_frames (100 + 4096 = 4196)
         buf.write(chunk)
     assert buf.write_pos == buf.total_written % buf.buffer.shape[0]
@@ -246,7 +248,9 @@ def test_get_summary_bins_constant_amplitude_is_exact_rms(buffer_cls):
     # Ring.Config.summary_slot_frames change together.
     buf = buffer_cls(duration_seconds=2.0, sample_rate=4096, channels=1)
     buf.write(np.full((8192, 1), 0.5, dtype=np.float32))  # == 2 slots exactly
-    bins = buf.get_summary_bins(n_bins=2)  # bin_span defaults to 8192/2 == 4096, one slot per bin
+    bins = buf.get_summary_bins(
+        n_bins=2
+    )  # bin_span defaults to 8192/2 == 4096, one slot per bin
     assert bins.shape == (2, 1)
     np.testing.assert_allclose(bins, 0.5, atol=1e-6)
 
@@ -318,7 +322,9 @@ def test_writer_and_reader_concurrent_no_corruption(buffer_cls):
                 reads_with_data += 1
             reads += 1
         assert reads > 10  # we actually did some work
-        assert reads_with_data > 0, "every read came back empty -- get_segment never returned data under contention"
+        assert reads_with_data > 0, (
+            "every read came back empty -- get_segment never returned data under contention"
+        )
     finally:
         stop.set()
         t.join(timeout=1.0)
@@ -513,7 +519,7 @@ def test_get_segment_does_not_stall_writer(buffer_cls):
     # (which would be multiples of 4 ms).
     assert results["max_write_time"] < 0.004, (
         f"writer was stalled: max write() duration = "
-        f"{results['max_write_time']*1000:.2f}ms"
+        f"{results['max_write_time'] * 1000:.2f}ms"
     )
 
 
@@ -579,9 +585,7 @@ def test_get_peak_bins_stable_under_rolling_window(buffer_cls):
     """
     sr = 10_000
     duration = 10.0  # 100 000-sample ring → span=900 per bin → stride=3
-    buf = buffer_cls(
-        duration_seconds=duration, sample_rate=sr, channels=1
-    )
+    buf = buffer_cls(duration_seconds=duration, sample_rate=sr, channels=1)
     rng = np.random.default_rng(seed=0)
     content = (rng.standard_normal(int(duration * sr)) * 100).astype(np.float32)
     buf.write(content[:, None])
@@ -592,9 +596,7 @@ def test_get_peak_bins_stable_under_rolling_window(buffer_cls):
     # rolls by 10 samples total, far less than one bin's 900 samples).
     frames = []
     for _ in range(10):
-        frames.append(
-            buf.get_peak_bins(seconds=duration, n_bins=100)[:, 1, 0].copy()
-        )
+        frames.append(buf.get_peak_bins(seconds=duration, n_bins=100)[:, 1, 0].copy())
         buf.write(np.zeros((1, 1), dtype=np.float32))
 
     mid = slice(30, 70)  # bins well inside the window
@@ -604,15 +606,17 @@ def test_get_peak_bins_stable_under_rolling_window(buffer_cls):
     ratio = (per_bin_drift / (per_bin_mean + 1e-6)).mean()
 
     assert ratio < 0.03, (
-        f"bin heights drifted by avg {ratio*100:.1f}% across small writer "
+        f"bin heights drifted by avg {ratio * 100:.1f}% across small writer "
         f"advances — stride sampling is not abs-aligned (flicker regression)"
     )
 
 
 # ── Per-source record gain (applied at the write boundary) ──────────────
 
+
 def test_buffer_gain_defaults_to_unity(buffer_cls):
     import numpy as np
+
     buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     assert buf.gain == 1.0
     assert buf.gain_db == 0.0
@@ -622,8 +626,8 @@ def test_buffer_gain_defaults_to_unity(buffer_cls):
 
 
 def test_buffer_gain_boost_scales_written_frames(buffer_cls):
-    import math
     import numpy as np
+
     buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     buf.gain_db = 6.0  # ~2x
     assert abs(buf.gain - 10 ** (6.0 / 20.0)) < 1e-6
@@ -634,7 +638,7 @@ def test_buffer_gain_boost_scales_written_frames(buffer_cls):
 
 
 def test_buffer_gain_db_roundtrips_and_mutes(buffer_cls):
-    import math
+
     buf = buffer_cls(duration_seconds=1, sample_rate=1000, channels=1)
     buf.gain_db = -6.0
     assert abs(buf.gain_db - (-6.0)) < 1e-6

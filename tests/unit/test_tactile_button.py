@@ -6,7 +6,6 @@ paintEvent correctness is verified by manual QA on Windows.
 
 from __future__ import annotations
 
-
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 
 

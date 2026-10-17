@@ -1,7 +1,7 @@
 """TurntableWindow — dual-turntable layout, the application's main window."""
+
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -26,8 +26,6 @@ from flashback_sampler.app.audio_devices import (
     apply_rate_probe,
     list_capture_devices,
 )
-from flashback_sampler.app.time_format import format_time_signed_cs
-from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.config import (
     config_dir,
     load_drag_alc_sidecar,
@@ -48,8 +46,10 @@ from flashback_sampler.app.config import (
 )
 from flashback_sampler.app.drag_out import perform_file_drag
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
+from flashback_sampler.app.process_picker_dialog import ProcessPickerDialog
 from flashback_sampler.app.state import AppState
 from flashback_sampler.app.theme import EREBUS
+from flashback_sampler.app.time_format import format_time_signed_cs
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
 from flashback_sampler.app.widgets.duration_preset import DEFAULT_PRESETS
 from flashback_sampler.app.widgets.nav_bar import NavBar
@@ -87,8 +87,8 @@ from flashback_sampler.platform.tray import SystemTray
 # Linear magnitude of the silence floor, for the per-source silent-duration tally.
 _SILENCE_MAG = 10.0 ** (SILENCE_DBFS / 20.0)
 
-SELECTION_COLOR_BUFFER = "#FFD900"   # yellow
-SELECTION_COLOR_CLIP = "#FF9500"     # orange
+SELECTION_COLOR_BUFFER = "#FFD900"  # yellow
+SELECTION_COLOR_CLIP = "#FF9500"  # orange
 
 
 class TurntableWindow(QMainWindow):
@@ -119,7 +119,9 @@ class TurntableWindow(QMainWindow):
         turntable_row.setSpacing(0)
 
         self.buffer_turntable = TurntableWidget(side="buffer")
-        self.buffer_turntable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.buffer_turntable.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
         turntable_row.addWidget(self.buffer_turntable, stretch=1)
 
         self.center_bridge = CenterBridge()
@@ -166,7 +168,8 @@ class TurntableWindow(QMainWindow):
         self.buffer_controls: list[TactileButton] = []
         for label in ["FLUSH", "−", "+", "◀", "▶", "FREEZE"]:
             btn = TactileButton(label, variant="secondary")
-            btn.setMinimumWidth(40); btn.setMinimumHeight(36)
+            btn.setMinimumWidth(40)
+            btn.setMinimumHeight(36)
             if label == "FREEZE":
                 btn.setCheckable(True)
             self.buffer_controls.append(btn)
@@ -188,7 +191,8 @@ class TurntableWindow(QMainWindow):
         self.clip_controls: list[TactileButton] = []
         for label in ["PLAY", "−", "+", "◀", "▶", "SAVE"]:
             btn = TactileButton(label, variant="secondary")
-            btn.setMinimumWidth(40); btn.setMinimumHeight(36)
+            btn.setMinimumWidth(40)
+            btn.setMinimumHeight(36)
             self.clip_controls.append(btn)
             clip_col.addWidget(btn)
         controls_row.addLayout(clip_col, stretch=1)
@@ -260,24 +264,47 @@ class TurntableWindow(QMainWindow):
         # menu; they're not directly rebindable (bindable=False) — the user-facing
         # record key is the single toggle below, so one key works the same
         # focused or minimized.
-        register(Action(id="transport.start_recording", name="Start Recording",
-                        category="Transport",
-                        callable=self._on_start_clicked,
-                        repeat_policy="ignore_repeat", bindable=False))
-        register(Action(id="transport.stop_recording", name="Stop Recording",
-                        category="Transport",
-                        callable=self._on_stop_clicked,
-                        repeat_policy="ignore_repeat", bindable=False))
-        register(Action(id="transport.toggle_recording", name="Toggle Recording",
-                        category="Transport",
-                        callable=self._on_toggle_recording,
-                        default_binding="Ctrl+Alt+R", is_global=True,
-                        repeat_policy="ignore_repeat"))
-        register(Action(id="transport.play_clip", name="Play Clip",
-                        category="Transport",
-                        callable=self._on_play_clip_clicked,
-                        default_binding="Space",
-                        repeat_policy="ignore_repeat"))
+        register(
+            Action(
+                id="transport.start_recording",
+                name="Start Recording",
+                category="Transport",
+                callable=self._on_start_clicked,
+                repeat_policy="ignore_repeat",
+                bindable=False,
+            )
+        )
+        register(
+            Action(
+                id="transport.stop_recording",
+                name="Stop Recording",
+                category="Transport",
+                callable=self._on_stop_clicked,
+                repeat_policy="ignore_repeat",
+                bindable=False,
+            )
+        )
+        register(
+            Action(
+                id="transport.toggle_recording",
+                name="Toggle Recording",
+                category="Transport",
+                callable=self._on_toggle_recording,
+                default_binding="Ctrl+Alt+R",
+                is_global=True,
+                repeat_policy="ignore_repeat",
+            )
+        )
+        register(
+            Action(
+                id="transport.play_clip",
+                name="Play Clip",
+                category="Transport",
+                callable=self._on_play_clip_clicked,
+                default_binding="Space",
+                repeat_policy="ignore_repeat",
+            )
+        )
 
         self._wire_selection_sync()
         self._wire_controls()
@@ -308,10 +335,12 @@ class TurntableWindow(QMainWindow):
         # no longer directly bindable, so fold any saved override onto the single
         # toggle (a user's old in-focus record key keeps working, now as a toggle
         # and visible in the dialog). Persist so the file stops carrying dead ids.
-        if self._binding_table.remap_actions({
-            "transport.start_recording": "transport.toggle_recording",
-            "transport.stop_recording": "transport.toggle_recording",
-        }):
+        if self._binding_table.remap_actions(
+            {
+                "transport.start_recording": "transport.toggle_recording",
+                "transport.stop_recording": "transport.toggle_recording",
+            }
+        ):
             self._binding_table.save()
 
         # Drag-out export prefs — pool dir + bit depth used when rendering
@@ -420,9 +449,14 @@ class TurntableWindow(QMainWindow):
     # UX overhaul). Applied to slot.buffer.gain so it takes effect live and
     # the level meter / clip badge reflect the post-gain signal.
     _GAIN_STEPS = [
-        ("Mute", float("-inf")), ("−12 dB", -12.0), ("−6 dB", -6.0),
-        ("−3 dB", -3.0), ("0 dB (unity)", 0.0), ("+3 dB", 3.0),
-        ("+6 dB", 6.0), ("+12 dB", 12.0),
+        ("Mute", float("-inf")),
+        ("−12 dB", -12.0),
+        ("−6 dB", -6.0),
+        ("−3 dB", -3.0),
+        ("0 dB (unity)", 0.0),
+        ("+3 dB", 3.0),
+        ("+6 dB", 6.0),
+        ("+12 dB", 12.0),
     ]
 
     def _populate_gain_menu(self, menu: QMenu, slot) -> None:
@@ -465,15 +499,22 @@ class TurntableWindow(QMainWindow):
         else:
             self._silent_secs[key] = 0.0
         dur = slot.buffer.duration
-        fill = slot.buffer.buffered_seconds / dur if dur else 0.0  # property, not a call
+        fill = (
+            slot.buffer.buffered_seconds / dur if dur else 0.0
+        )  # property, not a call
         xr = slot.xrun_count()
         rate = max(0, xr - self._prev_xrun.get(key, xr))
         self._prev_xrun[key] = xr
-        return evaluate(SourceSnapshot(
-            capturing=capturing, peak=level,
-            silent_seconds=self._silent_secs[key],
-            buffer_fill=fill, xrun_rate=float(rate), error=slot.last_error(),
-        ))
+        return evaluate(
+            SourceSnapshot(
+                capturing=capturing,
+                peak=level,
+                silent_seconds=self._silent_secs[key],
+                buffer_fill=fill,
+                xrun_rate=float(rate),
+                error=slot.last_error(),
+            )
+        )
 
     def _poll_source_status(self) -> None:
         """1 Hz: evaluate every source, drive the in-app chip badges, roll up
@@ -490,10 +531,14 @@ class TurntableWindow(QMainWindow):
                 del tracker[stale]
 
         statuses = [self._evaluate_slot(s, dt) for s in slots]
-        for slot, st in zip(slots, statuses):
+        for slot, st in zip(slots, statuses, strict=True):
             key = slot.id
             prev = self._prev_source_sev.get(key, Severity.OK)
-            if st.severity is Severity.ERROR and prev is not Severity.ERROR and self._tray:
+            if (
+                st.severity is Severity.ERROR
+                and prev is not Severity.ERROR
+                and self._tray
+            ):
                 self._tray.notify(st.message, f"{slot.name}: {st.message}")
             self._prev_source_sev[key] = st.severity
         # In-app per-source badge (always); tray roll-up + tooltip (if present).
@@ -613,6 +658,7 @@ class TurntableWindow(QMainWindow):
         Each tick, _update_selection_display converts those absolute
         positions back into display fractions for both the linear panel
         and the disc ring."""
+
         def on_buffer_sel(start: float, end: float) -> None:
             if not self._state.slots:
                 return
@@ -672,8 +718,12 @@ class TurntableWindow(QMainWindow):
 
     def _wire_controls(self) -> None:
         # Transport
-        self.center_bridge.start_btn.clicked.connect(lambda: invoke("transport.start_recording"))
-        self.center_bridge.stop_btn.clicked.connect(lambda: invoke("transport.stop_recording"))
+        self.center_bridge.start_btn.clicked.connect(
+            lambda: invoke("transport.start_recording")
+        )
+        self.center_bridge.stop_btn.clicked.connect(
+            lambda: invoke("transport.stop_recording")
+        )
         # FREEZE toggles the buffer-panel display without stopping
         # capture — see _on_freeze_toggled.
         freeze_btn = self.buffer_controls[-1]
@@ -684,99 +734,143 @@ class TurntableWindow(QMainWindow):
         self.clip_turntable.track_selected.connect(self._on_track_selected)
 
         # OUT → check out current buffer selection as a new clip
-        register(Action(id="clip.checkout", name="Checkout",
-                        category="Clip",
-                        callable=self._on_checkout_clicked,
-                        default_binding="Ctrl+Alt+O", is_global=True,
-                        repeat_policy="ignore_repeat"))
+        register(
+            Action(
+                id="clip.checkout",
+                name="Checkout",
+                category="Clip",
+                callable=self._on_checkout_clicked,
+                default_binding="Ctrl+Alt+O",
+                is_global=True,
+                repeat_policy="ignore_repeat",
+            )
+        )
         self.out_btn.clicked.connect(lambda: invoke("clip.checkout"))
 
         # SAVE (clip side, last button in clip_controls) → save current clip
         save_btn = self.clip_controls[-1]
-        register(Action(id="clip.save", name="Save Clip",
-                        category="Clip",
-                        callable=lambda: self._save_current_clip(),
-                        repeat_policy="ignore_repeat"))
+        register(
+            Action(
+                id="clip.save",
+                name="Save Clip",
+                category="Clip",
+                callable=lambda: self._save_current_clip(),
+                repeat_policy="ignore_repeat",
+            )
+        )
         save_btn.clicked.connect(lambda: invoke("clip.save"))
 
         # Buffer controls: [FLUSH, −, +, ◀, ▶, FREEZE]. FLUSH wipes the
         # active slot's buffer; − / + step the duration preset; ◀ / ▶
         # shift the anchor by half the current duration (older / newer);
         # FREEZE wiring lives separately in the block below.
-        register(Action(id="buffer.flush_active", name="Flush Active Buffer",
-                        category="Buffer",
-                        callable=self._on_flush_active_buffer,
-                        repeat_policy="ignore_repeat"))
+        register(
+            Action(
+                id="buffer.flush_active",
+                name="Flush Active Buffer",
+                category="Buffer",
+                callable=self._on_flush_active_buffer,
+                repeat_policy="ignore_repeat",
+            )
+        )
         self.buffer_controls[0].clicked.connect(lambda: invoke("buffer.flush_active"))
 
-        register(Action(id="buffer.duration_shorter", name="Shorter Buffer Duration",
-                        category="Buffer",
-                        callable=lambda: self._nudge_buffer_duration(-1),
-                        repeat_policy="fire"))
+        register(
+            Action(
+                id="buffer.duration_shorter",
+                name="Shorter Buffer Duration",
+                category="Buffer",
+                callable=lambda: self._nudge_buffer_duration(-1),
+                repeat_policy="fire",
+            )
+        )
         self.buffer_controls[1].clicked.connect(
             lambda: invoke("buffer.duration_shorter")
         )
 
-        register(Action(id="buffer.duration_longer", name="Longer Buffer Duration",
-                        category="Buffer",
-                        callable=lambda: self._nudge_buffer_duration(+1),
-                        repeat_policy="fire"))
+        register(
+            Action(
+                id="buffer.duration_longer",
+                name="Longer Buffer Duration",
+                category="Buffer",
+                callable=lambda: self._nudge_buffer_duration(+1),
+                repeat_policy="fire",
+            )
+        )
         self.buffer_controls[2].clicked.connect(
             lambda: invoke("buffer.duration_longer")
         )
 
-        register(Action(id="buffer.anchor_newer", name="Shift Buffer Anchor Newer",
-                        category="Buffer",
-                        callable=lambda: self._nudge_buffer_anchor(+1),
-                        repeat_policy="fire"))
-        self.buffer_controls[3].clicked.connect(
-            lambda: invoke("buffer.anchor_newer")
+        register(
+            Action(
+                id="buffer.anchor_newer",
+                name="Shift Buffer Anchor Newer",
+                category="Buffer",
+                callable=lambda: self._nudge_buffer_anchor(+1),
+                repeat_policy="fire",
+            )
         )
+        self.buffer_controls[3].clicked.connect(lambda: invoke("buffer.anchor_newer"))
 
-        register(Action(id="buffer.anchor_older", name="Shift Buffer Anchor Older",
-                        category="Buffer",
-                        callable=lambda: self._nudge_buffer_anchor(-1),
-                        repeat_policy="fire"))
-        self.buffer_controls[4].clicked.connect(
-            lambda: invoke("buffer.anchor_older")
+        register(
+            Action(
+                id="buffer.anchor_older",
+                name="Shift Buffer Anchor Older",
+                category="Buffer",
+                callable=lambda: self._nudge_buffer_anchor(-1),
+                repeat_policy="fire",
+            )
         )
+        self.buffer_controls[4].clicked.connect(lambda: invoke("buffer.anchor_older"))
 
         # Clip controls: [PLAY, −, +, ◀, ▶, SAVE]. PLAY toggles playback
         # of the trimmed clip; − / + tighten / expand the trim window
         # around its centre; ◀ / ▶ shift the whole trim earlier / later.
         self.clip_controls[0].clicked.connect(lambda: invoke("transport.play_clip"))
 
-        register(Action(id="clip.trim_shorter", name="Tighten Clip Trim",
-                        category="Clip",
-                        callable=lambda: self._nudge_clip_trim_span(-0.05),
-                        repeat_policy="fire"))
-        self.clip_controls[1].clicked.connect(
-            lambda: invoke("clip.trim_shorter")
+        register(
+            Action(
+                id="clip.trim_shorter",
+                name="Tighten Clip Trim",
+                category="Clip",
+                callable=lambda: self._nudge_clip_trim_span(-0.05),
+                repeat_policy="fire",
+            )
         )
+        self.clip_controls[1].clicked.connect(lambda: invoke("clip.trim_shorter"))
 
-        register(Action(id="clip.trim_longer", name="Expand Clip Trim",
-                        category="Clip",
-                        callable=lambda: self._nudge_clip_trim_span(+0.05),
-                        repeat_policy="fire"))
-        self.clip_controls[2].clicked.connect(
-            lambda: invoke("clip.trim_longer")
+        register(
+            Action(
+                id="clip.trim_longer",
+                name="Expand Clip Trim",
+                category="Clip",
+                callable=lambda: self._nudge_clip_trim_span(+0.05),
+                repeat_policy="fire",
+            )
         )
+        self.clip_controls[2].clicked.connect(lambda: invoke("clip.trim_longer"))
 
-        register(Action(id="clip.trim_earlier", name="Shift Clip Trim Earlier",
-                        category="Clip",
-                        callable=lambda: self._nudge_clip_trim_shift(-0.05),
-                        repeat_policy="fire"))
-        self.clip_controls[3].clicked.connect(
-            lambda: invoke("clip.trim_earlier")
+        register(
+            Action(
+                id="clip.trim_earlier",
+                name="Shift Clip Trim Earlier",
+                category="Clip",
+                callable=lambda: self._nudge_clip_trim_shift(-0.05),
+                repeat_policy="fire",
+            )
         )
+        self.clip_controls[3].clicked.connect(lambda: invoke("clip.trim_earlier"))
 
-        register(Action(id="clip.trim_later", name="Shift Clip Trim Later",
-                        category="Clip",
-                        callable=lambda: self._nudge_clip_trim_shift(+0.05),
-                        repeat_policy="fire"))
-        self.clip_controls[4].clicked.connect(
-            lambda: invoke("clip.trim_later")
+        register(
+            Action(
+                id="clip.trim_later",
+                name="Shift Clip Trim Later",
+                category="Clip",
+                callable=lambda: self._nudge_clip_trim_shift(+0.05),
+                repeat_policy="fire",
+            )
         )
+        self.clip_controls[4].clicked.connect(lambda: invoke("clip.trim_later"))
 
         # Right-click on clip waveform → save/discard context menu
         self.clip_panel.waveform.contextMenuRequested.connect(
@@ -784,24 +878,32 @@ class TurntableWindow(QMainWindow):
         )
 
         # NavBar actions
-        register(Action(id="buffer.arm_all", name="Arm All Sources",
-                        category="Buffer",
-                        callable=self._on_arm_all,
-                        repeat_policy="ignore_repeat"))
+        register(
+            Action(
+                id="buffer.arm_all",
+                name="Arm All Sources",
+                category="Buffer",
+                callable=self._on_arm_all,
+                repeat_policy="ignore_repeat",
+            )
+        )
         self.nav_bar.arm_all_btn.clicked.connect(lambda: invoke("buffer.arm_all"))
 
-        register(Action(id="buffer.add_source", name="Add Source",
-                        category="Buffer",
-                        callable=self._on_add_source,
-                        repeat_policy="ignore_repeat"))
+        register(
+            Action(
+                id="buffer.add_source",
+                name="Add Source",
+                category="Buffer",
+                callable=self._on_add_source,
+                repeat_policy="ignore_repeat",
+            )
+        )
         self.nav_bar.add_source_btn.clicked.connect(lambda: invoke("buffer.add_source"))
         # Per-source chips in the NavBar — NavBar forwards per-chip
         # signals so the wiring stays valid even as chips are created
         # dynamically when the user adds more sources.
         self.nav_bar.chipClicked.connect(self._on_source_chip_clicked)
-        self.nav_bar.chipContextMenuRequested.connect(
-            self._on_source_chip_context_menu
-        )
+        self.nav_bar.chipContextMenuRequested.connect(self._on_source_chip_context_menu)
         self._refresh_source_indicators()
 
     def _open_keybindings_dialog(self) -> None:
@@ -903,9 +1005,7 @@ class TurntableWindow(QMainWindow):
         duration_s = self._active_duration_s(slot)
         buffered_s = float(slot.buffer.buffered_seconds)
         max_anchor = max(0.0, buffered_s - duration_s)
-        slot.anchor_offset_s = max(
-            0.0, min(max_anchor, float(slot.anchor_offset_s))
-        )
+        slot.anchor_offset_s = max(0.0, min(max_anchor, float(slot.anchor_offset_s)))
 
     def _update_buffer_duration_label(self) -> None:
         """Sync the buffer panel header's duration readout (the '3:00'
@@ -962,7 +1062,9 @@ class TurntableWindow(QMainWindow):
         has_trim = self._checkout_has_trim(co)
         start, n = co.trim_range() if has_trim else (0, co.n_frames)
         try:
-            player.bind_checkout(self._state.scratch, co.handle, start, n, co.sample_rate, co.channels)
+            player.bind_checkout(
+                self._state.scratch, co.handle, start, n, co.sample_rate, co.channels
+            )
             player.play()
         except Exception as e:
             QMessageBox.warning(
@@ -975,7 +1077,9 @@ class TurntableWindow(QMainWindow):
         # would otherwise set this, and _update_clip_playback_state()
         # only reads last_error() on that edge.
         self._was_playing_last_tick = True
-        self._last_playback_error_shown = None  # fresh attempt: allow re-showing a repeat error
+        self._last_playback_error_shown = (
+            None  # fresh attempt: allow re-showing a repeat error
+        )
         self._refresh_play_button()
 
     def _refresh_play_button(self) -> None:
@@ -1092,8 +1196,9 @@ class TurntableWindow(QMainWindow):
         sel_abs = self._resolve_buffer_selection_abs(slot)
         if sel_abs is None:
             QMessageBox.warning(
-                self, "Check out failed",
-                "Selection is empty or has already scrolled out of the buffer."
+                self,
+                "Check out failed",
+                "Selection is empty or has already scrolled out of the buffer.",
             )
             return
         abs_start, abs_end = sel_abs
@@ -1124,11 +1229,7 @@ class TurntableWindow(QMainWindow):
         # spans ALL slots (checkout ids are globally unique), so prune
         # against every slot's live checkouts — pruning against just the
         # active slot would wipe other slots' entries on every switch.
-        live_ids = {
-            c.id
-            for s in self._state.slots
-            for c in s.checkout_manager.list()
-        }
+        live_ids = {c.id for s in self._state.slots for c in s.checkout_manager.list()}
         for stale in [k for k in self._clip_bins_cache if k not in live_ids]:
             del self._clip_bins_cache[stale]
 
@@ -1145,9 +1246,7 @@ class TurntableWindow(QMainWindow):
             # Nothing to render; force a repaint so cleared rings show.
             slot.checkout_manager.pin(None)
             self.clip_turntable.update()
-            self.clip_panel.waveform.set_data(
-                np.zeros((1, 2, 1), dtype=np.float32)
-            )
+            self.clip_panel.waveform.set_data(np.zeros((1, 2, 1), dtype=np.float32))
             self.clip_panel.set_source_name("CLIP")
             self.clip_panel.set_duration_text("")
             self.clip_panel.set_clip_id("")
@@ -1189,12 +1288,8 @@ class TurntableWindow(QMainWindow):
             self.clip_panel.waveform.set_timeline(
                 float(co.duration_seconds), anchor="left"
             )
-        slot_name = (
-            self._state.active_slot.name if self._state.slots else "?"
-        )
-        self.clip_panel.set_source_name(
-            f"{slot_name.upper()} #{index + 1}/{total}"
-        )
+        slot_name = self._state.active_slot.name if self._state.slots else "?"
+        self.clip_panel.set_source_name(f"{slot_name.upper()} #{index + 1}/{total}")
         self.clip_panel.set_duration_text(f"{co.duration_seconds:.1f}s")
         self.clip_panel.set_clip_id(co.id[:6].upper())
         mgr = self._state.active_slot.checkout_manager
@@ -1265,16 +1360,22 @@ class TurntableWindow(QMainWindow):
         try:
             # A trimmed save mints a slice like the trimmed drag, so it
             # meets the same count cap; keep the clip it is cut from.
-            saved = self._with_room(slot, lambda: slot.checkout_manager.save(
-                co.id, Path(target), fmt="WAV", trimmed=trimmed
-            ), keep=co.id)
+            saved = self._with_room(
+                slot,
+                lambda: slot.checkout_manager.save(
+                    co.id, Path(target), fmt="WAV", trimmed=trimmed
+                ),
+                keep=co.id,
+            )
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
         self._refresh_clip_side(auto_select_newest=saved.id != co.id)
         self.statusBar().showMessage(f"Saved {Path(target).name}", 4000)
 
-    def _render_for_drag(self, slot, co, *, trimmed: bool, markers_at_trim: bool = False):
+    def _render_for_drag(
+        self, slot, co, *, trimmed: bool, markers_at_trim: bool = False
+    ):
         """Render for an OS drag; returns a DragRender or None on failure
         (already reported). A clip-deck drag mints a slice when the clip
         has a trim; otherwise the whole clip goes."""
@@ -1284,15 +1385,19 @@ class TurntableWindow(QMainWindow):
                 # A trimmed drag MINTS a slice, so it meets the same
                 # per-slot count cap the buffer drag does -- keeping the
                 # clip being dragged, since it is the slice's parent.
-                return self._with_room(slot, lambda: render_slice_drag(
-                    slot.checkout_manager,
-                    co.id,
-                    self._export_pool_dir,
-                    slot.name,
-                    bit_depth=self._export_bit_depth,
-                    handle_mb=self._drag_handle_mb,
-                    alc=self._drag_alc_sidecar,
-                ), keep=co.id)
+                return self._with_room(
+                    slot,
+                    lambda: render_slice_drag(
+                        slot.checkout_manager,
+                        co.id,
+                        self._export_pool_dir,
+                        slot.name,
+                        bit_depth=self._export_bit_depth,
+                        handle_mb=self._drag_handle_mb,
+                        alc=self._drag_alc_sidecar,
+                    ),
+                    keep=co.id,
+                )
             return render_root_drag(
                 slot.checkout_manager,
                 co.id,
@@ -1325,8 +1430,11 @@ class TurntableWindow(QMainWindow):
         if r is None:
             return
         self._complete_drag(
-            slot, r, self.clip_panel.waveform,
-            discard_on_cancel=r.minted, auto_select_newest=r.minted,
+            slot,
+            r,
+            self.clip_panel.waveform,
+            discard_on_cancel=r.minted,
+            auto_select_newest=r.minted,
         )
 
     def _complete_drag(
@@ -1388,7 +1496,8 @@ class TurntableWindow(QMainWindow):
         if sel_abs is None:
             self.statusBar().showMessage(
                 "Drag-out failed: selection is empty or has already "
-                "scrolled out of the buffer.", 4000,
+                "scrolled out of the buffer.",
+                4000,
             )
             return
         sel_start, sel_end = sel_abs
@@ -1398,11 +1507,19 @@ class TurntableWindow(QMainWindow):
         # export_span works in parent-relative frames, so rebase the ring's
         # absolute indices onto the oldest sample it still holds, then put
         # the offset back for create_from_abs_range.
-        lo, hi = export_span(total - oldest, sel_start - oldest, sel_end - oldest, buf.channels,
-                             BYTES_PER_SAMPLE[self._export_bit_depth], self._drag_handle_mb)
+        lo, hi = export_span(
+            total - oldest,
+            sel_start - oldest,
+            sel_end - oldest,
+            buf.channels,
+            BYTES_PER_SAMPLE[self._export_bit_depth],
+            self._drag_handle_mb,
+        )
         lo, hi = lo + oldest, hi + oldest
         try:
-            co = self._with_room(slot, lambda: slot.checkout_manager.create_from_abs_range(lo, hi))
+            co = self._with_room(
+                slot, lambda: slot.checkout_manager.create_from_abs_range(lo, hi)
+            )
         except (RuntimeError, ValueError) as e:
             self.statusBar().showMessage(f"Drag-out failed: {e}", 4000)
             return
@@ -1412,8 +1529,11 @@ class TurntableWindow(QMainWindow):
             slot.checkout_manager.discard(co.id)
             return
         self._complete_drag(
-            slot, r, self.buffer_panel.waveform,
-            discard_on_cancel=True, auto_select_newest=True,
+            slot,
+            r,
+            self.buffer_panel.waveform,
+            discard_on_cancel=True,
+            auto_select_newest=True,
         )
 
     def _with_room(self, slot, mint, *, keep: str | None = None):
@@ -1479,11 +1599,13 @@ class TurntableWindow(QMainWindow):
             )
             menu.addAction(act_save_full_wav)
             act_clear_trim = QAction("Clear trim selection", self)
+
             def _clear():
                 self._clip_trim_fracs.pop(co.id, None)
                 self._state.active_slot.checkout_manager.set_trim(co.id, 0, 0)
                 self.clip_panel.waveform.clear_manual_selection()
                 self._update_selection_display()
+
             act_clear_trim.triggered.connect(_clear)
             menu.addAction(act_clear_trim)
         menu.addSeparator()
@@ -1547,6 +1669,7 @@ class TurntableWindow(QMainWindow):
         device / process / default in the same pass as name and buffer.
         No intermediate menu."""
         from flashback_sampler.app.add_source_dialog import AddSourceDialog
+
         active = self._state.active_slot
         default_name = f"Source {len(self._state.slots) + 1}"
         default_buffer_s = active.buffer_seconds
@@ -1595,7 +1718,7 @@ class TurntableWindow(QMainWindow):
             if self._state.rolling and slot.armed:
                 chip.set_status("armed")
             elif slot.armed:
-                chip.set_status("paused")   # armed but not rolling yet
+                chip.set_status("paused")  # armed but not rolling yet
             else:
                 chip.set_status("inactive")
 
@@ -1657,8 +1780,9 @@ class TurntableWindow(QMainWindow):
                 return None
             return fracs
 
-        def apply(fracs: tuple[float, float] | None, color: str,
-                  panel, turntable) -> None:
+        def apply(
+            fracs: tuple[float, float] | None, color: str, panel, turntable
+        ) -> None:
             # The ring that the selection belongs to depends on the side:
             # buffer rings mirror slot indices, clip rings mirror checkout
             # indices (whichever clip is currently focused on the panel).
@@ -1681,10 +1805,18 @@ class TurntableWindow(QMainWindow):
                 panel.waveform.blockSignals(False)
             turntable.set_track_selection(idx, s, e, color)
 
-        apply(compute_fracs_buffer_side(), SELECTION_COLOR_BUFFER,
-              self.buffer_panel, self.buffer_turntable)
-        apply(compute_fracs_clip_side(), SELECTION_COLOR_CLIP,
-              self.clip_panel, self.clip_turntable)
+        apply(
+            compute_fracs_buffer_side(),
+            SELECTION_COLOR_BUFFER,
+            self.buffer_panel,
+            self.buffer_turntable,
+        )
+        apply(
+            compute_fracs_clip_side(),
+            SELECTION_COLOR_CLIP,
+            self.clip_panel,
+            self.clip_turntable,
+        )
 
     def _refresh_source_names(self) -> None:
         """Propagate slot names from state into NavBar chips and the active
@@ -1692,9 +1824,7 @@ class TurntableWindow(QMainWindow):
         names = [slot.name for slot in self._state.slots]
         self.nav_bar.set_source_names(names)
         # Buffer panel shows the currently-active slot's name
-        active_name = (
-            self._state.active_slot.name if self._state.slots else "SOURCE 1"
-        )
+        active_name = self._state.active_slot.name if self._state.slots else "SOURCE 1"
         self.buffer_panel.set_source_name(active_name.upper())
         # Clip panel's source label is set by _display_clip_in_panel to
         # "<slot_name> #<idx>/<total>" so it reflects the current clip,
@@ -1717,9 +1847,7 @@ class TurntableWindow(QMainWindow):
         if 0 <= active_idx < len(slots) and not self._buffer_frozen:
             active_buf = slots[active_idx].buffer
             try:
-                bins = active_buf.get_peak_bins(
-                    seconds=active_buf.duration, n_bins=360
-                )
+                bins = active_buf.get_peak_bins(seconds=active_buf.duration, n_bins=360)
                 self.buffer_panel.waveform.set_data(bins)
             except Exception:
                 pass  # capture may not be running yet
@@ -1732,9 +1860,7 @@ class TurntableWindow(QMainWindow):
                 # Feed the waveform's total duration so the selection
                 # band can render the in/out duration label on top.
                 if buffered_s > 0:
-                    self.buffer_panel.waveform.set_timeline(
-                        buffered_s, anchor="right"
-                    )
+                    self.buffer_panel.waveform.set_timeline(buffered_s, anchor="right")
             except Exception:
                 pass
 
@@ -1769,14 +1895,14 @@ class TurntableWindow(QMainWindow):
                     n_bins=display_n,
                     bin_span_samples=max(1, capacity_samples // display_n),
                 )
-                amp_full = np.clip(
-                    rms.max(axis=1) * 3.0, 0.0, 1.0
-                ).astype(np.float32)
+                amp_full = np.clip(rms.max(axis=1) * 3.0, 0.0, 1.0).astype(np.float32)
                 # Trim to the currently-filled bars. Oldest is bar 0,
                 # newest sits just before the unfilled tail.
                 n_filled = max(1, int(round(fill_frac * display_n)))
                 amp = amp_full[:n_filled]
-                self.buffer_turntable.set_track_waveform(i, amp, fill_fraction=fill_frac)
+                self.buffer_turntable.set_track_waveform(
+                    i, amp, fill_fraction=fill_frac
+                )
             except Exception:
                 pass
 
@@ -1797,18 +1923,12 @@ class TurntableWindow(QMainWindow):
         # Playhead: express the current cursor position as a fraction
         # of the FULL clip audio so the playhead lines up with the
         # displayed waveform (not with the trimmed slice).
-        if (
-            co is not None
-            and player.is_playing
-            and co.n_frames > 0
-        ):
+        if co is not None and player.is_playing and co.n_frames > 0:
             cursor_samples = int(player.cursor_samples)
             has_trim = self._checkout_has_trim(co)
             base_offset = co.trim_in_samples if has_trim else 0
             abs_sample = base_offset + cursor_samples
-            frac = max(
-                0.0, min(1.0, abs_sample / float(co.n_frames))
-            )
+            frac = max(0.0, min(1.0, abs_sample / float(co.n_frames)))
             self.clip_panel.waveform.set_playhead(frac)
         else:
             self.clip_panel.waveform.set_playhead(None)
@@ -1896,9 +2016,7 @@ class TurntableWindow(QMainWindow):
         self._refresh_source_indicators()
         self._update_buffer_duration_label()
 
-    def _on_source_chip_context_menu(
-        self, slot_index: int, global_pos: QPoint
-    ) -> None:
+    def _on_source_chip_context_menu(self, slot_index: int, global_pos: QPoint) -> None:
         if not (0 <= slot_index < len(self._state.slots)):
             return
         slot = self._state.slots[slot_index]
@@ -2010,7 +2128,9 @@ class TurntableWindow(QMainWindow):
                 group.addAction(act)
                 dev_menu.addAction(act)
                 act.triggered.connect(
-                    lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(i, d)
+                    lambda _c=False, d=dev, i=slot_index: self._set_slot_capture_spec(
+                        i, d
+                    )
                 )
 
         proc_act = QAction("From Process…", src_menu)
@@ -2033,7 +2153,9 @@ class TurntableWindow(QMainWindow):
                 label = dev.name + ("   [default]" if dev.is_default else "")
                 act = QAction(label, mux_dev_menu)
                 act.triggered.connect(
-                    lambda _c=False, d=dev, i=slot_index: self._add_mux_input_to_slot(i, d)
+                    lambda _c=False, d=dev, i=slot_index: self._add_mux_input_to_slot(
+                        i, d
+                    )
                 )
                 mux_dev_menu.addAction(act)
         mux_proc_act = QAction("From Process…", add_mux_menu)
@@ -2074,9 +2196,7 @@ class TurntableWindow(QMainWindow):
             return
         self._add_mux_input_to_slot(slot_index, device)
 
-    def _add_mux_input_to_slot(
-        self, slot_index: int, device: CaptureDevice
-    ) -> None:
+    def _add_mux_input_to_slot(self, slot_index: int, device: CaptureDevice) -> None:
         """Append another capture input to the slot so its samples are
         summed into the same ring buffer. Shows a first-time warning
         explaining the bitrate/loudness tradeoff. Restarts the slot's

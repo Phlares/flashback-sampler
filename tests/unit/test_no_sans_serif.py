@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-
 FORBIDDEN = (
     "Inter",
     "Roboto",

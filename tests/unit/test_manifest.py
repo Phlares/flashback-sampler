@@ -6,15 +6,35 @@ from pathlib import Path
 import numpy as np
 
 from flashback_sampler.core.manifest import (
-    Manifest, bins_from_json, bins_to_json, manifest_path, read_manifest,
-    resolve_audio, scan, write_manifest,
+    Manifest,
+    bins_from_json,
+    bins_to_json,
+    manifest_path,
+    read_manifest,
+    resolve_audio,
+    scan,
+    write_manifest,
 )
 
 
 def _m(**kw) -> Manifest:
-    base = dict(id="abc123", slot="Main", rate=48_000, channels=2, abs_start=10, abs_end=110,
-                created_at=1.0, parent=None, start_frame=0, n_frames=100, trim_in=0, trim_out=0,
-                state="pending", partial=False, bins=None)
+    base = dict(
+        id="abc123",
+        slot="Main",
+        rate=48_000,
+        channels=2,
+        abs_start=10,
+        abs_end=110,
+        created_at=1.0,
+        parent=None,
+        start_frame=0,
+        n_frames=100,
+        trim_in=0,
+        trim_out=0,
+        state="pending",
+        partial=False,
+        bins=None,
+    )
     base.update(kw)
     base.setdefault("file", base["parent"] or base["id"])
     return Manifest(**base)
@@ -135,7 +155,9 @@ def test_scan_breaks_created_at_ties_by_id(tmp_path):
     assert [m.id for m in scan(tmp_path)] == ["a", "b"]
 
 
-def test_scan_id_tiebreak_holds_regardless_of_directory_enumeration_order(tmp_path, monkeypatch):
+def test_scan_id_tiebreak_holds_regardless_of_directory_enumeration_order(
+    tmp_path, monkeypatch
+):
     # Same trap as above, but this one doesn't depend on the OS/filesystem
     # happening to enumerate `*.json` alphabetically: force glob() to hand
     # scan() the two manifests in the WRONG order and confirm it still
@@ -152,7 +174,9 @@ def test_scan_id_tiebreak_holds_regardless_of_directory_enumeration_order(tmp_pa
 
 
 def test_bins_from_json_skips_corrupt_key_and_keeps_valid_one():
-    good = bins_to_json({"540": np.arange(540 * 2 * 2, dtype=np.float32).reshape(540, 2, 2)})
+    good = bins_to_json(
+        {"540": np.arange(540 * 2 * 2, dtype=np.float32).reshape(540, 2, 2)}
+    )
     d = dict(good)
     d["junk"] = [1.0, 2.0, 3.0]  # int("junk") raises — must not take down "540"
     got = bins_from_json(d, channels=2)

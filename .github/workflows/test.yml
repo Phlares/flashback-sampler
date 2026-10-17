@@ -1,11 +1,12 @@
 name: test
 
-# Two jobs, both run through Phlares/workflows check.yml: pytest on
+# Three jobs, all run through Phlares/workflows check.yml: pytest on
 # Windows (py3.12, the version release.yml ships; it builds the DLL
-# anyway) and the Zig unit tests on Ubuntu. Hard timeouts so a hung test
-# stops in minutes. Every pull request runs both jobs: `main` and `dev`
-# require them, and a skipped check blocks the merge. Docs-only pushes
-# skip it; nothing requires a check there.
+# anyway), the Zig unit tests on Ubuntu, and `lint`, which runs the hooks
+# in .pre-commit-config.yaml (ruff and zig fmt) on every file. Hard
+# timeouts so a hung test stops in minutes. Every pull request runs all
+# three jobs: `main` and `dev` require them, and a skipped check blocks
+# the merge. Docs-only pushes skip it; nothing requires a check there.
 on:
   push:
     branches: [main, dev]
@@ -50,6 +51,16 @@ jobs:
       zig-version: 0.16.0
       working-directory: core
       timeout-minutes: 3
-      run: |
-        zig fmt --check build.zig src
-        zig build test
+      # zig fmt runs in the lint job.
+      run: zig build test
+
+  lint:
+    uses: Phlares/workflows/.github/workflows/check.yml@ef4ee4741aa6ee0017a6446b55356e50bf635c49 # v1.0.0
+    with:
+      name: lint
+      zig-version: 0.16.0
+      timeout-minutes: 5
+      # Hook versions live in .pre-commit-config.yaml and Dependabot moves
+      # them. The prek version below is a manual bump: Dependabot does not
+      # read it.
+      run: pipx run --spec prek==0.5.5 prek run --all-files --show-diff-on-failure

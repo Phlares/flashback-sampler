@@ -2,6 +2,7 @@
 tests/fixtures/wavread.py (an independent stdlib reader) for files the
 engine wrote, and a struct-built WAVE_FORMAT_EXTENSIBLE fixture for
 DAW-written headers."""
+
 from __future__ import annotations
 
 import struct
@@ -26,8 +27,20 @@ def _extensible_pcm16(path, rate: int, channels: int, codes: np.ndarray) -> None
     block = channels * 2
     fmt = struct.pack("<HHIIHH", 0xFFFE, channels, rate, rate * block, block, 16)
     fmt += struct.pack("<HHI", 22, 16, 3)  # cbSize, valid bits, channel mask
-    fmt += struct.pack("<H", 1) + b"\x00\x00" + bytes.fromhex("000010008000 00aa00389b71".replace(" ", ""))
-    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data
+    fmt += (
+        struct.pack("<H", 1)
+        + b"\x00\x00"
+        + bytes.fromhex("000010008000 00aa00389b71".replace(" ", ""))
+    )
+    body = (
+        b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", len(fmt))
+        + fmt
+        + b"data"
+        + struct.pack("<I", len(data))
+        + data
+    )
     path.write_bytes(b"RIFF" + struct.pack("<I", len(body)) + body)
 
 
@@ -57,7 +70,12 @@ def test_wav_read_extensible_pcm16_header(tmp_path):
     codes = np.array([[0, 32767], [-32768, 1], [100, -100]], dtype=np.int16)
     _extensible_pcm16(p, 96_000, 2, codes)
     info = native.wav_info(p)
-    assert (info.rate, info.channels, info.frames, info.subtype) == (96_000, 2, 3, native.SUBTYPE_INTS["PCM_16"])
+    assert (info.rate, info.channels, info.frames, info.subtype) == (
+        96_000,
+        2,
+        3,
+        native.SUBTYPE_INTS["PCM_16"],
+    )
     got = native.wav_read(p, 0, 3)
     oracle, _ = read_wav(p)
     np.testing.assert_array_equal(got, oracle)
@@ -80,10 +98,15 @@ def test_wav_peak_bins_match_ring_peak_bins_on_the_same_audio(tmp_path):
     # Ring.peakBins and peaks.peakBinsFile share one reducer; prove it
     # through the ABI on a stride-1 window (n <= 256 * n_bins).
     from flashback_sampler.core.native import NativeAudioCircularBuffer
-    audio = (np.random.default_rng(7).standard_normal((3000, 2)) * 0.5).astype(np.float32)
+
+    audio = (np.random.default_rng(7).standard_normal((3000, 2)) * 0.5).astype(
+        np.float32
+    )
     p = tmp_path / "peaks.wav"
     native.wav_write(p, audio, 48_000, "FLOAT")
-    buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=48_000, channels=2)
+    buf = NativeAudioCircularBuffer(
+        duration_seconds=1.0, sample_rate=48_000, channels=2
+    )
     buf.write(audio)
     from_ring = buf.get_peak_bins(3000 / 48_000, 30)
     from_file = native.wav_peak_bins(p, 0, 3000, 30)

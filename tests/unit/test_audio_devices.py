@@ -11,6 +11,8 @@ a fixed expected set, so these tests focus on:
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 import flashback_sampler.app.audio_devices as audio_devices
@@ -32,13 +34,13 @@ class _FakeBuffer:
 
 def test_capture_device_is_frozen():
     d = CaptureDevice(kind="loopback", name="Speakers", id="Speakers")
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         d.name = "other"  # type: ignore[misc]
 
 
 def test_output_device_is_frozen():
     d = OutputDevice(id="{spk}", name="Out", max_output_channels=2)
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         d.id = "{hp}"  # type: ignore[misc]
 
 
@@ -78,7 +80,9 @@ def test_default_loopback_sentinel_follows_live_os_default(monkeypatch):
     seen = {}
 
     class _Src:
-        def __init__(self, buffer, kind, device_id="", pid=0, sample_rate=48_000, channels=2):
+        def __init__(
+            self, buffer, kind, device_id="", pid=0, sample_rate=48_000, channels=2
+        ):
             seen.update(device_id=device_id)
 
     monkeypatch.setattr(ad, "NativeCaptureSource", _Src)
@@ -94,14 +98,14 @@ def test_named_loopback_still_pins_to_that_speaker(monkeypatch):
     seen = {}
 
     class _Src:
-        def __init__(self, buffer, kind, device_id="", pid=0, sample_rate=48_000, channels=2):
+        def __init__(
+            self, buffer, kind, device_id="", pid=0, sample_rate=48_000, channels=2
+        ):
             seen.update(device_id=device_id)
 
     monkeypatch.setattr(ad, "NativeCaptureSource", _Src)
     dev = CaptureDevice(kind="loopback", name="Speakers (X)  [loopback]", id="{spk-x}")
-    build_capture_source(
-        dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2
-    )
+    build_capture_source(dev, buffer=_FakeBuffer(), sample_rate=48_000, channels=2)
     assert seen["device_id"] == dev.id
 
 
@@ -120,6 +124,7 @@ def test_default_capture_device_matches_available_devices():
 
 def test_default_prefers_dynamic_loopback_when_present(monkeypatch):
     import flashback_sampler.app.audio_devices as ad
+
     lb = CaptureDevice(kind="loopback", name="Spk  [loopback]", id="Spk")
     mic = CaptureDevice(kind="input", name="Mic", id="0")
     monkeypatch.setattr(ad, "list_capture_devices", lambda: [lb, mic])
@@ -130,6 +135,7 @@ def test_default_falls_back_to_first_device_when_no_loopback(monkeypatch):
     # Windows-with-no-working-loopback (or any no-loopback host) must not hand
     # back an unopenable sentinel — fall back to the first real device.
     import flashback_sampler.app.audio_devices as ad
+
     mic = CaptureDevice(kind="input", name="Mic", id="0", is_default=True)
     monkeypatch.setattr(ad, "list_capture_devices", lambda: [mic])
     assert ad.default_capture_device() == mic
@@ -137,15 +143,37 @@ def test_default_falls_back_to_first_device_when_no_loopback(monkeypatch):
 
 def test_default_returns_none_when_no_devices(monkeypatch):
     import flashback_sampler.app.audio_devices as ad
+
     monkeypatch.setattr(ad, "list_capture_devices", lambda: [])
     assert ad.default_capture_device() is None
 
 
 def _fake_devices():
     return [
-        {"kind": "loopback", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
-        {"kind": "loopback", "is_default": False, "mix_rate": 96_000, "mix_channels": 2, "id": "{hp}", "name": "Headphones"},
-        {"kind": "input", "is_default": True, "mix_rate": 44_100, "mix_channels": 1, "id": "{mic}", "name": "Mic"},
+        {
+            "kind": "loopback",
+            "is_default": True,
+            "mix_rate": 48_000,
+            "mix_channels": 2,
+            "id": "{spk}",
+            "name": "Speakers",
+        },
+        {
+            "kind": "loopback",
+            "is_default": False,
+            "mix_rate": 96_000,
+            "mix_channels": 2,
+            "id": "{hp}",
+            "name": "Headphones",
+        },
+        {
+            "kind": "input",
+            "is_default": True,
+            "mix_rate": 44_100,
+            "mix_channels": 1,
+            "id": "{mic}",
+            "name": "Mic",
+        },
         # Render rows: the same endpoints appear again under "render" for
         # output enumeration. The loopback defaults above are pinned by
         # test_list_capture_devices_maps_native_list, so here both the
@@ -155,10 +183,31 @@ def _fake_devices():
         # assertion; test_list_output_devices_maps_render_rows_only is the
         # test that catches it, since {hp}'s channel count (6) only matches
         # its render row, not its loopback row (2).
-        {"kind": "render", "is_default": True, "mix_rate": 48_000, "mix_channels": 2, "id": "{spk}", "name": "Speakers"},
-        {"kind": "render", "is_default": False, "mix_rate": 96_000, "mix_channels": 6, "id": "{hp}", "name": "Headphones"},
+        {
+            "kind": "render",
+            "is_default": True,
+            "mix_rate": 48_000,
+            "mix_channels": 2,
+            "id": "{spk}",
+            "name": "Speakers",
+        },
+        {
+            "kind": "render",
+            "is_default": False,
+            "mix_rate": 96_000,
+            "mix_channels": 6,
+            "id": "{hp}",
+            "name": "Headphones",
+        },
         # mix_channels 0 (or missing) must fall back to 2, not surface as 0.
-        {"kind": "render", "is_default": False, "mix_rate": 44_100, "mix_channels": 0, "id": "{disabled}", "name": "Disabled"},
+        {
+            "kind": "render",
+            "is_default": False,
+            "mix_rate": 44_100,
+            "mix_channels": 0,
+            "id": "{disabled}",
+            "name": "Disabled",
+        },
     ]
 
 
@@ -213,13 +262,17 @@ def test_default_output_device_enumerates_once(monkeypatch):
 
 def test_probe_over_mix_rate_falls_back_for_loopback_and_input(monkeypatch):
     for kind in ("loopback", "input"):
-        dev = audio_devices.CaptureDevice(kind=kind, name="X", id="{x}", mix_rate=48_000)
+        dev = audio_devices.CaptureDevice(
+            kind=kind, name="X", id="{x}", mix_rate=48_000
+        )
         r = audio_devices.probe_capture_rate(dev, 96_000, 2)
         assert not r.ok and r.effective_rate == 48_000 and "48000 Hz" in r.message
 
 
 def test_probe_at_or_below_mix_rate_ok():
-    dev = audio_devices.CaptureDevice(kind="loopback", name="X", id="{x}", mix_rate=48_000)
+    dev = audio_devices.CaptureDevice(
+        kind="loopback", name="X", id="{x}", mix_rate=48_000
+    )
     assert audio_devices.probe_capture_rate(dev, 48_000, 2).ok
     assert audio_devices.probe_capture_rate(dev, 44_100, 2).ok
 
@@ -233,20 +286,41 @@ def test_build_capture_source_loopback_and_input_use_native(monkeypatch):
     seen = {}
 
     class _Src:
-        def __init__(self, buffer, kind, device_id="", pid=0, sample_rate=48_000, channels=2):
-            seen.update(kind=kind, device_id=device_id, pid=pid, sample_rate=sample_rate, channels=channels)
+        def __init__(
+            self, buffer, kind, device_id="", pid=0, sample_rate=48_000, channels=2
+        ):
+            seen.update(
+                kind=kind,
+                device_id=device_id,
+                pid=pid,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
 
     monkeypatch.setattr(audio_devices, "NativeCaptureSource", _Src)
-    audio_devices.build_capture_source(audio_devices.DEFAULT_LOOPBACK, _FakeBuffer(), 48_000, 2)
-    assert seen == dict(kind="loopback", device_id="", pid=0, sample_rate=48_000, channels=2)
-    audio_devices.build_capture_source(audio_devices.CaptureDevice(kind="input", name="Mic", id="{mic}"), _FakeBuffer(), 44_100, 1)
-    assert seen == dict(kind="input", device_id="{mic}", pid=0, sample_rate=44_100, channels=1)
+    audio_devices.build_capture_source(
+        audio_devices.DEFAULT_LOOPBACK, _FakeBuffer(), 48_000, 2
+    )
+    assert seen == dict(
+        kind="loopback", device_id="", pid=0, sample_rate=48_000, channels=2
+    )
+    audio_devices.build_capture_source(
+        audio_devices.CaptureDevice(kind="input", name="Mic", id="{mic}"),
+        _FakeBuffer(),
+        44_100,
+        1,
+    )
+    assert seen == dict(
+        kind="input", device_id="{mic}", pid=0, sample_rate=44_100, channels=1
+    )
 
 
 def test_apply_rate_probe_rebuilds_preset():
     from flashback_sampler.core.quality_presets import QualityPreset
 
-    dev = audio_devices.CaptureDevice(kind="loopback", name="X", id="{x}", mix_rate=48_000)
+    dev = audio_devices.CaptureDevice(
+        kind="loopback", name="X", id="{x}", mix_rate=48_000
+    )
     preset = QualityPreset(
         name="CUSTOM", sample_rate=96000, channels=2, buffer_seconds=300.0
     )
@@ -266,7 +340,10 @@ def test_build_mixed_capture_source_maps_every_device(monkeypatch):
     """Two devices become two spec dicts through the SAME mapping the
     single builder uses; the process id goes through resolve_root_pid."""
     import flashback_sampler.app.audio_devices as ad
-    from flashback_sampler.app.audio_devices import CaptureDevice, build_mixed_capture_source
+    from flashback_sampler.app.audio_devices import (
+        CaptureDevice,
+        build_mixed_capture_source,
+    )
 
     seen = {}
 
@@ -278,39 +355,68 @@ def test_build_mixed_capture_source_maps_every_device(monkeypatch):
     monkeypatch.setattr(ad.native, "resolve_root_pid", lambda pid: pid + 1)
     spk = CaptureDevice(kind="loopback", name="Spk", id="{spk}")
     proc = CaptureDevice(kind="process_loopback", name="P", id="1234")
-    build_mixed_capture_source([spk, proc], buffer=_FakeBuffer(), sample_rate=44_100, channels=1)
-    assert seen["specs"] == [{"kind": "loopback", "device_id": "{spk}"}, {"kind": "process", "pid": 1235}]
+    build_mixed_capture_source(
+        [spk, proc], buffer=_FakeBuffer(), sample_rate=44_100, channels=1
+    )
+    assert seen["specs"] == [
+        {"kind": "loopback", "device_id": "{spk}"},
+        {"kind": "process", "pid": 1235},
+    ]
     assert (seen["sample_rate"], seen["channels"]) == (44_100, 1)
 
 
 # ── #77: does a capture device record the preview output? ──────────────────
 
+
 def test_captures_preview_matches_a_loopback_on_the_same_endpoint():
     from flashback_sampler.app.audio_devices import captures_preview
+
     spk = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2)
-    default_out = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
+    default_out = OutputDevice(
+        id="{spk}", name="Speakers", max_output_channels=2, is_default=True
+    )
     other = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
     pinned = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}")
-    pinned_default = CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True)
+    pinned_default = CaptureDevice(
+        kind="loopback", name="Speakers  [loopback]", id="{spk}", is_default=True
+    )
     assert captures_preview(pinned, spk)
     assert not captures_preview(pinned, other)
     # The OS default on either side matches a pinned pick of the default endpoint.
     assert captures_preview(DEFAULT_LOOPBACK, default_out)
-    assert captures_preview(pinned_default, OutputDevice(id="", name="Default", max_output_channels=2))
+    assert captures_preview(
+        pinned_default, OutputDevice(id="", name="Default", max_output_channels=2)
+    )
     assert not captures_preview(DEFAULT_LOOPBACK, other)
     # An input never plays back what the preview renders.
-    assert not captures_preview(CaptureDevice(kind="input", name="Mic", id="{spk}"), spk)
+    assert not captures_preview(
+        CaptureDevice(kind="input", name="Mic", id="{spk}"), spk
+    )
 
 
-def test_captures_preview_matches_a_process_source_only_in_our_own_tree(monkeypatch, request):
+def test_captures_preview_matches_a_process_source_only_in_our_own_tree(
+    monkeypatch, request
+):
     """Per-process loopback captures the target's process tree (include
     mode), so it records the preview only when that tree is ours."""
     import os
+
     from flashback_sampler.app.audio_devices import captures_preview
+
     roots = {4242: 1, 5151: 5151, os.getpid(): 1}
-    monkeypatch.setattr(audio_devices.native, "resolve_root_pid", lambda pid: roots.get(pid, pid))
+    monkeypatch.setattr(
+        audio_devices.native, "resolve_root_pid", lambda pid: roots.get(pid, pid)
+    )
     audio_devices._root_pid.cache_clear()
-    request.addfinalizer(audio_devices._root_pid.cache_clear)  # the fake roots must not outlive the patch
-    out = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
-    assert captures_preview(CaptureDevice(kind="process_loopback", name="ours", id="4242"), out)
-    assert not captures_preview(CaptureDevice(kind="process_loopback", name="Spotify", id="5151"), out)
+    request.addfinalizer(
+        audio_devices._root_pid.cache_clear
+    )  # the fake roots must not outlive the patch
+    out = OutputDevice(
+        id="{spk}", name="Speakers", max_output_channels=2, is_default=True
+    )
+    assert captures_preview(
+        CaptureDevice(kind="process_loopback", name="ours", id="4242"), out
+    )
+    assert not captures_preview(
+        CaptureDevice(kind="process_loopback", name="Spotify", id="5151"), out
+    )

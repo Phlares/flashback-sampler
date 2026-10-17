@@ -1,9 +1,10 @@
 """NavBar — bottom strip with ARM ALL, source indicators, and config readouts."""
+
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from flashback_sampler.app.theme import EREBUS, font_family
 from flashback_sampler.core.source_status import (
@@ -80,9 +81,13 @@ class SourceIndicator(QWidget):
             gfont.setBold(True)
             p.setFont(gfont)
             p.setPen(QColor(0, 0, 0, 170))  # carved: shadow first
-            p.drawText(w - 13, 2, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev])
+            p.drawText(
+                w - 13, 2, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev]
+            )
             p.setPen(QColor(SEVERITY_RING_COLOR[sev]))
-            p.drawText(w - 13, 1, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev])
+            p.drawText(
+                w - 13, 1, 12, h, Qt.AlignVCenter | Qt.AlignHCenter, SEVERITY_GLYPH[sev]
+            )
         p.setPen(QColor(self._color))
         fam = font_family("label").split(",")[0].strip().strip('"')
         font = p.font()
@@ -139,19 +144,25 @@ class NavBar(QWidget):
         self._add_separator(layout)
 
         self.clip_length_label = QLabel("3:00")
-        self.clip_length_label.setStyleSheet(f"color: {EREBUS['bone']}; font-size: 8pt;")
+        self.clip_length_label.setStyleSheet(
+            f"color: {EREBUS['bone']}; font-size: 8pt;"
+        )
         layout.addWidget(self.clip_length_label)
 
         self._add_separator(layout)
 
         self.buffer_length_label = QLabel("15:00")
-        self.buffer_length_label.setStyleSheet(f"color: {EREBUS['bone']}; font-size: 8pt;")
+        self.buffer_length_label.setStyleSheet(
+            f"color: {EREBUS['bone']}; font-size: 8pt;"
+        )
         layout.addWidget(self.buffer_length_label)
 
         self._add_separator(layout)
 
         self.project_size_label = QLabel("~4.31 GB")
-        self.project_size_label.setStyleSheet(f"color: {EREBUS['bone']}; font-size: 8pt;")
+        self.project_size_label.setStyleSheet(
+            f"color: {EREBUS['bone']}; font-size: 8pt;"
+        )
         layout.addWidget(self.project_size_label)
 
     def set_source_names(self, names: list[str]) -> None:
@@ -182,9 +193,7 @@ class NavBar(QWidget):
         chip = SourceIndicator(i, f"SOURCE {i + 1}")
         # Forward the per-chip signals through the NavBar so callers
         # wire up once, regardless of how many chips appear later.
-        chip.clicked.connect(
-            lambda _=None, idx=i: self.chipClicked.emit(idx)
-        )
+        chip.clicked.connect(lambda _=None, idx=i: self.chipClicked.emit(idx))
         chip.contextMenuRequested.connect(
             lambda pos, idx=i: self.chipContextMenuRequested.emit(idx, pos)
         )

@@ -14,7 +14,7 @@ RegisterHotKey round-trip is testable on any platform.
 from __future__ import annotations
 
 import ctypes
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtWidgets import QApplication
@@ -35,10 +35,12 @@ MOD_NOREPEAT = 0x4000  # one fire per physical press, no auto-repeat storm
 WM_HOTKEY = 0x0312
 
 _MODIFIERS = {
-    "Ctrl": MOD_CONTROL, "Control": MOD_CONTROL,
+    "Ctrl": MOD_CONTROL,
+    "Control": MOD_CONTROL,
     "Alt": MOD_ALT,
     "Shift": MOD_SHIFT,
-    "Meta": MOD_WIN, "Win": MOD_WIN,
+    "Meta": MOD_WIN,
+    "Win": MOD_WIN,
 }
 
 
@@ -108,7 +110,10 @@ def _win_register(hwnd: int, hotkey_id: int, mods: int, vk: int) -> bool:
     # 64-bit handle gets truncated to 32 bits and RegisterHotKey targets nothing.
     user32 = ctypes.windll.user32
     user32.RegisterHotKey.argtypes = [
-        _wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+        _wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_uint,
     ]
     user32.RegisterHotKey.restype = _wintypes.BOOL
     return bool(user32.RegisterHotKey(_wintypes.HWND(hwnd), hotkey_id, mods, vk))

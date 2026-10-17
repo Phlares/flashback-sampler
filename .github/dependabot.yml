@@ -9,3 +9,11 @@ updates:
       actions:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+  - package-ecosystem: pre-commit
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: monthly
+    groups:
+      hooks:
+        patterns: ["*"]

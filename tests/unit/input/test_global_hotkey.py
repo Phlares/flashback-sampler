@@ -56,23 +56,47 @@ def test_unregisterable_returns_none(chord):
 
 # --- build_global_bindings: derive global hotkeys from the live BindingTable -
 
+
 def test_build_global_bindings_tracks_current_bindings():
     from flashback_sampler.input.core import Action, BindingTable, register
     from flashback_sampler.input.core.actions import clear_registry
     from flashback_sampler.input.sources.global_hotkey import build_global_bindings
 
     clear_registry()
-    register(Action(id="rec", name="Rec", category="T", callable=lambda: None,
-                    default_binding="Ctrl+Alt+R", is_global=True))
-    register(Action(id="co", name="Checkout", category="T", callable=lambda: None,
-                    default_binding="Ctrl+Alt+O", is_global=True))
+    register(
+        Action(
+            id="rec",
+            name="Rec",
+            category="T",
+            callable=lambda: None,
+            default_binding="Ctrl+Alt+R",
+            is_global=True,
+        )
+    )
+    register(
+        Action(
+            id="co",
+            name="Checkout",
+            category="T",
+            callable=lambda: None,
+            default_binding="Ctrl+Alt+O",
+            is_global=True,
+        )
+    )
     # A non-global action with a modifier chord must NOT be globalized.
-    register(Action(id="local", name="Local", category="T", callable=lambda: None,
-                    default_binding="Ctrl+Alt+L", is_global=False))
+    register(
+        Action(
+            id="local",
+            name="Local",
+            category="T",
+            callable=lambda: None,
+            default_binding="Ctrl+Alt+L",
+            is_global=False,
+        )
+    )
     table = BindingTable()
 
-    assert build_global_bindings(table) == {
-        "Ctrl+Alt+R": "rec", "Ctrl+Alt+O": "co"}
+    assert build_global_bindings(table) == {"Ctrl+Alt+R": "rec", "Ctrl+Alt+O": "co"}
 
     # Rebind the record action — the global map must follow.
     table.bind("Ctrl+Alt+G", "rec")
@@ -90,8 +114,16 @@ def test_build_global_bindings_skips_bare_keys():
     from flashback_sampler.input.sources.global_hotkey import build_global_bindings
 
     clear_registry()
-    register(Action(id="rec", name="Rec", category="T", callable=lambda: None,
-                    default_binding="F13", is_global=True))
+    register(
+        Action(
+            id="rec",
+            name="Rec",
+            category="T",
+            callable=lambda: None,
+            default_binding="F13",
+            is_global=True,
+        )
+    )
     table = BindingTable()
     assert build_global_bindings(table) == {}
     clear_registry()
@@ -100,7 +132,10 @@ def test_build_global_bindings_skips_bare_keys():
 def test_source_registers_only_parseable_bindings(qapp):
     from flashback_sampler.input.core import Action, register
     from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
-    register(Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None))
+
+    register(
+        Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None)
+    )
     calls = []
     src = GlobalHotkeySource(
         {"Ctrl+Alt+O": "clip.checkout", "Space": "x"},  # Space can't be global
@@ -116,12 +151,21 @@ def test_source_registers_only_parseable_bindings(qapp):
 def test_source_dispatch_invokes_bound_action(qapp):
     from flashback_sampler.input.core import Action, register
     from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
+
     fired = []
-    register(Action(id="clip.checkout", name="C", category="Clip",
-                    callable=lambda: fired.append(1)))
+    register(
+        Action(
+            id="clip.checkout",
+            name="C",
+            category="Clip",
+            callable=lambda: fired.append(1),
+        )
+    )
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=1,
-        register_fn=lambda *a: True, unregister_fn=lambda *a: None,
+        {"Ctrl+Alt+O": "clip.checkout"},
+        hwnd=1,
+        register_fn=lambda *a: True,
+        unregister_fn=lambda *a: None,
     )
     hid = next(iter(src._registered))
     assert src._dispatch(hid) is True
@@ -130,13 +174,18 @@ def test_source_dispatch_invokes_bound_action(qapp):
 
 
 def test_source_close_unregisters_all(qapp):
-    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
     from flashback_sampler.input.core import Action, register
-    register(Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None))
+    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
+
+    register(
+        Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None)
+    )
     removed = []
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=7,
-        register_fn=lambda *a: True, unregister_fn=lambda hwnd, hid: removed.append((hwnd, hid)),
+        {"Ctrl+Alt+O": "clip.checkout"},
+        hwnd=7,
+        register_fn=lambda *a: True,
+        unregister_fn=lambda hwnd, hid: removed.append((hwnd, hid)),
     )
     n = len(src._registered)
     src.close()
@@ -175,11 +224,19 @@ def test_native_event_filter_dispatches_despite_falsy_pointer(qapp):
     )
 
     fired = []
-    register(Action(id="clip.checkout", name="C", category="Clip",
-                    callable=lambda: fired.append(1)))
+    register(
+        Action(
+            id="clip.checkout",
+            name="C",
+            category="Clip",
+            callable=lambda: fired.append(1),
+        )
+    )
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=1,
-        register_fn=lambda *a: True, unregister_fn=lambda *a: None,
+        {"Ctrl+Alt+O": "clip.checkout"},
+        hwnd=1,
+        register_fn=lambda *a: True,
+        unregister_fn=lambda *a: None,
     )
     hid = next(iter(src._registered))
     msg = wintypes.MSG()
@@ -199,11 +256,15 @@ def test_native_event_filter_dispatches_despite_falsy_pointer(qapp):
 
 
 def test_failed_registration_is_skipped(qapp):
-    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
     from flashback_sampler.input.core import Action, register
-    register(Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None))
+    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
+
+    register(
+        Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None)
+    )
     src = GlobalHotkeySource(
-        {"Ctrl+Alt+O": "clip.checkout"}, hwnd=0,
+        {"Ctrl+Alt+O": "clip.checkout"},
+        hwnd=0,
         register_fn=lambda *a: False,  # combo already taken by another app
         unregister_fn=lambda *a: None,
     )

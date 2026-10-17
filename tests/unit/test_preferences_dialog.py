@@ -1,11 +1,14 @@
-
 from flashback_sampler.app.preferences_dialog import PreferencesDialog
 
 
 def test_checkbox_reflects_initial_state(qapp):
-    dlg = PreferencesDialog(show_notifications=False, on_notifications_changed=lambda v: None)
+    dlg = PreferencesDialog(
+        show_notifications=False, on_notifications_changed=lambda v: None
+    )
     assert dlg.notify_check.isChecked() is False
-    dlg2 = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda v: None)
+    dlg2 = PreferencesDialog(
+        show_notifications=True, on_notifications_changed=lambda v: None
+    )
     assert dlg2.notify_check.isChecked() is True
 
 
@@ -23,8 +26,10 @@ def test_toggling_checkbox_applies_live(qapp):
 def test_global_hotkeys_checkbox_reflects_and_fires(qapp):
     changes = []
     dlg = PreferencesDialog(
-        show_notifications=True, on_notifications_changed=lambda v: None,
-        global_hotkeys_enabled=True, on_global_hotkeys_changed=lambda v: changes.append(v),
+        show_notifications=True,
+        on_notifications_changed=lambda v: None,
+        global_hotkeys_enabled=True,
+        on_global_hotkeys_changed=lambda v: changes.append(v),
         global_hotkeys_supported=True,
     )
     assert dlg.global_hotkeys_check.isChecked() is True
@@ -34,8 +39,10 @@ def test_global_hotkeys_checkbox_reflects_and_fires(qapp):
 
 def test_global_hotkeys_checkbox_disabled_when_unsupported(qapp):
     dlg = PreferencesDialog(
-        show_notifications=True, on_notifications_changed=lambda v: None,
-        global_hotkeys_enabled=True, on_global_hotkeys_changed=lambda v: None,
+        show_notifications=True,
+        on_notifications_changed=lambda v: None,
+        global_hotkeys_enabled=True,
+        on_global_hotkeys_changed=lambda v: None,
         global_hotkeys_supported=False,
     )
     assert dlg.global_hotkeys_check.isEnabled() is False
@@ -83,11 +90,17 @@ def test_export_dir_browse_cancel_changes_nothing(qapp):
 
 def test_scratch_dir_row_reports_a_pick(qapp, monkeypatch):
     seen = []
-    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
-                            scratch_dir="C:/old", on_scratch_dir_changed=seen.append)
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda c: None,
+        scratch_dir="C:/old",
+        on_scratch_dir_changed=seen.append,
+    )
     assert dlg.scratch_dir_edit.text() == "C:/old"
-    monkeypatch.setattr("flashback_sampler.app.preferences_dialog.QFileDialog.getExistingDirectory",
-                        staticmethod(lambda *a, **k: "C:/new"))
+    monkeypatch.setattr(
+        "flashback_sampler.app.preferences_dialog.QFileDialog.getExistingDirectory",
+        staticmethod(lambda *a, **k: "C:/new"),
+    )
     dlg.scratch_dir_btn.click()
     assert seen == ["C:/new"] and dlg.scratch_dir_edit.text() == "C:/new"
 
@@ -96,11 +109,18 @@ def test_memory_row_shows_the_footprint_and_reports_edits(qapp):
     """#41: the max footprint is a live tunable; 0 means no cap. The hint
     names physical and free RAM so the number has a reference."""
     seen = []
-    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
-                            max_footprint_mb=16384.0, on_max_footprint_changed=seen.append,
-                            mem_total_mb=65536.0, mem_free_mb=40000.0)
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda c: None,
+        max_footprint_mb=16384.0,
+        on_max_footprint_changed=seen.append,
+        mem_total_mb=65536.0,
+        mem_free_mb=40000.0,
+    )
     assert dlg.footprint_spin.value() == 16384
-    assert "65,536" in dlg.footprint_hint.text() and "40,000" in dlg.footprint_hint.text()
+    assert (
+        "65,536" in dlg.footprint_hint.text() and "40,000" in dlg.footprint_hint.text()
+    )
     dlg.footprint_spin.setValue(0)
     dlg.footprint_spin.editingFinished.emit()
     assert seen == [0.0]
@@ -109,8 +129,12 @@ def test_memory_row_shows_the_footprint_and_reports_edits(qapp):
 def test_drag_handle_row_reports_edits(qapp):
     """The drag-out handle budget is a live tunable; 0 = slice only."""
     seen = []
-    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
-                            drag_handle_mb=200.0, on_drag_handle_mb_changed=seen.append)
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda c: None,
+        drag_handle_mb=200.0,
+        on_drag_handle_mb_changed=seen.append,
+    )
     assert dlg.drag_cap_spin.value() == 200
     dlg.drag_cap_spin.setValue(50)
     assert seen == [50.0]
@@ -119,8 +143,12 @@ def test_drag_handle_row_reports_edits(qapp):
 def test_alc_sidecar_checkbox_reports_toggles(qapp):
     """Off by default; the drag offers the .alc only when it is on."""
     seen = []
-    dlg = PreferencesDialog(show_notifications=True, on_notifications_changed=lambda c: None,
-                            drag_alc_sidecar=False, on_drag_alc_sidecar_changed=seen.append)
+    dlg = PreferencesDialog(
+        show_notifications=True,
+        on_notifications_changed=lambda c: None,
+        drag_alc_sidecar=False,
+        on_drag_alc_sidecar_changed=seen.append,
+    )
     assert dlg.alc_sidecar_check.isChecked() is False
     assert "Ableton" in dlg.alc_sidecar_check.text()
     dlg.alc_sidecar_check.setChecked(True)

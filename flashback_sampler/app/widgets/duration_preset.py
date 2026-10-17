@@ -14,9 +14,15 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from flashback_sampler.app.theme import EREBUS
 
-
 DEFAULT_PRESETS: tuple[float, ...] = (
-    15.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0,
+    15.0,
+    30.0,
+    60.0,
+    120.0,
+    180.0,
+    300.0,
+    600.0,
+    900.0,
 )
 
 
@@ -140,7 +146,10 @@ class DurationPreset(QWidget):
             p.setPen(QPen(text_color))
             label = format_preset(dur).upper()
             p.drawText(
-                8, y, w - 12, rh,
+                8,
+                y,
+                w - 12,
+                rh,
                 Qt.AlignLeft | Qt.AlignVCenter,
                 label,
             )

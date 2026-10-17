@@ -1,6 +1,6 @@
 """Tests for WaveformPanel widget."""
-from __future__ import annotations
 
+from __future__ import annotations
 
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
 
@@ -65,5 +65,6 @@ def test_set_demo_waveform_runs(qapp):
 
 def test_panel_uses_selectable_waveform(qapp):
     from flashback_sampler.app.widgets.selectable_waveform import SelectableWaveform
+
     panel = WaveformPanel(side="buffer")
     assert isinstance(panel.waveform, SelectableWaveform)

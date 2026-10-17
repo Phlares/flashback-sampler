@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import functools
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from flashback_sampler.core import native
 from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource
 from flashback_sampler.core.quality_presets import QualityPreset
 from flashback_sampler.platform.capabilities import loopback_supported
-
 
 CaptureKind = Literal["loopback", "input", "process_loopback"]
 
@@ -45,6 +44,7 @@ class CaptureDevice:
             loopback, captures only the target PID. `id` is the PID
             as a string.
     """
+
     kind: CaptureKind
     name: str
     id: str
@@ -66,8 +66,11 @@ class CaptureDevice:
 # specific named endpoint (the old default behaviour) silently records nothing
 # when that endpoint isn't the one playing audio.
 DEFAULT_LOOPBACK = CaptureDevice(
-    kind="loopback", name="Default output  [loopback]", id="",
-    is_default=True, follow_default=True,
+    kind="loopback",
+    name="Default output  [loopback]",
+    id="",
+    is_default=True,
+    follow_default=True,
 )
 
 
@@ -75,6 +78,7 @@ DEFAULT_LOOPBACK = CaptureDevice(
 class OutputDevice:
     """A WASAPI render endpoint used for preview playback. `id` is the
     endpoint id string; `""` means the live OS default output."""
+
     id: str
     name: str
     max_output_channels: int
@@ -103,15 +107,17 @@ def _list_native_devices() -> list[CaptureDevice]:
         is_loop = d["kind"] == "loopback"
         if is_loop and not loopback_supported():
             continue
-        out.append(CaptureDevice(
-            kind=d["kind"],
-            name=f'{d["name"]}  [loopback]' if is_loop else d["name"],
-            id=d["id"],
-            sample_rate=d["mix_rate"] or 48_000,
-            channels=min(2, d["mix_channels"] or 2),
-            is_default=d["is_default"],
-            mix_rate=d["mix_rate"] or None,
-        ))
+        out.append(
+            CaptureDevice(
+                kind=d["kind"],
+                name=f"{d['name']}  [loopback]" if is_loop else d["name"],
+                id=d["id"],
+                sample_rate=d["mix_rate"] or 48_000,
+                channels=min(2, d["mix_channels"] or 2),
+                is_default=d["is_default"],
+                mix_rate=d["mix_rate"] or None,
+            )
+        )
     return out
 
 
@@ -177,8 +183,10 @@ def captures_preview(device: CaptureDevice, output: OutputDevice) -> bool:
     default output that changes mid-session is not re-resolved here; the
     preview device is pinned at launch the same way."""
     if device.kind == "loopback":
-        return bool(_endpoints(device.id, device.is_default or device.follow_default)
-                    & _endpoints(output.id, output.is_default))
+        return bool(
+            _endpoints(device.id, device.is_default or device.follow_default)
+            & _endpoints(output.id, output.is_default)
+        )
     if device.kind == "process_loopback":
         return _root_pid(int(device.id)) == _root_pid(os.getpid())
     return False
@@ -204,17 +212,23 @@ def _spec_kwargs(device: CaptureDevice) -> dict:
             pid = int(device.id)
         except ValueError as e:
             raise ValueError(
-                f"process_loopback device id must be an integer PID; "
-                f"got {device.id!r}"
+                f"process_loopback device id must be an integer PID; got {device.id!r}"
             ) from e
         return {"kind": "process", "pid": native.resolve_root_pid(pid)}
     raise ValueError(f"unknown CaptureDevice.kind: {device.kind!r}")
 
 
-def build_capture_source(device: CaptureDevice, buffer, sample_rate: int, channels: int):
+def build_capture_source(
+    device: CaptureDevice, buffer, sample_rate: int, channels: int
+):
     """Instantiate the capture source for ONE CaptureDevice.
     `buffer` is the NativeAudioCircularBuffer the source writes into."""
-    return NativeCaptureSource(buffer=buffer, sample_rate=sample_rate, channels=channels, **_spec_kwargs(device))
+    return NativeCaptureSource(
+        buffer=buffer,
+        sample_rate=sample_rate,
+        channels=channels,
+        **_spec_kwargs(device),
+    )
 
 
 def build_mixed_capture_source(devices, buffer, sample_rate: int, channels: int):
@@ -237,6 +251,7 @@ def build_mixed_capture_source(devices, buffer, sample_rate: int, channels: int)
 @dataclass(frozen=True)
 class ProbeResult:
     """Outcome of asking whether a device can honestly deliver a rate."""
+
     ok: bool
     effective_rate: int
     message: str = ""
@@ -255,7 +270,8 @@ def probe_capture_rate(
     if mix is None or sample_rate <= mix:
         return ProbeResult(True, sample_rate)
     return ProbeResult(
-        False, mix,
+        False,
+        mix,
         f"Output mix format is {mix} Hz — a {sample_rate} Hz capture "
         f"won't contain content above {mix // 2} Hz. "
         f"Capturing at {mix} Hz instead.",

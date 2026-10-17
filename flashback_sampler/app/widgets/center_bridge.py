@@ -1,8 +1,8 @@
 """CenterBridge — narrow vertical column between the two turntables."""
+
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 
@@ -16,7 +16,7 @@ class CenterBridge(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
-        layout.addStretch(8)   # heavy top spacer pushes buttons down
+        layout.addStretch(8)  # heavy top spacer pushes buttons down
 
         self.stop_btn = TactileButton("STOP", variant="secondary")
         self.stop_btn.setMinimumWidth(50)
@@ -28,4 +28,4 @@ class CenterBridge(QWidget):
         self.start_btn.setMinimumHeight(36)
         layout.addWidget(self.start_btn)
 
-        layout.addStretch(1)   # tiny bottom spacer
+        layout.addStretch(1)  # tiny bottom spacer

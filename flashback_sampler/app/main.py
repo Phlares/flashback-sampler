@@ -15,8 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from flashback_sampler.app.state import DEFAULT_BUFFER_SECONDS, AppState
@@ -70,6 +69,7 @@ def _run(app: QApplication, args: argparse.Namespace) -> int:
     if state is None:
         return 1
     from flashback_sampler.app.turntable_window import TurntableWindow
+
     window = TurntableWindow(state)
     window.show()
 

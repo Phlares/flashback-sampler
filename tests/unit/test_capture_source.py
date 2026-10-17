@@ -8,10 +8,8 @@ also conform.
 
 from __future__ import annotations
 
-import pytest
-
-from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.capture_source import CaptureSource
+from flashback_sampler.core.native import NativeAudioCircularBuffer
 
 
 def _minimal_buffer() -> NativeAudioCircularBuffer:
@@ -25,18 +23,21 @@ def _minimal_buffer() -> NativeAudioCircularBuffer:
 
 def test_fake_no_thread_source_conforms_to_capture_source():
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+
     src = FakeCaptureSourceNoThread(_minimal_buffer(), sample_rate=1000, channels=1)
     assert isinstance(src, CaptureSource)
 
 
 def test_silence_source_conforms_to_capture_source():
     from tests.fixtures.fake_capture import SilenceCaptureSource
+
     src = SilenceCaptureSource(_minimal_buffer(), sample_rate=1000, channels=1)
     assert isinstance(src, CaptureSource)
 
 
 def test_fake_no_thread_start_stop_updates_is_running():
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+
     src = FakeCaptureSourceNoThread(_minimal_buffer(), sample_rate=1000, channels=1)
     assert src.is_running() is False
     src.start()
@@ -47,6 +48,7 @@ def test_fake_no_thread_start_stop_updates_is_running():
 
 def test_fake_no_thread_fill_writes_to_buffer():
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+
     buf = NativeAudioCircularBuffer(duration_seconds=1.0, sample_rate=1000, channels=1)
     src = FakeCaptureSourceNoThread(buf, sample_rate=1000, channels=1)
     src.start()
@@ -57,6 +59,7 @@ def test_fake_no_thread_fill_writes_to_buffer():
 
 def test_fake_no_thread_xrun_counter_starts_at_zero_and_increments():
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+
     src = FakeCaptureSourceNoThread(_minimal_buffer(), sample_rate=1000, channels=1)
     assert src.xrun_count() == 0
     src.bump_xrun()

@@ -1,14 +1,14 @@
 """Hardware tests: real WASAPI endpoints. Run by hand on a Windows box:
     pytest tests/hw -m audio_hw -s
 Play audio through the default output while this runs."""
+
 import time
 
 import pytest
 
 from flashback_sampler.core import native
 from flashback_sampler.core.native import NativeAudioCircularBuffer
-from flashback_sampler.core.native_capture import NativeCaptureSource
-from flashback_sampler.core.native_capture import NativeMixedSource
+from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMixedSource
 
 pytestmark = pytest.mark.audio_hw
 
@@ -56,7 +56,9 @@ def test_loopback_at_96k_when_mix_is_48k_reports_mix_rate(lib):
     time.sleep(1.0)
     ok = src.is_running() and src.last_error() is None
     mix = src.mix_rate()
-    src.stop(); src.close(); buf.close()
+    src.stop()
+    src.close()
+    buf.close()
     assert ok
     assert mix > 0
 
@@ -65,12 +67,15 @@ def test_process_loopback_of_this_python_process_opens(lib):
     """Opens the process-loopback client for our own PID. It has no render
     stream so frames stay 0 — the assertion is that activation SUCCEEDS."""
     import os
+
     buf = NativeAudioCircularBuffer(duration_seconds=5, sample_rate=48_000, channels=2)
     src = NativeCaptureSource(buf, kind="process", pid=os.getpid())
     src.start()
     time.sleep(1.5)
     running, err = src.is_running(), src.last_error()
-    src.stop(); src.close(); buf.close()
+    src.stop()
+    src.close()
+    buf.close()
     assert running and err is None, err
 
 
@@ -82,8 +87,16 @@ def test_two_source_mix_records_frames_on_both(lib):
     src = NativeMixedSource(buf, specs=[{"kind": "loopback"}, {"kind": "input"}])
     src.start()
     time.sleep(2.0)
-    running, err, frames, xruns, mix = src.is_running(), src.last_error(), src.frames_written(), src.xrun_count(), src.mix_rate()
-    src.stop(); src.close(); buf.close()
+    running, err, frames, xruns, mix = (
+        src.is_running(),
+        src.last_error(),
+        src.frames_written(),
+        src.xrun_count(),
+        src.mix_rate(),
+    )
+    src.stop()
+    src.close()
+    buf.close()
     assert running, err
     assert err is None, err
     assert frames > 48_000, frames

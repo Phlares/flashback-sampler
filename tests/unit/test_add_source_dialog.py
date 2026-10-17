@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from flashback_sampler.app.add_source_dialog import (
     SAMPLE_RATE_CHOICES,
     AddSourceDialog,
@@ -11,7 +10,16 @@ from flashback_sampler.app.add_source_dialog import (
 
 def test_hi_res_rates_offered_descending():
     assert SAMPLE_RATE_CHOICES == (
-        192000, 176400, 96000, 88200, 48000, 44100, 32000, 22050, 16000, 8000
+        192000,
+        176400,
+        96000,
+        88200,
+        48000,
+        44100,
+        32000,
+        22050,
+        16000,
+        8000,
     )
 
 

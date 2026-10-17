@@ -19,6 +19,7 @@ def test_input_event_with_value_and_repeat():
 def test_input_event_is_frozen():
     e = InputEvent(source="keyboard", kind="press", code="F13")
     import dataclasses
+
     try:
         e.code = "F14"
     except dataclasses.FrozenInstanceError:

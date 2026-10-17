@@ -10,10 +10,10 @@ checkout state) lives in the window controller.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Callable, Iterable, Optional
 
-from PySide6.QtCore import QMimeData, QUrl, Qt
+from PySide6.QtCore import QMimeData, Qt, QUrl
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import QWidget
 
@@ -39,7 +39,7 @@ def build_file_drag_mime(file_path: Path | str | Iterable[Path | str]) -> QMimeD
 def perform_file_drag(
     source_widget: QWidget,
     file_path: Path | str | Iterable[Path | str],
-    exec_fn: Optional[Callable[[QDrag], Qt.DropAction]] = None,
+    exec_fn: Callable[[QDrag], Qt.DropAction] | None = None,
 ) -> bool:
     """
     Run a blocking OS drag offering `file_path` (one path, or several).
