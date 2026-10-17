@@ -151,7 +151,7 @@ def test_remove_slot_stops_capture():
     assert len(st.slots) == 1
 
 
-def test_remove_slot_closes_buffer():
+def test_remove_slot_closes_buffer(monkeypatch):
     class _RecordingBuffer:
         def __init__(self):
             self.close_calls = 0
@@ -163,8 +163,8 @@ def test_remove_slot_closes_buffer():
     st.add_slot(_preset("SCRATCH"))
     survivor_buffer = _RecordingBuffer()
     removed_buffer = _RecordingBuffer()
-    st.slots[0].buffer = survivor_buffer
-    st.slots[1].buffer = removed_buffer
+    monkeypatch.setattr(st.slots[0], "buffer", survivor_buffer)
+    monkeypatch.setattr(st.slots[1], "buffer", removed_buffer)
 
     st.remove_slot(1)
 
@@ -172,10 +172,16 @@ def test_remove_slot_closes_buffer():
     assert survivor_buffer.close_calls == 0
 
 
-def test_remove_slot_stop_precedes_close():
+def test_remove_slot_stop_precedes_close(monkeypatch):
     call_order: list[str] = []
 
     class _RecordingSource:
+        sample_rate = 1000
+        channels = 1
+
+        def start(self) -> None:
+            pass
+
         def stop(self) -> None:
             call_order.append("stop")
 
@@ -195,7 +201,7 @@ def test_remove_slot_stop_precedes_close():
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     new_slot = st.add_slot(_preset("SCRATCH"))
     new_slot.bind_capture(_RecordingSource())
-    new_slot.buffer = _RecordingBuffer()
+    monkeypatch.setattr(new_slot, "buffer", _RecordingBuffer())
 
     st.remove_slot(1)
 

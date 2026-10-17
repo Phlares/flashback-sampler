@@ -117,12 +117,12 @@ def test_attempt_rebind_with_conflict_asks_for_confirmation(qapp, tmp_path):
     dialog = KeybindingsDialog(table)
 
     # Simulate user declining the confirmation — rebind should NOT apply.
-    dialog._confirm_conflict_replace = lambda code, owner_id: False
+    dialog._confirm_conflict_replace = lambda code, current_owner_id: False
     dialog._attempt_rebind("t.b", "F13")
     assert "F13" not in dialog._edit_buffer
 
     # Simulate user accepting — rebind should apply.
-    dialog._confirm_conflict_replace = lambda code, owner_id: True
+    dialog._confirm_conflict_replace = lambda code, current_owner_id: True
     dialog._attempt_rebind("t.b", "F13")
     assert dialog._edit_buffer.get("F13") == "t.b"
 
