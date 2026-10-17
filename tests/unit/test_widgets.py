@@ -34,7 +34,7 @@ def test_default_presets_cover_expected_range():
     assert DEFAULT_PRESETS[-1] == 900.0
     assert 180.0 in DEFAULT_PRESETS
     # Monotonic
-    for a, b in zip(DEFAULT_PRESETS, DEFAULT_PRESETS[1:]):
+    for a, b in zip(DEFAULT_PRESETS, DEFAULT_PRESETS[1:], strict=False):
         assert a < b
 
 

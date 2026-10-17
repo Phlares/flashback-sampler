@@ -192,7 +192,7 @@ class NativeMixedSource(_NativeSource):
             str(s.get("device_id", "")).encode("utf-8") for s in self.specs
         ]
         arr = (native.FbCaptureSpec * max(len(self.specs), 1))()
-        for i, (s, raw) in enumerate(zip(self.specs, self._id_bytes)):
+        for i, (s, raw) in enumerate(zip(self.specs, self._id_bytes, strict=True)):
             kind = s["kind"]
             if kind not in native.KIND_INTS:
                 raise ValueError(

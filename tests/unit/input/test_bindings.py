@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from flashback_sampler.input.core.actions import (
@@ -130,9 +132,6 @@ def test_reset_to_defaults_restores_all():
     assert table.resolve(_key("F13")) == "t.a"
     assert table.resolve(_key("F14")) == "t.b"
     assert table.resolve(_key("Ctrl+R")) is None
-
-
-import json
 
 
 def test_save_and_load_round_trip(tmp_path):

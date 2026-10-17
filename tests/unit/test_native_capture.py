@@ -1,7 +1,6 @@
 """NativeCaptureSource + native.list_devices over a FAKE ctypes library.
 No hardware, no DLL: every fb_* symbol is a Python stub recording calls."""
 
-
 import pytest
 
 from flashback_sampler.core import native

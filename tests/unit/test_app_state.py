@@ -266,7 +266,7 @@ def test_total_project_ram_includes_checkouts():
     st.slots[0].buffer.write(
         np.zeros((1000, 1), dtype=np.float32)  # 1 s
     )
-    co = st.slots[0].checkout_manager.create(duration_s=0.5)
+    st.slots[0].checkout_manager.create(duration_s=0.5)
     # The checkout's RAM copy lives in the scratch cache, counted once per process.
     assert st.total_project_ram_bytes() == buf_bytes + st.scratch.resident_bytes
     assert st.scratch.resident_bytes == 500 * 4
@@ -370,7 +370,7 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
         kind="loopback", name="Default output  [loopback]", id="", follow_default=True
     )
     main = st.slots[0]
-    mic = st.add_slot(
+    st.add_slot(
         preset_by_name("SCRATCH"),
         name="Mic",
         capture_spec=CaptureDevice(kind="input", name="Mic", id="{mic}"),

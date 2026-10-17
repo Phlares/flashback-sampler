@@ -11,6 +11,8 @@ a fixed expected set, so these tests focus on:
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 import flashback_sampler.app.audio_devices as audio_devices
@@ -32,13 +34,13 @@ class _FakeBuffer:
 
 def test_capture_device_is_frozen():
     d = CaptureDevice(kind="loopback", name="Speakers", id="Speakers")
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         d.name = "other"  # type: ignore[misc]
 
 
 def test_output_device_is_frozen():
     d = OutputDevice(id="{spk}", name="Out", max_output_channels=2)
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         d.id = "{hp}"  # type: ignore[misc]
 
 

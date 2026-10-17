@@ -8,7 +8,9 @@ smoke test.
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication as _QApp
 
 from flashback_sampler.app.widgets.selectable_waveform import (
     EDGE_GRAB_PX,
@@ -39,7 +41,6 @@ def test_edge_at_detects_start_edge(qapp):
     inner_x, inner_w = w._inner_bounds()
     assert inner_w == 1000  # 1012 - 6 - 6
     start_x = inner_x + 0.25 * inner_w  # 256
-    end_x = inner_x + 0.75 * inner_w  # 756
 
     # Exactly on the start edge
     assert w._edge_at(start_x) == "start"
@@ -151,10 +152,6 @@ def test_drag_end_edge_cannot_cross_start(qapp):
 # ─────────────────────────────────────────────────────────────────────────
 # Drag-out gesture
 # ─────────────────────────────────────────────────────────────────────────
-
-from PySide6.QtCore import QEvent, QPointF
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication as _QApp
 
 
 def _mouse_ev(

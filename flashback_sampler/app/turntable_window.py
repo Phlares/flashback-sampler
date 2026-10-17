@@ -531,7 +531,7 @@ class TurntableWindow(QMainWindow):
                 del tracker[stale]
 
         statuses = [self._evaluate_slot(s, dt) for s in slots]
-        for slot, st in zip(slots, statuses):
+        for slot, st in zip(slots, statuses, strict=True):
             key = slot.id
             prev = self._prev_source_sev.get(key, Severity.OK)
             if (

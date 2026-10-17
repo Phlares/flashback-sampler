@@ -1,4 +1,13 @@
-from flashback_sampler.input.core.actions import Action
+import pytest
+
+from flashback_sampler.input.core.actions import (
+    Action,
+    all_actions,
+    clear_registry,
+    get,
+    invoke,
+    register,
+)
 
 
 def test_action_construction_with_defaults():
@@ -29,16 +38,6 @@ def test_action_with_default_binding_and_repeat_policy():
     )
     assert a.default_binding == "Space"
     assert a.repeat_policy == "ignore_repeat"
-
-
-import pytest
-
-from flashback_sampler.input.core.actions import (
-    all_actions,
-    clear_registry,
-    get,
-    register,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -79,9 +78,6 @@ def test_clear_registry_empties():
     register(_mk())
     clear_registry()
     assert all_actions() == []
-
-
-from flashback_sampler.input.core.actions import invoke
 
 
 def test_invoke_calls_callable():

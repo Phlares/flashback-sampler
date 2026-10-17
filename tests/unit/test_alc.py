@@ -176,7 +176,9 @@ def test_rendering_changes_exactly_the_listed_elements_and_nothing_else():
     before = alc.template_text().splitlines()
     after = alc.render_alc_xml(**SUBSTITUTED).splitlines()
     assert len(after) == len(before)
-    changed = [(i, a) for i, (a, b) in enumerate(zip(after, before)) if a != b]
+    changed = [
+        (i, a) for i, (a, b) in enumerate(zip(after, before, strict=True)) if a != b
+    ]
     assert [_element_name(line) for _, line in changed] == SUBSTITUTED_ELEMENTS
 
 
