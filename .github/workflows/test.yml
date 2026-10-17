@@ -58,9 +58,11 @@ jobs:
     uses: Phlares/workflows/.github/workflows/check.yml@ef4ee4741aa6ee0017a6446b55356e50bf635c49 # v1.0.0
     with:
       name: lint
+      python-version: "3.12"
       zig-version: 0.16.0
       timeout-minutes: 5
-      # Hook versions live in .pre-commit-config.yaml and Dependabot moves
-      # them. The prek version below is a manual bump: Dependabot does not
-      # read it.
-      run: pipx run --spec prek==0.5.5 prek run --all-files --show-diff-on-failure
+      # Hook versions live in .pre-commit-config.yaml. prek is pinned by hash
+      # in requirements-lint.txt (compiled from requirements-lint.in); Dependabot
+      # moves both files.
+      install: pip install --require-hashes -r requirements-lint.txt
+      run: prek run --all-files --show-diff-on-failure
