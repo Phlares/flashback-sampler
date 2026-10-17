@@ -6,10 +6,10 @@ on:
   pull_request: { types: [labeled] }
   # Auto fix (opt-in): uncomment.
   # workflow_run: { workflows: [test], types: [completed] }
-permissions: { contents: write, pull-requests: write, issues: write, actions: read, statuses: write, id-token: write }
+permissions: { contents: write, pull-requests: write, issues: write, actions: read, id-token: write }
 jobs:
   fix:
     if: github.event.label.name == 'claude-fix' || github.event.workflow_run.conclusion == 'failure'
-    uses: Phlares/workflows/.github/workflows/claude-fix.yml@0e79ad3cf8dd758af682f6d981a96ebfa5924e97 # v1.1.1
+    uses: Phlares/workflows/.github/workflows/claude-fix.yml@a2d4d060b6fc0b03f0d2afd101c4d445081a5c6a # v1.2.0
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
