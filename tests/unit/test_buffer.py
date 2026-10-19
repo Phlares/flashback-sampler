@@ -304,7 +304,7 @@ def test_writer_and_reader_concurrent_no_corruption(buffer_cls):
             while not stop.is_set():
                 buf.write(ramp_block(pos, 512, channels=2))
                 pos += 512
-        except BaseException as e:  # pragma: no cover
+        except BaseException as e:
             errors.append(e)
 
     t = threading.Thread(target=writer, daemon=True)

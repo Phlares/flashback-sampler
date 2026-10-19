@@ -189,7 +189,7 @@ class GlobalHotkeySource(QAbstractNativeEventFilter):
     # (dispatcher_MSG is kept too, harmlessly, for the NULL-hwnd path).
     _MSG_TYPES = (b"windows_generic_MSG", b"windows_dispatcher_MSG")
 
-    def nativeEventFilter(self, event_type, message):  # noqa: N802
+    def nativeEventFilter(self, event_type, message):
         # Runs for every native message — keep it allocation-light and early-out.
         # NOTE: do NOT guard on `not message` — PySide6 hands us a sip.voidptr
         # that is falsy even when it wraps a valid non-null pointer, so that

@@ -55,7 +55,7 @@ def test_no_sans_serif_family_names_in_app_code():
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:  # pragma: no cover
+            except OSError:
                 continue
             for lineno, line in enumerate(text.splitlines(), start=1):
                 stripped = line.strip()

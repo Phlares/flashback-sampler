@@ -87,18 +87,18 @@ class DurationPreset(QWidget):
             return idx
         return None
 
-    def mousePressEvent(self, ev) -> None:  # noqa: N802
+    def mousePressEvent(self, ev) -> None:
         idx = self._cell_at(ev.position().y())
         if idx is not None:
             self.set_active_index(idx)
 
-    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+    def mouseMoveEvent(self, ev) -> None:
         idx = self._cell_at(ev.position().y())
         if idx != self._hovered_idx:
             self._hovered_idx = idx
             self.update()
 
-    def leaveEvent(self, ev) -> None:  # noqa: N802
+    def leaveEvent(self, ev) -> None:
         self._hovered_idx = None
         self.update()
 
@@ -106,7 +106,7 @@ class DurationPreset(QWidget):
     # Paint
     # ------------------------------------------------------------------
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 

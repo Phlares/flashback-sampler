@@ -52,12 +52,12 @@ class TactileButton(QPushButton):
     def variant(self) -> str:
         return self._variant
 
-    def setVariant(self, variant: str) -> None:  # noqa: N802
+    def setVariant(self, variant: str) -> None:
         if variant != self._variant:
             self._variant = variant
             self.update()
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
