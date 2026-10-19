@@ -20,34 +20,36 @@ def _clear_action_registry():
     clear_registry()
 
 
-# Block QMenu.exec / popup process-wide for the duration of any pytest
-# session. Some widgets emit contextMenuRequested when right-clicked,
-# which production code connects to handlers that call QMenu.exec().
-# Those calls escape pytest scope (queued via QTimer / event loop) so
-# a function-scoped monkeypatch fixture is not enough — patch at import
-# time so the stub is in effect for the entire process.
-try:
+# Block every modal Qt dialog for the whole pytest session. Some widgets
+# emit contextMenuRequested when right-clicked, and production code
+# connects those to handlers that call QMenu.exec(). The calls escape a
+# test's scope (queued via QTimer / event loop), so a function-scoped
+# patch is not enough: the stubs live as long as the session.
+@pytest.fixture(scope="session", autouse=True)
+def _no_modal_dialogs():
     from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox
 
-    QMenu.exec = lambda self, *a, **kw: None  # type: ignore[assignment]
-    QMenu.popup = lambda self, *a, **kw: None  # type: ignore[assignment]
-
-    # QMessageBox.warning/critical/information/question/about are static
-    # helpers that internally call exec() on a modal dialog. On a CI
-    # runner with no audio device, production paths (e.g. start-capture
-    # failure) fire these and hang the test thread forever.
-    QMessageBox.warning = staticmethod(lambda *a, **kw: QMessageBox.Ok)  # type: ignore[assignment]
-    QMessageBox.critical = staticmethod(lambda *a, **kw: QMessageBox.Ok)  # type: ignore[assignment]
-    QMessageBox.information = staticmethod(lambda *a, **kw: QMessageBox.Ok)  # type: ignore[assignment]
-    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.Yes)  # type: ignore[assignment]
-    QMessageBox.about = staticmethod(lambda *a, **kw: None)  # type: ignore[assignment]
-    QMessageBox.exec = lambda self, *a, **kw: QMessageBox.Ok  # type: ignore[assignment]
-    QMessageBox.exec_ = lambda self, *a, **kw: QMessageBox.Ok  # type: ignore[assignment]
-
-    # Save-file and directory pickers — return empty so callers treat
-    # them as user-cancelled rather than hanging.
-    QFileDialog.getSaveFileName = staticmethod(lambda *a, **kw: ("", ""))  # type: ignore[assignment]
-    QFileDialog.getOpenFileName = staticmethod(lambda *a, **kw: ("", ""))  # type: ignore[assignment]
-    QFileDialog.getExistingDirectory = staticmethod(lambda *a, **kw: "")  # type: ignore[assignment]
-except ImportError:
-    pass
+    ok, yes = QMessageBox.StandardButton.Ok, QMessageBox.StandardButton.Yes
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(QMenu, "exec", lambda self, *a, **kw: None)
+        mp.setattr(QMenu, "popup", lambda self, *a, **kw: None)
+        # The static QMessageBox helpers call exec() on a modal dialog. On
+        # a CI runner with no audio device, production paths (e.g. a
+        # start-capture failure) fire them and hang the test thread.
+        mp.setattr(QMessageBox, "warning", staticmethod(lambda *a, **kw: ok))
+        mp.setattr(QMessageBox, "critical", staticmethod(lambda *a, **kw: ok))
+        mp.setattr(QMessageBox, "information", staticmethod(lambda *a, **kw: ok))
+        mp.setattr(QMessageBox, "question", staticmethod(lambda *a, **kw: yes))
+        mp.setattr(QMessageBox, "about", staticmethod(lambda *a, **kw: None))
+        mp.setattr(QMessageBox, "exec", lambda self, *a, **kw: ok)
+        # Pickers return empty, which callers treat as a cancel.
+        mp.setattr(
+            QFileDialog, "getSaveFileName", staticmethod(lambda *a, **kw: ("", ""))
+        )
+        mp.setattr(
+            QFileDialog, "getOpenFileName", staticmethod(lambda *a, **kw: ("", ""))
+        )
+        mp.setattr(
+            QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **kw: "")
+        )
+        yield
