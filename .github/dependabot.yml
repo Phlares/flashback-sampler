@@ -9,6 +9,12 @@ updates:
       actions:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      actions-major:
+        patterns: ["*"]
+        update-types: ["major"]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
   # requirements*.in compile to hash-locked requirements*.txt (uv pip
   # compile). lockfile-only: Dependabot moves the locks, not the .in files
   # or pyproject.toml.
@@ -22,6 +28,12 @@ updates:
       python:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      python-major:
+        patterns: ["*"]
+        update-types: ["major"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: pre-commit
     directory: /
     target-branch: dev
