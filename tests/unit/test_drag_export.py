@@ -21,9 +21,9 @@ from flashback_sampler.core.drag_export import (
     sanitize_source_name,
 )
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
+from tests.fixtures.alc import clip_value, read_clip
 from tests.fixtures.sine_source import ramp_block
 from tests.fixtures.wavread import read_wav
-from tests.unit.test_alc import _value
 
 WHEN = datetime(2026, 7, 15, 13, 5, 9)
 
@@ -224,14 +224,6 @@ def test_render_creates_pool_dir(scratch, tmp_path):
     assert r.path.parent == pool and r.path.exists()
 
 
-def _alc_clip(path):
-    import gzip
-    import xml.etree.ElementTree as ET
-
-    with gzip.open(path, "rb") as fh:
-        return next(ET.fromstring(fh.read()).iter("AudioClip"))
-
-
 def test_render_slice_drag_writes_an_alc_sidecar_at_the_slice(scratch, tmp_path):
     """The WAV carries slice + handles; the sidecar says which seconds of
     it are the slice, so Live opens there with the handles recoverable."""
@@ -243,13 +235,13 @@ def test_render_slice_drag_writes_an_alc_sidecar_at_the_slice(scratch, tmp_path)
     )
     assert r.sidecar is not None and r.sidecar == r.path.with_suffix(".alc")
     assert r.sidecar.exists()
-    clip = _alc_clip(r.sidecar)
+    clip = read_clip(r.sidecar)
     # span 150..350, slice 200..300 -> 0.05 s .. 0.15 s into the export
-    assert _value(clip, "Loop/LoopStart") == "0.05"
-    assert _value(clip, "Loop/LoopEnd") == "0.15"
-    assert _value(clip, "Loop/HiddenLoopEnd") == "0.2"  # 200 exported frames
-    assert _value(clip, "SampleRef/FileRef/Path") == r.path.resolve().as_posix()
-    assert _value(clip, "SampleRef/DefaultDuration") == "200"
+    assert clip_value(clip, "Loop/LoopStart") == "0.05"
+    assert clip_value(clip, "Loop/LoopEnd") == "0.15"
+    assert clip_value(clip, "Loop/HiddenLoopEnd") == "0.2"  # 200 exported frames
+    assert clip_value(clip, "SampleRef/FileRef/Path") == r.path.resolve().as_posix()
+    assert clip_value(clip, "SampleRef/DefaultDuration") == "200"
 
 
 def test_render_slice_drag_writes_no_sidecar_unless_asked(scratch, tmp_path):
@@ -270,10 +262,11 @@ def test_render_root_drag_writes_a_sidecar_only_when_it_has_markers(scratch, tmp
     marked = render_root_drag(
         mgr, co.id, tmp_path / "marked", "x", markers_at_trim=True, alc=True, now=WHEN
     )
+    assert marked.sidecar is not None
     assert marked.sidecar == marked.path.with_suffix(".alc")
-    clip = _alc_clip(marked.sidecar)
-    assert _value(clip, "Loop/LoopStart") == "0.1"
-    assert _value(clip, "Loop/LoopEnd") == "0.3"
+    clip = read_clip(marked.sidecar)
+    assert clip_value(clip, "Loop/LoopStart") == "0.1"
+    assert clip_value(clip, "Loop/LoopEnd") == "0.3"
 
 
 def test_render_slice_drag_cleans_up_the_wav_and_the_slice_when_the_sidecar_fails(
