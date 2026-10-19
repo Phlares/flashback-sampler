@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -41,15 +40,17 @@ class Manifest:
     abs_start: int
     abs_end: int
     created_at: float
-    parent: Optional[str]
-    file: str  # id of the checkout whose `<id>.wav` holds the audio; a root names itself
+    parent: str | None
+    file: (
+        str  # id of the checkout whose `<id>.wav` holds the audio; a root names itself
+    )
     start_frame: int
     n_frames: int
     trim_in: int
     trim_out: int
     state: str
     partial: bool
-    bins: Optional[dict]  # {"540": [floats], "360": [floats]} or None
+    bins: dict | None  # {"540": [floats], "360": [floats]} or None
 
 
 _FIELDS = {f.name for f in fields(Manifest)}
@@ -90,7 +91,7 @@ def write_manifest(scratch_dir: Path | str, m: Manifest) -> Path:
     return p
 
 
-def read_manifest(path: Path | str) -> Optional[Manifest]:
+def read_manifest(path: Path | str) -> Manifest | None:
     """None for anything that is not a complete manifest — adoption
     skips it and leaves the file in place."""
     try:
@@ -123,7 +124,7 @@ def scan(scratch_dir: Path | str) -> list[Manifest]:
     return found
 
 
-def resolve_audio(scratch_dir: Path | str, m: Manifest) -> Optional[tuple[Path, bool]]:
+def resolve_audio(scratch_dir: Path | str, m: Manifest) -> tuple[Path, bool] | None:
     """(path, partial) for the audio `m` lives in: `<file>.wav`, its own
     for a root, the root's for a slice. The `.wav` wins; a lone
     `<file>.wav.part` (crash mid-write) is renamed into place and flagged
@@ -140,10 +141,12 @@ def resolve_audio(scratch_dir: Path | str, m: Manifest) -> Optional[tuple[Path, 
 
 
 def bins_to_json(bins: dict[str, np.ndarray]) -> dict:
-    return {k: np.asarray(v, dtype=np.float32).ravel().tolist() for k, v in bins.items()}
+    return {
+        k: np.asarray(v, dtype=np.float32).ravel().tolist() for k, v in bins.items()
+    }
 
 
-def bins_from_json(d: Optional[dict], channels: int) -> dict[str, np.ndarray]:
+def bins_from_json(d: object, channels: int) -> dict[str, np.ndarray]:
     """Same skip-don't-crash contract as `read_manifest`: a corrupt key
     (not an int string), a non-dict `bins`, or non-numeric contents are
     dropped rather than raised — adoption drops one bin size, not the

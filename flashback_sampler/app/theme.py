@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 # ─────────────────────────────────────────────────────────────────────────
 # Fonts — Monaspace family (Krypton / Neon / Argon), SIL OFL 1.1
 # ─────────────────────────────────────────────────────────────────────────
@@ -25,17 +24,17 @@ FONTS_DIR = Path(__file__).resolve().parent / "fonts"
 
 # Family names we WANT (as they appear after QFontDatabase loads them)
 MONASPACE_DISPLAY = "Monaspace Krypton"  # hub readouts, big numbers
-MONASPACE_LABEL = "Monaspace Neon"       # UPPER labels, captions
-MONASPACE_BODY = "Monaspace Argon"        # comfortable prose
+MONASPACE_LABEL = "Monaspace Neon"  # UPPER labels, captions
+MONASPACE_BODY = "Monaspace Argon"  # comfortable prose
 
 # Fallback stack — matches the spirit (mono, neutral) on each platform
 MONO_FALLBACK = '"Consolas", "SF Mono", "DejaVu Sans Mono", "Courier New", monospace'
 
 # Resolved at runtime in load_fonts(); initially the fallbacks so
 # base_stylesheet() works even before load_fonts() is called.
-_resolved_display: str = f'{MONO_FALLBACK}'
-_resolved_label: str = f'{MONO_FALLBACK}'
-_resolved_body: str = f'{MONO_FALLBACK}'
+_resolved_display: str = f"{MONO_FALLBACK}"
+_resolved_label: str = f"{MONO_FALLBACK}"
+_resolved_body: str = f"{MONO_FALLBACK}"
 
 
 def load_fonts(app=None) -> dict[str, str]:
@@ -50,14 +49,7 @@ def load_fonts(app=None) -> dict[str, str]:
     """
     global _resolved_display, _resolved_label, _resolved_body
 
-    try:
-        from PySide6.QtGui import QFontDatabase
-    except ImportError:  # pragma: no cover
-        return {
-            "display": _resolved_display,
-            "label": _resolved_label,
-            "body": _resolved_body,
-        }
+    from PySide6.QtGui import QFontDatabase
 
     loaded_families: set[str] = set()
     if FONTS_DIR.is_dir():
@@ -98,39 +90,34 @@ def font_family(role: str) -> str:
 
 EREBUS: dict[str, str] = {
     # Surfaces — 3 tiers of elevation + 1 void
-    "void":            "#08070a",
-    "chassis":         "#0e0d10",
-    "plate":           "#161418",
-    "ridge":           "#1e1b20",
-
+    "void": "#08070a",
+    "chassis": "#0e0d10",
+    "plate": "#161418",
+    "ridge": "#1e1b20",
     # Text — warm cream hierarchy
-    "cream":           "#f2eddf",
-    "bone":            "#a8a398",
-    "ash":             "#5a5652",
-
+    "cream": "#f2eddf",
+    "bone": "#a8a398",
+    "ash": "#5a5652",
     # Structural hairlines (rendered via rgba — Qt supports it in QSS)
-    "hairline_faint":  "rgba(242, 237, 223, 0.06)",
-    "hairline":        "rgba(242, 237, 223, 0.12)",
+    "hairline_faint": "rgba(242, 237, 223, 0.06)",
+    "hairline": "rgba(242, 237, 223, 0.12)",
     "hairline_strong": "rgba(242, 237, 223, 0.22)",
-
     # The accent — ONE color, used sparingly
-    "ember":           "#ff5a1f",
-    "ember_hot":       "#ff8a3d",
-    "ember_deep":      "#c73a0d",
-    "rec":             "#ff2a1c",
-
+    "ember": "#ff5a1f",
+    "ember_hot": "#ff8a3d",
+    "ember_deep": "#c73a0d",
+    "rec": "#ff2a1c",
     # Waveform ink — monochrome, never orange
-    "signal":          "#e8e0d2",
-    "signal_dim":      "#8a857a",
-    "signal_rms":      "#b0aa9a",
-
+    "signal": "#e8e0d2",
+    "signal_dim": "#8a857a",
+    "signal_rms": "#b0aa9a",
     # VU meter thermal (the one place thermal lives)
-    "meter_floor":     "#241510",
-    "meter_low":       "#5f2812",
-    "meter_mid":       "#c04614",
-    "meter_hot":       "#ff7a1e",
-    "meter_peak":      "#ffc400",
-    "meter_clip":      "#ff2a1c",
+    "meter_floor": "#241510",
+    "meter_low": "#5f2812",
+    "meter_mid": "#c04614",
+    "meter_hot": "#ff7a1e",
+    "meter_peak": "#ffc400",
+    "meter_clip": "#ff2a1c",
 }
 
 
@@ -152,73 +139,73 @@ def base_stylesheet() -> str:
     display = _resolved_display
     return f"""
     QWidget {{
-        background-color: {t['chassis']};
-        color: {t['cream']};
+        background-color: {t["chassis"]};
+        color: {t["cream"]};
         font-family: {body};
         font-size: 10pt;
     }}
     QMainWindow {{
-        background-color: {t['chassis']};
+        background-color: {t["chassis"]};
     }}
     QMenuBar {{
-        background-color: {t['chassis']};
-        color: {t['cream']};
+        background-color: {t["chassis"]};
+        color: {t["cream"]};
         font-family: {label};
         font-size: 9pt;
         padding: 2px 6px;
-        border-bottom: 1px solid {t['hairline_faint']};
+        border-bottom: 1px solid {t["hairline_faint"]};
     }}
     QMenuBar::item {{
         background: transparent;
         padding: 4px 10px;
     }}
     QMenuBar::item:selected {{
-        background-color: {t['plate']};
-        color: {t['ember']};
+        background-color: {t["plate"]};
+        color: {t["ember"]};
     }}
     QMenu {{
-        background-color: {t['plate']};
-        color: {t['cream']};
+        background-color: {t["plate"]};
+        color: {t["cream"]};
         font-family: {label};
         font-size: 9pt;
-        border: 1px solid {t['hairline']};
+        border: 1px solid {t["hairline"]};
         padding: 4px 0;
     }}
     QMenu::item {{
         padding: 6px 20px 6px 28px;
     }}
     QMenu::item:selected {{
-        background-color: {t['ridge']};
-        color: {t['ember']};
+        background-color: {t["ridge"]};
+        color: {t["ember"]};
     }}
     QMenu::separator {{
         height: 1px;
-        background: {t['hairline_faint']};
+        background: {t["hairline_faint"]};
         margin: 4px 10px;
     }}
     QLabel {{
         background-color: transparent;
-        color: {t['cream']};
+        color: {t["cream"]};
         font-family: {body};
     }}
     QLabel[role="label"] {{
-        color: {t['bone']};
+        color: {t["bone"]};
         font-family: {label};
         letter-spacing: 2px;
         text-transform: uppercase;
         font-size: 8pt;
     }}
     QLabel[role="readout"] {{
-        color: {t['cream']};
+        color: {t["cream"]};
         font-family: {display};
         font-size: 22pt;
         font-weight: 700;
         letter-spacing: -1px;
     }}
     QPushButton {{
-        background-color: {t['plate']};
-        color: {t['cream']};
-        border: 1px solid {t['hairline']};
+        background-color: {t["plate"]};
+        color: {t["cream"]};
+        border: 1px solid {t["hairline"]};
         border-radius: 6px;
         padding: 10px 18px;
         min-height: 32px;
@@ -226,20 +213,20 @@ def base_stylesheet() -> str:
         font-size: 9pt;
     }}
     QPushButton:hover {{
-        background-color: {t['ridge']};
+        background-color: {t["ridge"]};
     }}
     QPushButton:pressed {{
-        background-color: {t['void']};
+        background-color: {t["void"]};
     }}
     QPushButton:disabled {{
-        color: {t['ash']};
-        background-color: {t['plate']};
+        color: {t["ash"]};
+        background-color: {t["plate"]};
     }}
     QListWidget {{
-        background-color: {t['plate']};
-        border: 1px solid {t['hairline']};
+        background-color: {t["plate"]};
+        border: 1px solid {t["hairline"]};
         border-radius: 8px;
-        color: {t['cream']};
+        color: {t["cream"]};
         font-family: {body};
         outline: none;
     }}
@@ -248,13 +235,13 @@ def base_stylesheet() -> str:
         border: none;
     }}
     QListWidget::item:selected {{
-        background-color: {t['ridge']};
-        color: {t['ember']};
+        background-color: {t["ridge"]};
+        color: {t["ember"]};
     }}
     QStatusBar {{
-        background-color: {t['chassis']};
-        color: {t['bone']};
-        border-top: 1px solid {t['hairline_faint']};
+        background-color: {t["chassis"]};
+        color: {t["bone"]};
+        border-top: 1px solid {t["hairline_faint"]};
         font-family: {label};
         font-size: 8pt;
     }}

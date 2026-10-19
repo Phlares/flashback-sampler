@@ -1,0 +1,4 @@
+# Mechanical lint commits. Use: git config blame.ignoreRevsFile .git-blame-ignore-revs
+1202ee0c43bfcc446fc1a6de52b96a2b801d03cf # style: ruff format
+e9109268edc7bf248e8fdb731c7e0e7d5d71be39 # style: lint autofixes (ruff --fix)
+4b2ec4bbfb83628f6359c5ea2c8c917ae64fdd8f # style: PySide6 enum long forms

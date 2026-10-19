@@ -10,15 +10,17 @@ checkout state) lives in the window controller.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Callable, Iterable, Optional
 
-from PySide6.QtCore import QMimeData, QUrl, Qt
+from PySide6.QtCore import QMimeData, Qt, QUrl
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import QWidget
 
+FilePaths = str | os.PathLike[str] | Iterable[str | os.PathLike[str]]
 
-def _as_paths(file_path: Path | str | Iterable[Path | str]) -> list[Path]:
+
+def _as_paths(file_path: FilePaths) -> list[Path]:
     """One path or several. A drag can carry more than one file (a WAV
     plus its Ableton sidecar) and every call site that offers one should
     not have to wrap it. `os.PathLike` covers Path and any other
@@ -30,7 +32,7 @@ def _as_paths(file_path: Path | str | Iterable[Path | str]) -> list[Path]:
     return [Path(p) for p in file_path]
 
 
-def build_file_drag_mime(file_path: Path | str | Iterable[Path | str]) -> QMimeData:
+def build_file_drag_mime(file_path: FilePaths) -> QMimeData:
     mime = QMimeData()
     mime.setUrls([QUrl.fromLocalFile(str(p.resolve())) for p in _as_paths(file_path)])
     return mime
@@ -38,8 +40,8 @@ def build_file_drag_mime(file_path: Path | str | Iterable[Path | str]) -> QMimeD
 
 def perform_file_drag(
     source_widget: QWidget,
-    file_path: Path | str | Iterable[Path | str],
-    exec_fn: Optional[Callable[[QDrag], Qt.DropAction]] = None,
+    file_path: FilePaths,
+    exec_fn: Callable[[QDrag], Qt.DropAction] | None = None,
 ) -> bool:
     """
     Run a blocking OS drag offering `file_path` (one path, or several).
@@ -49,5 +51,5 @@ def perform_file_drag(
     """
     drag = QDrag(source_widget)
     drag.setMimeData(build_file_drag_mime(file_path))
-    action = drag.exec(Qt.CopyAction) if exec_fn is None else exec_fn(drag)
-    return action != Qt.IgnoreAction
+    action = drag.exec(Qt.DropAction.CopyAction) if exec_fn is None else exec_fn(drag)
+    return action != Qt.DropAction.IgnoreAction

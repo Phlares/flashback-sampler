@@ -22,11 +22,11 @@ in-window buttons drive exactly the same actions.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QSystemTrayIcon, QMenu
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from flashback_sampler.core.quality_presets import MB
 from flashback_sampler.core.source_status import SEVERITY_RING_COLOR, Severity
@@ -65,22 +65,24 @@ def _disc_icon(recording: bool, severity: Severity = Severity.OK) -> QIcon:
     px = QPixmap(32, 32)
     px.fill(QColor(0, 0, 0, 0))
     p = QPainter(px)
-    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     # Disc fill + status ring, run right up to the edge.
     p.setBrush(QColor("#15151a"))
-    pen = QPen(QColor(SEVERITY_RING_COLOR.get(severity, SEVERITY_RING_COLOR[Severity.OK])))
+    pen = QPen(
+        QColor(SEVERITY_RING_COLOR.get(severity, SEVERITY_RING_COLOR[Severity.OK]))
+    )
     pen.setWidthF(2.7)
     p.setPen(pen)
-    p.drawEllipse(2.0, 2.0, 28.0, 28.0)
+    p.drawEllipse(2, 2, 28, 28)
     # Centre: red dot while recording, pause bars when idle.
     p.setPen(QColor(0, 0, 0, 0))
     if recording:
         p.setBrush(QColor("#ff3b30"))
-        p.drawEllipse(11.0, 11.0, 10.0, 10.0)
+        p.drawEllipse(11, 11, 10, 10)
     else:
         p.setBrush(QColor("#cfc9ba"))
-        p.drawRoundedRect(11.4, 9.5, 3.4, 13.0, 1.3, 1.3)
-        p.drawRoundedRect(17.2, 9.5, 3.4, 13.0, 1.3, 1.3)
+        p.drawRoundedRect(11, 9, 3, 13, 1.3, 1.3)
+        p.drawRoundedRect(17, 9, 3, 13, 1.3, 1.3)
     p.end()
     return QIcon(px)
 
@@ -174,9 +176,10 @@ class SystemTray(QObject):
 
         self._menu.addSeparator()
 
-        if self._on_settings is not None:
+        on_settings = self._on_settings
+        if on_settings is not None:
             act_settings = QAction("Settings…", self)
-            act_settings.triggered.connect(lambda: self._on_settings())
+            act_settings.triggered.connect(lambda: on_settings())
             self._menu.addAction(act_settings)
 
         act_quit = QAction("Quit flashback-sampler", self)
@@ -186,7 +189,9 @@ class SystemTray(QObject):
     # -- state sync -------------------------------------------------------
 
     def _severity(self) -> Severity:
-        return self._worst_severity() if self._worst_severity is not None else Severity.OK
+        return (
+            self._worst_severity() if self._worst_severity is not None else Severity.OK
+        )
 
     def refresh(self) -> None:
         """Re-read state and update the record label, icon, and tooltip.
@@ -229,10 +234,14 @@ class SystemTray(QObject):
 
     def _toggle_record(self) -> None:
         was_recording = self._is_recording()
-        invoke("transport.stop_recording" if was_recording else "transport.start_recording")
+        invoke(
+            "transport.stop_recording" if was_recording else "transport.start_recording"
+        )
         self.refresh()
         if not was_recording and self._is_recording():
-            self.notify("Recording started", "Capturing all sources into the ring buffer.")
+            self.notify(
+                "Recording started", "Capturing all sources into the ring buffer."
+            )
         elif was_recording and not self._is_recording():
             self.notify("Recording stopped", "Ring buffer paused. Checkouts are kept.")
 

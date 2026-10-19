@@ -17,8 +17,15 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 __all__ = [
-    "Severity", "SourceSnapshot", "SourceStatus", "evaluate", "worst",
-    "SILENCE_DBFS", "SEVERITY_RING_COLOR", "SEVERITY_GLYPH", "dbfs",
+    "Severity",
+    "SourceSnapshot",
+    "SourceStatus",
+    "evaluate",
+    "worst",
+    "SILENCE_DBFS",
+    "SEVERITY_RING_COLOR",
+    "SEVERITY_GLYPH",
+    "dbfs",
 ]
 
 
@@ -30,21 +37,21 @@ class Severity(IntEnum):
 
 
 # Detection thresholds (see PLATFORM/notification design notes).
-SILENCE_DBFS = -60.0       # peak below this counts as "no signal"
-LOW_DBFS = -40.0           # peak below this (but audible) is "low level"
-CLIP_PEAK = 0.99           # sample magnitude at/above this is clipping
-SILENCE_GRACE_S = 5.0      # must stay silent this long before warning
-BUFFER_FULL_FRAC = 0.98    # ring buffer this full is "almost full"
-XRUN_RATE_WARN = 1.0       # sustained xruns/sec worth surfacing
+SILENCE_DBFS = -60.0  # peak below this counts as "no signal"
+LOW_DBFS = -40.0  # peak below this (but audible) is "low level"
+CLIP_PEAK = 0.99  # sample magnitude at/above this is clipping
+SILENCE_GRACE_S = 5.0  # must stay silent this long before warning
+BUFFER_FULL_FRAC = 0.98  # ring buffer this full is "almost full"
+XRUN_RATE_WARN = 1.0  # sustained xruns/sec worth surfacing
 
 
 # Presentation per severity — single source of truth so the tray ring and the
 # in-app chip badge can't drift. Plain data (no Qt), so it lives next to the
 # enum it describes rather than in the Qt theme.
 SEVERITY_RING_COLOR = {
-    Severity.OK: "#9aa886",     # calm sage — "good", not alarmist
+    Severity.OK: "#9aa886",  # calm sage — "good", not alarmist
     Severity.INFO: "#9aa886",
-    Severity.WARN: "#d29922",   # amber — no signal / clipping / buffer near cap
+    Severity.WARN: "#d29922",  # amber — no signal / clipping / buffer near cap
     Severity.ERROR: "#f85149",  # red — disconnected / permission / failure
 }
 SEVERITY_GLYPH = {
@@ -56,18 +63,19 @@ SEVERITY_GLYPH = {
 @dataclass(frozen=True)
 class SourceSnapshot:
     """A point-in-time view of one capture source's runtime state."""
+
     capturing: bool
-    peak: float = 0.0            # recent peak sample magnitude, 0..~1+
+    peak: float = 0.0  # recent peak sample magnitude, 0..~1+
     silent_seconds: float = 0.0  # how long peak has been below the floor
-    buffer_fill: float = 0.0     # ring-buffer fill fraction, 0..1
-    xrun_rate: float = 0.0       # recent xruns per second
-    error: str | None = None     # backend's last error (disconnect etc.), if any
+    buffer_fill: float = 0.0  # ring-buffer fill fraction, 0..1
+    xrun_rate: float = 0.0  # recent xruns per second
+    error: str | None = None  # backend's last error (disconnect etc.), if any
 
 
 @dataclass(frozen=True)
 class SourceStatus:
     severity: Severity
-    code: str       # ok | idle | silent | low | clip | buffer_high | dropouts | error
+    code: str  # ok | idle | silent | low | clip | buffer_high | dropouts | error
     message: str
 
 

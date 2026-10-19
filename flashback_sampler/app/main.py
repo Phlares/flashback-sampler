@@ -15,8 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from flashback_sampler.app.state import DEFAULT_BUFFER_SECONDS, AppState
@@ -70,6 +69,7 @@ def _run(app: QApplication, args: argparse.Namespace) -> int:
     if state is None:
         return 1
     from flashback_sampler.app.turntable_window import TurntableWindow
+
     window = TurntableWindow(state)
     window.show()
 
@@ -89,16 +89,16 @@ def main() -> int:
     cream = QColor(EREBUS["cream"])
     bone = QColor(EREBUS["bone"])
     ember = QColor(EREBUS["ember"])
-    pal.setColor(QPalette.Window, chassis)
-    pal.setColor(QPalette.WindowText, cream)
-    pal.setColor(QPalette.Base, plate)
-    pal.setColor(QPalette.AlternateBase, chassis)
-    pal.setColor(QPalette.Text, cream)
-    pal.setColor(QPalette.Button, plate)
-    pal.setColor(QPalette.ButtonText, cream)
-    pal.setColor(QPalette.Highlight, ember)
-    pal.setColor(QPalette.HighlightedText, QColor(EREBUS["void"]))
-    pal.setColor(QPalette.PlaceholderText, bone)
+    pal.setColor(QPalette.ColorRole.Window, chassis)
+    pal.setColor(QPalette.ColorRole.WindowText, cream)
+    pal.setColor(QPalette.ColorRole.Base, plate)
+    pal.setColor(QPalette.ColorRole.AlternateBase, chassis)
+    pal.setColor(QPalette.ColorRole.Text, cream)
+    pal.setColor(QPalette.ColorRole.Button, plate)
+    pal.setColor(QPalette.ColorRole.ButtonText, cream)
+    pal.setColor(QPalette.ColorRole.Highlight, ember)
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(EREBUS["void"]))
+    pal.setColor(QPalette.ColorRole.PlaceholderText, bone)
     app.setPalette(pal)
 
     # Load bundled Monaspace fonts BEFORE building the stylesheet so

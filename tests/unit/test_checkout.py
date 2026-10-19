@@ -2,18 +2,19 @@
 the ring into Zig + queue the scratch write; Python holds ids, states,
 trims, manifests and per-file refcounts. Audio is asserted by reading
 the scratch file back through the Zig reader."""
+
 from __future__ import annotations
 
+import inspect
 import threading
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from flashback_sampler.core import native
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
-from flashback_sampler.core.manifest import manifest_path, read_manifest
+from flashback_sampler.core.manifest import Manifest, manifest_path, read_manifest
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from tests.fixtures.sine_source import ramp_block
 from tests.fixtures.wavread import read_wav
@@ -27,11 +28,28 @@ def scratch():
     s.close()
 
 
-def _mgr(scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, **kw):
-    buf = NativeAudioCircularBuffer(duration_seconds=seconds, sample_rate=rate, channels=channels)
+def _manifest(scratch_dir, checkout_id) -> Manifest:
+    m = read_manifest(manifest_path(scratch_dir, checkout_id))
+    assert m is not None
+    return m
+
+
+def _ring(seconds=2.0, rate=1000, channels=1, frames=1500, start=0):
+    buf = NativeAudioCircularBuffer(
+        duration_seconds=seconds, sample_rate=rate, channels=channels
+    )
     if frames:
-        buf.write(ramp_block(0, frames, channels=channels))
-    return CheckoutManager(buffer=buf, scratch=scratch, scratch_dir=tmp_path, slot_name="Main", **kw)
+        buf.write(ramp_block(start, frames, channels=channels))
+    return buf
+
+
+def _mgr(
+    scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, buf=None, **kw
+):
+    buf = buf or _ring(seconds, rate, channels, frames)
+    return CheckoutManager(
+        buffer=buf, scratch=scratch, scratch_dir=tmp_path, slot_name="Main", **kw
+    )
 
 
 def _wait_written(mgr, co, timeout=5.0):
@@ -52,25 +70,34 @@ def test_create_checkout_snapshots_latest_n_seconds(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)  # last 500 samples
     assert isinstance(co, Checkout)
-    assert (co.n_frames, co.start_frame, co.channels, co.sample_rate) == (500, 0, 1, 1000)
+    assert (co.n_frames, co.start_frame, co.channels, co.sample_rate) == (
+        500,
+        0,
+        1,
+        1000,
+    )
     assert co.state == "pending"
     assert (co.abs_sample_start, co.abs_sample_end) == (1000, 1500)
     audio = _audio(mgr, co)
     assert audio.shape == (500, 1)
-    assert audio[0, 0] == pytest.approx(1000.0) and audio[-1, 0] == pytest.approx(1499.0)
+    assert audio[0, 0] == pytest.approx(1000.0) and audio[-1, 0] == pytest.approx(
+        1499.0
+    )
     assert co.path == tmp_path / f"{co.id}.wav"
 
 
 def test_create_writes_a_manifest_with_bins(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)
-    m = read_manifest(manifest_path(tmp_path, co.id))
-    assert m is not None and m.slot == "Main" and m.n_frames == 500 and m.parent is None
-    assert set(m.bins) == {"540", "360"}
+    m = _manifest(tmp_path, co.id)
+    assert m.slot == "Main" and m.n_frames == 500 and m.parent is None
+    assert m.bins is not None and set(m.bins) == {"540", "360"}
     assert co.bins["540"].shape == (540, 2, 1) and co.bins["360"].shape == (360, 2, 1)
     # 360 bins over 500 frames: binEdge truncation gives bin 0 exactly
     # one frame (frame 0 only, abs sample 1000) -- not two.
-    assert co.bins["360"][0, 1, 0] == pytest.approx(1000.0)  # max of the first bin (frame 1000 only)
+    assert co.bins["360"][0, 1, 0] == pytest.approx(
+        1000.0
+    )  # max of the first bin (frame 1000 only)
 
 
 def test_checkout_id_is_unique(scratch, tmp_path):
@@ -87,7 +114,9 @@ def test_list_returns_all_active_checkouts(scratch, tmp_path):
 
 def test_checkout_anchor_offset_pulls_earlier_range(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
-    co = mgr.create(duration_s=0.5, anchor_offset_s=0.5)  # ends 500 samples ago: 500..999
+    co = mgr.create(
+        duration_s=0.5, anchor_offset_s=0.5
+    )  # ends 500 samples ago: 500..999
     assert (co.abs_sample_start, co.abs_sample_end) == (500, 1000)
     audio = _audio(mgr, co)
     assert audio[0, 0] == pytest.approx(500.0) and audio[-1, 0] == pytest.approx(999.0)
@@ -118,7 +147,9 @@ def test_checkout_duration_clamps_to_oldest_on_a_lapped_ring(scratch, tmp_path):
     # the h8 rewrite lost that pin; this restores it).
     mgr = _mgr(scratch, tmp_path, seconds=1.0, frames=1500)
     co = mgr.create(duration_s=5.0)
-    assert co.n_frames == 1000 and co.abs_sample_start == 500 and co.abs_sample_end == 1500
+    assert (
+        co.n_frames == 1000 and co.abs_sample_start == 500 and co.abs_sample_end == 1500
+    )
     audio = _audio(mgr, co)
     assert audio[0, 0] == pytest.approx(500.0) and audio[-1, 0] == pytest.approx(1499.0)
 
@@ -128,6 +159,7 @@ def test_create_has_no_anchor_parameter():
     "latest" and no caller passed anything else. A second anchor comes
     back with its implementation, not as a parameter that refuses."""
     import inspect
+
     assert "anchor" not in inspect.signature(CheckoutManager.create).parameters
 
 
@@ -146,8 +178,12 @@ def test_create_from_abs_range_pulls_exact_samples(scratch, tmp_path):
     assert audio.shape == (60, 1) and audio[0, 0] == pytest.approx(200.0)
 
 
-def test_create_from_abs_range_rejects_inverted_past_head_and_overwritten(scratch, tmp_path):
-    mgr = _mgr(scratch, tmp_path, seconds=1.0, frames=1500)  # capacity 1000; 500..1500 live
+def test_create_from_abs_range_rejects_inverted_past_head_and_overwritten(
+    scratch, tmp_path
+):
+    mgr = _mgr(
+        scratch, tmp_path, seconds=1.0, frames=1500
+    )  # capacity 1000; 500..1500 live
     with pytest.raises(ValueError):
         mgr.create_from_abs_range(10, 10)
     with pytest.raises(RuntimeError, match="past current head"):
@@ -173,8 +209,16 @@ def test_checkout_create_does_not_stall_writer(scratch, tmp_path):
     satisfies (~54% flaky on this box for reasons unrelated to
     checkout.py). `perf` keeps this out of the default filtered run --
     it costs ~5.5 s and asserts a real timing bound."""
-    buf = NativeAudioCircularBuffer(duration_seconds=30.0, sample_rate=48_000, channels=2)
-    mgr = CheckoutManager(buffer=buf, scratch=scratch, scratch_dir=tmp_path, slot_name="Main", max_active_checkouts=1024)
+    buf = NativeAudioCircularBuffer(
+        duration_seconds=30.0, sample_rate=48_000, channels=2
+    )
+    mgr = CheckoutManager(
+        buffer=buf,
+        scratch=scratch,
+        scratch_dir=tmp_path,
+        slot_name="Main",
+        max_active_checkouts=1024,
+    )
     stop = threading.Event()
     results = {}
 
@@ -220,8 +264,7 @@ def test_checkout_create_does_not_stall_writer(scratch, tmp_path):
     # ~5.5 s of real-time audio → at least 500 writer iterations
     assert results["count"] > 400, f"writer count too low: {results['count']}"
     assert results["max_t"] < 0.001, (
-        f"writer stalled during checkout creation: "
-        f"{results['max_t']*1000:.2f}ms"
+        f"writer stalled during checkout creation: {results['max_t'] * 1000:.2f}ms"
     )
 
 
@@ -245,7 +288,12 @@ def test_save_trimmed_mints_the_same_slice_a_drag_would(scratch, tmp_path):
     mgr.set_trim(co.id, 100, 300)
     saved = mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
     assert saved.id != co.id
-    assert (saved.parent_id, saved.start_frame, saved.n_frames, saved.state) == (co.id, 100, 200, "saved")
+    assert (saved.parent_id, saved.start_frame, saved.n_frames, saved.state) == (
+        co.id,
+        100,
+        200,
+        "saved",
+    )
     assert [c.id for c in mgr.list()] == [co.id, saved.id]
     assert mgr.get(co.id).state == "pending"
     audio, info = read_wav(tmp_path / "t.wav")
@@ -255,7 +303,9 @@ def test_save_trimmed_mints_the_same_slice_a_drag_would(scratch, tmp_path):
     assert mgr.get(co.id).state == "saved"
 
 
-def test_save_trimmed_on_a_failed_parent_exports_from_ram_without_a_slice(scratch, tmp_path, monkeypatch):
+def test_save_trimmed_on_a_failed_parent_exports_from_ram_without_a_slice(
+    scratch, tmp_path, monkeypatch
+):
     """A slice needs the parent's file. When the scratch write failed
     the RAM copy still exports, so the trim leaves as a plain file and
     the clip itself is marked saved."""
@@ -270,7 +320,9 @@ def test_save_trimmed_on_a_failed_parent_exports_from_ram_without_a_slice(scratc
     assert info.frames == 200 and audio[0, 0] == pytest.approx(1100.0)
 
 
-def test_save_trimmed_discards_the_minted_slice_when_the_export_fails(scratch, tmp_path, monkeypatch):
+def test_save_trimmed_discards_the_minted_slice_when_the_export_fails(
+    scratch, tmp_path, monkeypatch
+):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)
     mgr.set_trim(co.id, 100, 300)
@@ -285,6 +337,27 @@ def test_save_trimmed_discards_the_minted_slice_when_the_export_fails(scratch, t
     assert mgr.file_refcount(co.path) == 1
 
 
+def test_save_logs_a_failing_slice_discard_and_raises_the_export_error(
+    scratch, tmp_path, monkeypatch, caplog
+):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.5)
+    mgr.set_trim(co.id, 100, 300)
+
+    def boom(*a, **kw):
+        raise RuntimeError("the disk is full")
+
+    def discard_fails(cid):
+        raise RuntimeError("discard")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    monkeypatch.setattr(mgr, "discard", discard_fails)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
+    [record] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert record.exc_info is not None and record.exc_info[1].args == ("discard",)
+
+
 def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)
@@ -294,7 +367,7 @@ def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     mgr.save(co.id, out, trimmed=True, subtype="PCM_16")
     audio, info = read_wav(out)
     assert info.frames == 200 and info.subtype == "PCM_16"
-    m = read_manifest(manifest_path(tmp_path, co.id))
+    m = _manifest(tmp_path, co.id)
     assert (m.trim_in, m.trim_out) == (100, 300)
     full = tmp_path / "f.wav"
     mgr.save(co.id, full, trimmed=False, mark_saved=False)
@@ -306,9 +379,7 @@ def test_save_validation(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.1)
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")
-    with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")
+        mgr.export_range(co.id, tmp_path / "x.wav", 0, 10, subtype="PCM_8")
     with pytest.raises(KeyError):
         mgr.save("nope", tmp_path / "x.wav")
     with pytest.raises(KeyError):
@@ -317,12 +388,16 @@ def test_save_validation(scratch, tmp_path):
         mgr.discard("nope")
 
 
+def test_save_has_no_format_parameter():
+    assert "fmt" not in inspect.signature(CheckoutManager.save).parameters
+
+
 def test_mark_saved_sets_state(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.1)
     mgr.mark_saved(co.id)
     assert mgr.get(co.id).state == "saved"
-    m = read_manifest(manifest_path(tmp_path, co.id))
+    m = _manifest(tmp_path, co.id)
     assert m.state == "saved"
 
 
@@ -348,11 +423,38 @@ def test_discard_cleans_up_manifest_and_wav(scratch, tmp_path):
 
 
 def test_flushing_buffer_does_not_invalidate_existing_checkouts(scratch, tmp_path):
-    mgr = _mgr(scratch, tmp_path)
+    buf = _ring()
+    mgr = _mgr(scratch, tmp_path, buf=buf)
     co = mgr.create(duration_s=0.5)
-    mgr._buffer.flush()  # noqa: SLF001
+    buf.flush()
     audio = _audio(mgr, co)
     assert audio[0, 0] == pytest.approx(1000.0)
+
+
+def test_set_max_active_caps_creates(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    mgr.set_max_active(1)
+    assert mgr.max_active == 1
+    mgr.create(duration_s=0.1)
+    with pytest.raises(RuntimeError, match=r"Maximum active checkouts reached \(1\)"):
+        mgr.create(duration_s=0.1)
+
+
+def test_rebind_buffer_cuts_new_checkouts_from_the_new_ring(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    mgr.rebind_buffer(_ring(start=5000))
+    co = mgr.create(duration_s=0.5)
+    assert _audio(mgr, co)[0, 0] == pytest.approx(6000.0)
+
+
+def test_pinned_id_reports_the_pin(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.1)
+    assert mgr.pinned_id is None
+    mgr.pin(co.id)
+    assert mgr.pinned_id == co.id
+    mgr.pin(None)
+    assert mgr.pinned_id is None
 
 
 def test_pin_and_peak_bins_and_resident_bytes(scratch, tmp_path):
@@ -373,19 +475,35 @@ def test_pin_and_peak_bins_and_resident_bytes(scratch, tmp_path):
 
 
 def test_adopt_root_and_slice_share_one_file_with_a_refcount(scratch, tmp_path):
-    from flashback_sampler.core.manifest import Manifest, write_manifest
+    from flashback_sampler.core.manifest import write_manifest
+
     mgr = _mgr(scratch, tmp_path)
     root = mgr.create(duration_s=0.5)
     _wait_written(mgr, root)
-    m_root = read_manifest(manifest_path(tmp_path, root.id))
+    m_root = _manifest(tmp_path, root.id)
     mgr.close()  # handles gone, files stay
     mgr2 = _mgr(scratch, tmp_path, frames=0)
     a = mgr2.adopt_root(m_root, root.path, partial=False)
     assert a.id == root.id and a.n_frames == 500 and mgr2.write_state(a.id) == "adopted"
     assert a.bins["540"].shape == (540, 2, 1)  # from the manifest, no audio read
-    m_slice = Manifest(id="slice1", slot="Main", rate=1000, channels=1, abs_start=1100, abs_end=1200,
-                       created_at=2.0, parent=root.id, file=root.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
-                       state="saved", partial=False, bins=None)
+    m_slice = Manifest(
+        id="slice1",
+        slot="Main",
+        rate=1000,
+        channels=1,
+        abs_start=1100,
+        abs_end=1200,
+        created_at=2.0,
+        parent=root.id,
+        file=root.id,
+        start_frame=100,
+        n_frames=100,
+        trim_in=0,
+        trim_out=0,
+        state="saved",
+        partial=False,
+        bins=None,
+    )
     write_manifest(tmp_path, m_slice)
     s = mgr2.adopt_slice(m_slice, a)
     assert s.path == a.path and s.start_frame == 100 and s.parent_id == root.id
@@ -401,27 +519,29 @@ def test_adopt_root_partial_clamps_to_the_file(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     root = mgr.create(duration_s=0.5)
     _wait_written(mgr, root)
-    m = read_manifest(manifest_path(tmp_path, root.id))
+    m = _manifest(tmp_path, root.id)
     mgr.close()
     # chop the file to 200 frames
     data = root.path.read_bytes()
-    root.path.write_bytes(data[:44 + 200 * 4])
+    root.path.write_bytes(data[: 44 + 200 * 4])
     mgr2 = _mgr(scratch, tmp_path, frames=0)
     a = mgr2.adopt_root(m, root.path, partial=True)
     assert a.n_frames == 200 and a.partial is True
-    assert read_manifest(manifest_path(tmp_path, a.id)).partial is True
+    assert _manifest(tmp_path, a.id).partial is True
 
 
 def _boom(*_a, **_k):
     raise FileNotFoundError("scratch dir gone")
 
 
-def test_engine_errors_surface_as_one_runtimeerror_everywhere(scratch, tmp_path, monkeypatch):
+def test_engine_errors_surface_as_one_runtimeerror_everywhere(
+    scratch, tmp_path, monkeypatch
+):
     """R-h8k: every writer-reaching public method converts the engine's
     (RuntimeError, OSError) into a single RuntimeError, regardless of
     which underlying call fails -- create_from_abs_range, export_range
     (save's path), adopt_root, adopt_slice."""
-    from flashback_sampler.core.manifest import Manifest, write_manifest
+    from flashback_sampler.core.manifest import write_manifest
 
     mgr = _mgr(scratch, tmp_path)
     with monkeypatch.context() as m:
@@ -437,7 +557,7 @@ def test_engine_errors_surface_as_one_runtimeerror_everywhere(scratch, tmp_path,
 
     root = mgr.create(duration_s=0.5)
     _wait_written(mgr, root)
-    m_root = read_manifest(manifest_path(tmp_path, root.id))
+    m_root = _manifest(tmp_path, root.id)
     mgr.close()
     mgr2 = _mgr(scratch, tmp_path, frames=0)
     with monkeypatch.context() as m:
@@ -446,9 +566,24 @@ def test_engine_errors_surface_as_one_runtimeerror_everywhere(scratch, tmp_path,
             mgr2.adopt_root(m_root, root.path, partial=False)
 
     a = mgr2.adopt_root(m_root, root.path, partial=False)
-    m_slice = Manifest(id="slice1", slot="Main", rate=1000, channels=1, abs_start=1100, abs_end=1200,
-                       created_at=2.0, parent=a.id, file=a.id, start_frame=100, n_frames=100, trim_in=0, trim_out=0,
-                       state="saved", partial=False, bins=None)
+    m_slice = Manifest(
+        id="slice1",
+        slot="Main",
+        rate=1000,
+        channels=1,
+        abs_start=1100,
+        abs_end=1200,
+        created_at=2.0,
+        parent=a.id,
+        file=a.id,
+        start_frame=100,
+        n_frames=100,
+        trim_in=0,
+        trim_out=0,
+        state="saved",
+        partial=False,
+        bins=None,
+    )
     write_manifest(tmp_path, m_slice)
     with monkeypatch.context() as m:
         m.setattr(scratch, "checkout_slice", _boom)
@@ -456,7 +591,9 @@ def test_engine_errors_surface_as_one_runtimeerror_everywhere(scratch, tmp_path,
             mgr2.adopt_slice(m_slice, a)
 
 
-def test_create_from_abs_range_cleans_up_on_manifest_failure(scratch, tmp_path, monkeypatch):
+def test_create_from_abs_range_cleans_up_on_manifest_failure(
+    scratch, tmp_path, monkeypatch
+):
     """R-h8m: a failure AFTER checkout_create (bins or the manifest
     write) must not leak the handle or leave a manifest-less orphan
     .wav -- adoption only scans *.json, so an orphan file would never
@@ -476,10 +613,14 @@ def test_create_from_abs_range_cleans_up_on_manifest_failure(scratch, tmp_path, 
         if list(tmp_path.glob("*.wav")) or list(tmp_path.glob("*.wav.part")):
             break
         time.sleep(0.02)
-    assert list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.wav.part")) == []
+    assert (
+        list(tmp_path.glob("*.wav")) == [] and list(tmp_path.glob("*.wav.part")) == []
+    )
 
 
-def test_cleanup_after_create_failure_does_not_mask_the_original_error(scratch, tmp_path, monkeypatch):
+def test_cleanup_after_create_failure_does_not_mask_the_original_error(
+    scratch, tmp_path, monkeypatch
+):
     """h8 round 2: if checkout_destroy ITSELF raises while cleaning up
     after a create failure, that must not replace the original error --
     the caller still needs to know the manifest write (or whatever
@@ -495,16 +636,26 @@ def test_slice_references_the_parent_file_and_is_saved(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     parent = mgr.create(duration_s=0.5)
     s = mgr.slice(parent.id, 100, 200)
-    assert (s.parent_id, s.path, s.start_frame, s.n_frames, s.state) == (parent.id, parent.path, 100, 200, "saved")
+    assert (s.parent_id, s.path, s.start_frame, s.n_frames, s.state) == (
+        parent.id,
+        parent.path,
+        100,
+        200,
+        "saved",
+    )
     assert s.bins["360"].shape == (360, 2, 1)
     # Bin 0 is empty (360 bins over 200 frames) and stays zero by the
     # peaks.zig rule, so bin 1 is the first populated one. Bin 1 pins the
     # slice's OFFSET (the ramp starts at 1000, so bins over the whole
     # parent file would read ~1001 here); bin 359 pins its LENGTH.
-    assert s.bins["360"][1, 0, 0] == pytest.approx(1100.0)  # slice frame 0 = parent frame 100
-    assert s.bins["360"][359, 1, 0] == pytest.approx(1299.0)  # slice frame 199 = parent frame 299
+    assert s.bins["360"][1, 0, 0] == pytest.approx(
+        1100.0
+    )  # slice frame 0 = parent frame 100
+    assert s.bins["360"][359, 1, 0] == pytest.approx(
+        1299.0
+    )  # slice frame 199 = parent frame 299
     assert mgr.file_refcount(parent.path) == 2
-    m = read_manifest(manifest_path(tmp_path, s.id))
+    m = _manifest(tmp_path, s.id)
     assert m.parent == parent.id and m.start_frame == 100
     mgr.discard(parent.id)
     assert parent.path.exists()
@@ -521,12 +672,14 @@ def test_manifests_name_the_file_owning_checkout(scratch, tmp_path):
     root = mgr.create(duration_s=0.5)
     s1 = mgr.slice(root.id, 100, 300)
     s2 = mgr.slice(s1.id, 50, 100)
-    assert read_manifest(manifest_path(tmp_path, root.id)).file == root.id
-    assert read_manifest(manifest_path(tmp_path, s1.id)).file == root.id
-    assert read_manifest(manifest_path(tmp_path, s2.id)).file == root.id
+    assert _manifest(tmp_path, root.id).file == root.id
+    assert _manifest(tmp_path, s1.id).file == root.id
+    assert _manifest(tmp_path, s2.id).file == root.id
 
 
-def test_slice_rejects_a_span_past_the_parent_and_a_failed_parent(scratch, tmp_path, monkeypatch):
+def test_slice_rejects_a_span_past_the_parent_and_a_failed_parent(
+    scratch, tmp_path, monkeypatch
+):
     mgr = _mgr(scratch, tmp_path)
     parent = mgr.create(duration_s=0.5)
     # `match` is load-bearing: the ENGINE also rejects an out-of-range
@@ -540,7 +693,9 @@ def test_slice_rejects_a_span_past_the_parent_and_a_failed_parent(scratch, tmp_p
         mgr.slice(parent.id, 0, 10)
 
 
-def test_slice_rejects_a_parent_discarded_while_it_waited_for_the_write(scratch, tmp_path, monkeypatch):
+def test_slice_rejects_a_parent_discarded_while_it_waited_for_the_write(
+    scratch, tmp_path, monkeypatch
+):
     """R-h8l: the P13 wait holds no lock, so a concurrent discard can
     land under it. slice must re-look the parent up rather than reuse the
     handle it fetched before the wait -- that one is freed."""

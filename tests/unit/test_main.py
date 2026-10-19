@@ -1,17 +1,11 @@
 """Tests for the app entry point's missing-native-core path."""
+
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 from flashback_sampler.app import main as main_mod
 from flashback_sampler.core import native
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_run_shows_dialog_and_returns_1_when_native_core_missing(qapp, monkeypatch):

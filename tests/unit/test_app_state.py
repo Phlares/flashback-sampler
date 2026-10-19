@@ -7,17 +7,28 @@ that owns the buffer, checkout manager, and scrub player.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 
 from flashback_sampler.app.state import AppState
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.native import NativeAudioCircularBuffer
+from flashback_sampler.core.quality_presets import QualityPreset, preset_by_name
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
+from tests.fixtures.fake_capture import FakeCaptureSourceNoThread, RaisingCaptureSource
+
+
+def _preset(name: str) -> QualityPreset:
+    preset = preset_by_name(name)
+    assert preset is not None, name
+    return preset
 
 
 def test_core_package_exports_nothing_from_a_python_buffer():
     import flashback_sampler.core as core
+
     assert not hasattr(core, "AudioCircularBuffer")
 
 
@@ -73,10 +84,8 @@ def test_backward_compat_properties_delegate_to_active_slot():
 
 
 def test_add_slot_appends_and_does_not_change_active():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
-    new_slot = st.add_slot(preset_by_name("SCRATCH"), name="Discord")
+    new_slot = st.add_slot(_preset("SCRATCH"), name="Discord")
     assert len(st.slots) == 2
     assert st.slots[1] is new_slot
     assert new_slot.name == "Discord"
@@ -85,10 +94,8 @@ def test_add_slot_appends_and_does_not_change_active():
 
 
 def test_set_active_slot_index_rotates_backward_compat_properties():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
-    slot_b = st.add_slot(preset_by_name("SCRATCH"), name="Discord")
+    slot_b = st.add_slot(_preset("SCRATCH"), name="Discord")
 
     # Before switch: properties point at slot 0 (rate 16_000)
     assert st.sample_rate == 16_000
@@ -111,11 +118,9 @@ def test_set_active_slot_out_of_range_raises():
 
 
 def test_remove_slot_adjusts_active_index():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
-    st.add_slot(preset_by_name("CHAT"))
+    st.add_slot(_preset("SCRATCH"))
+    st.add_slot(_preset("CHAT"))
     assert len(st.slots) == 3
 
     st.set_active_slot_index(2)
@@ -131,11 +136,10 @@ def test_remove_last_slot_raises():
 
 
 def test_remove_slot_stops_capture():
-    from flashback_sampler.core.quality_presets import preset_by_name
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    new_slot = st.add_slot(preset_by_name("SCRATCH"))
+    new_slot = st.add_slot(_preset("SCRATCH"))
     src = FakeCaptureSourceNoThread(
         new_slot.buffer,
         sample_rate=new_slot.sample_rate,
@@ -150,9 +154,7 @@ def test_remove_slot_stops_capture():
     assert len(st.slots) == 1
 
 
-def test_remove_slot_closes_buffer():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
+def test_remove_slot_closes_buffer(monkeypatch):
     class _RecordingBuffer:
         def __init__(self):
             self.close_calls = 0
@@ -161,11 +163,11 @@ def test_remove_slot_closes_buffer():
             self.close_calls += 1
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(_preset("SCRATCH"))
     survivor_buffer = _RecordingBuffer()
     removed_buffer = _RecordingBuffer()
-    st.slots[0].buffer = survivor_buffer
-    st.slots[1].buffer = removed_buffer
+    monkeypatch.setattr(st.slots[0], "buffer", survivor_buffer)
+    monkeypatch.setattr(st.slots[1], "buffer", removed_buffer)
 
     st.remove_slot(1)
 
@@ -173,12 +175,16 @@ def test_remove_slot_closes_buffer():
     assert survivor_buffer.close_calls == 0
 
 
-def test_remove_slot_stop_precedes_close():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
+def test_remove_slot_stop_precedes_close(monkeypatch):
     call_order: list[str] = []
 
     class _RecordingSource:
+        sample_rate = 1000
+        channels = 1
+
+        def start(self) -> None:
+            pass
+
         def stop(self) -> None:
             call_order.append("stop")
 
@@ -196,9 +202,9 @@ def test_remove_slot_stop_precedes_close():
             call_order.append("close")
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    new_slot = st.add_slot(preset_by_name("SCRATCH"))
+    new_slot = st.add_slot(_preset("SCRATCH"))
     new_slot.bind_capture(_RecordingSource())
-    new_slot.buffer = _RecordingBuffer()
+    monkeypatch.setattr(new_slot, "buffer", _RecordingBuffer())
 
     st.remove_slot(1)
 
@@ -206,10 +212,8 @@ def test_remove_slot_stop_precedes_close():
 
 
 def test_rebuild_buffer_scoped_to_active_slot():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))  # slot 1
+    st.add_slot(_preset("SCRATCH"))  # slot 1
     assert len(st.slots) == 2
 
     # Active is still slot 0
@@ -221,21 +225,17 @@ def test_rebuild_buffer_scoped_to_active_slot():
 
 
 def test_apply_checkout_caps_scoped_to_active_slot():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(_preset("SCRATCH"))
 
     st.apply_checkout_caps(max_active=3)
     # Active slot (0) updated
-    assert st.slots[0].checkout_manager._max_active == 3
+    assert st.slots[0].checkout_manager.max_active == 3
     # Slot 1 left at the default 16
-    assert st.slots[1].checkout_manager._max_active == 16
+    assert st.slots[1].checkout_manager.max_active == 16
 
 
 def test_total_project_ram_bytes_counts_every_slot():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
     # Main slot ~1.92 MB (5s * 48k * 2 * 4). capacity_bytes, not
     # .buffer.nbytes -- the latter is the raw storage array, which is
@@ -244,7 +244,7 @@ def test_total_project_ram_bytes_counts_every_slot():
     main_bytes = st.slots[0].buffer.capacity_bytes
     assert main_bytes == 5 * 48_000 * 2 * 4
 
-    st.add_slot(preset_by_name("SCRATCH"))  # +~11 MB
+    st.add_slot(_preset("SCRATCH"))  # +~11 MB
     total = st.total_project_ram_bytes()
     assert total > main_bytes
     # SCRATCH = 16k mono 180s = 16000 * 180 * 4 = 11_520_000
@@ -256,45 +256,42 @@ def test_total_project_ram_includes_checkouts():
     # R-h9a: a 0 MB budget (the unit default) makes resident_bytes racy --
     # the writer can evict the instant the write lands. A budget big
     # enough to hold the whole clip makes the number deterministic.
-    st = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1, checkout_cache_mb=1.0)
+    st = AppState(
+        buffer_seconds=2.0, sample_rate=1000, channels=1, checkout_cache_mb=1.0
+    )
     buf_bytes = st.slots[0].buffer.capacity_bytes
     assert st.total_project_ram_bytes() == buf_bytes
     # Write some audio and create a checkout
     st.slots[0].buffer.write(
         np.zeros((1000, 1), dtype=np.float32)  # 1 s
     )
-    co = st.slots[0].checkout_manager.create(duration_s=0.5)
+    st.slots[0].checkout_manager.create(duration_s=0.5)
     # The checkout's RAM copy lives in the scratch cache, counted once per process.
     assert st.total_project_ram_bytes() == buf_bytes + st.scratch.resident_bytes
     assert st.scratch.resident_bytes == 500 * 4
 
 
 def test_add_slot_rejects_when_over_the_max_footprint():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
     # A footprint that only fits the initial slot
     current = st.total_project_ram_mb()
     st.set_max_footprint_mb(current + 1)  # tiny headroom
 
     with pytest.raises(RuntimeError, match="Max footprint") as info:
-        st.add_slot(preset_by_name("FULL"))
+        st.add_slot(_preset("FULL"))
     # The message carries both numbers the user needs to act.
     assert f"{current + 1:.0f} MB" in str(info.value)
 
 
 def test_add_slot_succeeds_within_the_max_footprint():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(4096.0)
-    slot = st.add_slot(preset_by_name("CHAT"))
+    slot = st.add_slot(_preset("CHAT"))
     assert slot is not None
     assert len(st.slots) == 2
 
 
 def test_max_footprint_zero_means_uncapped(monkeypatch):
-    from flashback_sampler.core.quality_presets import preset_by_name
     import flashback_sampler.app.state as state_mod
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
@@ -302,7 +299,7 @@ def test_max_footprint_zero_means_uncapped(monkeypatch):
     assert st.max_footprint_mb == 0.0
     # Plenty of free memory reported: only the cap could refuse, and there is none.
     monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1 << 40))
-    assert st.add_slot(preset_by_name("FULL")) is not None
+    assert st.add_slot(_preset("FULL")) is not None
 
 
 def test_max_footprint_negative_floors_to_uncapped():
@@ -312,34 +309,40 @@ def test_max_footprint_negative_floors_to_uncapped():
 
 
 def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
-    from flashback_sampler.core.quality_presets import preset_by_name
     import flashback_sampler.app.state as state_mod
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)  # uncapped: only the free-memory clause can refuse
-    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1024 * 1024))  # 1 MB free
+    monkeypatch.setattr(
+        state_mod.native, "mem_info", lambda: (1 << 40, 1024 * 1024)
+    )  # 1 MB free
     with pytest.raises(RuntimeError, match="free") as info:
-        st.add_slot(preset_by_name("FULL"))
+        st.add_slot(_preset("FULL"))
     assert "1 MB" in str(info.value)
 
 
 def test_free_memory_clause_is_skipped_when_the_platform_cannot_say(monkeypatch):
-    from flashback_sampler.core.quality_presets import preset_by_name
     import flashback_sampler.app.state as state_mod
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)
     monkeypatch.setattr(state_mod.native, "mem_info", lambda: (0, 0))
-    assert st.add_slot(preset_by_name("CHAT")) is not None
+    assert st.add_slot(_preset("CHAT")) is not None
 
 
 def test_default_max_footprint_is_a_quarter_of_physical_ram(monkeypatch, tmp_path):
-    import flashback_sampler.app.state as state_mod
     import flashback_sampler.app.config as cfg
+    import flashback_sampler.app.state as state_mod
 
-    monkeypatch.setattr(state_mod.native, "mem_info", lambda: (64 * 1024 ** 3, 32 * 1024 ** 3))
-    monkeypatch.setattr(cfg, "load_max_footprint_mb", lambda *a, **k: k["default"])  # unset pref
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    monkeypatch.setattr(
+        state_mod.native, "mem_info", lambda: (64 * 1024**3, 32 * 1024**3)
+    )
+    monkeypatch.setattr(
+        cfg, "load_max_footprint_mb", lambda *a, **k: k["default"]
+    )  # unset pref
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     assert st.max_footprint_mb == 16384.0
     st.shutdown()
 
@@ -349,30 +352,48 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
     spec, a slot override, or a mux list). Unarmed slots and inputs do
     not count. Warn, do not block: the caller decides what to show."""
     from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.output_spec = OutputDevice(id="{spk}", name="Speakers", max_output_channels=2, is_default=True)
-    st.capture_spec = CaptureDevice(kind="loopback", name="Default output  [loopback]", id="", follow_default=True)
+    st.output_spec = OutputDevice(
+        id="{spk}", name="Speakers", max_output_channels=2, is_default=True
+    )
+    st.capture_spec = CaptureDevice(
+        kind="loopback", name="Default output  [loopback]", id="", follow_default=True
+    )
     main = st.slots[0]
-    mic = st.add_slot(preset_by_name("SCRATCH"), name="Mic",
-                      capture_spec=CaptureDevice(kind="input", name="Mic", id="{mic}"))
-    mux = st.add_slot(preset_by_name("SCRATCH"), name="Mux")
-    mux.capture_specs = [CaptureDevice(kind="input", name="Line", id="{line}"),
-                         CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}")]
-    off = st.add_slot(preset_by_name("SCRATCH"), name="Off", armed=False,
-                      capture_spec=CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}"))
+    st.add_slot(
+        _preset("SCRATCH"),
+        name="Mic",
+        capture_spec=CaptureDevice(kind="input", name="Mic", id="{mic}"),
+    )
+    mux = st.add_slot(_preset("SCRATCH"), name="Mux")
+    mux.capture_specs = [
+        CaptureDevice(kind="input", name="Line", id="{line}"),
+        CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}"),
+    ]
+    off = st.add_slot(
+        _preset("SCRATCH"),
+        name="Off",
+        armed=False,
+        capture_spec=CaptureDevice(
+            kind="loopback", name="Speakers  [loopback]", id="{spk}"
+        ),
+    )
 
     msg = st.preview_feedback_warning()
+    assert msg is not None
     assert "Main" in msg and "Default output" in msg and "Speakers" in msg
     assert "Mux" in msg and "Mic" not in msg and "Off" not in msg and "Line" not in msg
 
     st.output_spec = OutputDevice(id="{hp}", name="Headphones", max_output_channels=2)
     assert st.preview_feedback_warning() is None
     off.armed = True
-    assert st.preview_feedback_warning() is None  # {spk} is no longer the preview endpoint
+    assert (
+        st.preview_feedback_warning() is None
+    )  # {spk} is no longer the preview endpoint
     st.set_output_spec(OutputDevice(id="{spk}", name="Speakers", max_output_channels=2))
-    assert "Off" in st.preview_feedback_warning()
+    msg = st.preview_feedback_warning()
+    assert msg is not None and "Off" in msg
     main.armed = mux.armed = off.armed = False
     assert st.preview_feedback_warning() is None
     st.shutdown()
@@ -380,11 +401,10 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
 
 def test_effective_capture_spec_prefers_slot_override():
     from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     slot_a = st.slots[0]
-    slot_b = st.add_slot(preset_by_name("SCRATCH"))
+    slot_b = st.add_slot(_preset("SCRATCH"))
 
     global_dev = CaptureDevice(kind="loopback", name="GlobalSpeaker", id="gs")
     override_dev = CaptureDevice(kind="input", name="MicA", id="7")
@@ -410,11 +430,10 @@ def test_effective_capture_spec_falls_through_when_slot_has_none():
 
 def test_add_slot_carries_capture_spec_override():
     from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     dev = CaptureDevice(kind="input", name="MicB", id="9")
-    slot = st.add_slot(preset_by_name("SCRATCH"), capture_spec=dev)
+    slot = st.add_slot(_preset("SCRATCH"), capture_spec=dev)
     assert slot.capture_spec is dev
 
 
@@ -423,14 +442,15 @@ def test_build_capture_for_slot_uses_override_path():
     Verify the delegation without touching real hardware: swap out
     build_capture_source with a stub that records which spec it saw.
     """
-    from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     import flashback_sampler.app.state as state_mod
+    from flashback_sampler.app.audio_devices import CaptureDevice
+
     captured_device = {}
+
     def fake_build(device, buffer, sample_rate, channels):
         captured_device["d"] = device
         return object()
+
     real = state_mod.build_capture_source
     state_mod.build_capture_source = fake_build
     try:
@@ -438,7 +458,7 @@ def test_build_capture_for_slot_uses_override_path():
         global_dev = CaptureDevice(kind="loopback", name="G", id="g")
         override_dev = CaptureDevice(kind="input", name="O", id="11")
         st.capture_spec = global_dev
-        slot = st.add_slot(preset_by_name("SCRATCH"), capture_spec=override_dev)
+        slot = st.add_slot(_preset("SCRATCH"), capture_spec=override_dev)
         st.build_capture_for_slot(slot)
         assert captured_device["d"] is override_dev
 
@@ -451,11 +471,10 @@ def test_build_capture_for_slot_uses_override_path():
 
 
 def test_shutdown_stops_all_slots():
-    from flashback_sampler.core.quality_presets import preset_by_name
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(_preset("SCRATCH"))
     for slot in st.slots:
         src = FakeCaptureSourceNoThread(
             slot.buffer, sample_rate=slot.sample_rate, channels=slot.channels
@@ -497,14 +516,22 @@ def test_checkout_from_live_buffer_then_bind_to_scrub_player(monkeypatch):
     # native side: no DLL, no device, and no real handle to free.
     from flashback_sampler.core import native
 
-    fake_lib = type("L", (), {
-        "fb_playback_create": staticmethod(lambda d, r, c: 0xF00D),
-        "fb_playback_bind_checkout": staticmethod(lambda h, s, co, start, n: seen.update(start=start, n=n) or 0),
-        "fb_playback_play": staticmethod(lambda h: seen.update(played=True) or 0),
-        "fb_playback_destroy": staticmethod(lambda h: None),
-    })()
+    fake_lib = type(
+        "L",
+        (),
+        {
+            "fb_playback_create": staticmethod(lambda d, r, c: 0xF00D),
+            "fb_playback_bind_checkout": staticmethod(
+                lambda h, s, co, start, n: seen.update(start=start, n=n) or 0
+            ),
+            "fb_playback_play": staticmethod(lambda h: seen.update(played=True) or 0),
+            "fb_playback_destroy": staticmethod(lambda h: None),
+        },
+    )()
     monkeypatch.setattr(native, "load", lambda: fake_lib)
-    st.scrub_player.bind_checkout(st.scratch, co.handle, 0, co.n_frames, co.sample_rate, co.channels)
+    st.scrub_player.bind_checkout(
+        st.scratch, co.handle, 0, co.n_frames, co.sample_rate, co.channels
+    )
     st.scrub_player.play()
     assert seen == dict(start=0, n=500, played=True)
 
@@ -551,6 +578,7 @@ def test_rebuild_buffer_closes_the_old_buffer():
     called so its Zig-owned handle is released deterministically instead
     of relying only on eventual GC/__del__."""
     from flashback_sampler.app.state import AppState
+
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     try:
         old_buf = st.active_slot.buffer
@@ -566,6 +594,7 @@ def test_rebuild_buffer_closes_the_old_buffer():
 def test_rebuild_buffer_preserves_record_gain():
     """Changing buffer duration must not silently reset a source's gain/mute."""
     from flashback_sampler.app.state import AppState
+
     s = AppState(buffer_seconds=2.0, sample_rate=1000, channels=1)
     try:
         s.active_slot.buffer.gain_db = -6.0
@@ -579,33 +608,49 @@ def test_rebuild_buffer_preserves_record_gain():
 def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
     """Two or more capture_specs go to build_mixed_capture_source with the
     devices themselves — no factories, no staging buffers in Python."""
-    from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     import flashback_sampler.app.state as state_mod
+    from flashback_sampler.app.audio_devices import CaptureDevice
+
     seen = {}
 
     def fake_mixed(devices, buffer, sample_rate, channels):
-        seen.update(devices=list(devices), buffer=buffer, sample_rate=sample_rate, channels=channels)
+        seen.update(
+            devices=list(devices),
+            buffer=buffer,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
         return object()
 
     def fake_single(device, buffer, sample_rate, channels):
         raise AssertionError("single-source builder must not run for two specs")
 
-    real_mixed, real_single = state_mod.build_mixed_capture_source, state_mod.build_capture_source
-    state_mod.build_mixed_capture_source, state_mod.build_capture_source = fake_mixed, fake_single
+    real_mixed, real_single = (
+        state_mod.build_mixed_capture_source,
+        state_mod.build_capture_source,
+    )
+    state_mod.build_mixed_capture_source, state_mod.build_capture_source = (
+        fake_mixed,
+        fake_single,
+    )
     try:
         st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-        slot = st.add_slot(preset_by_name("SCRATCH"))
+        slot = st.add_slot(_preset("SCRATCH"))
         d1 = CaptureDevice(kind="loopback", name="A", id="a")
         d2 = CaptureDevice(kind="input", name="B", id="b")
         slot.capture_specs = [d1, d2]
         st.build_capture_for_slot(slot)
         assert seen["devices"] == [d1, d2]
         assert seen["buffer"] is slot.buffer
-        assert (seen["sample_rate"], seen["channels"]) == (slot.sample_rate, slot.channels)
+        assert (seen["sample_rate"], seen["channels"]) == (
+            slot.sample_rate,
+            slot.channels,
+        )
     finally:
-        state_mod.build_mixed_capture_source, state_mod.build_capture_source = real_mixed, real_single
+        state_mod.build_mixed_capture_source, state_mod.build_capture_source = (
+            real_mixed,
+            real_single,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -615,6 +660,7 @@ def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
 
 def _written(st, co, timeout=5.0):
     import time
+
     t0 = time.monotonic()
     mgr = st.slots[0].checkout_manager
     while time.monotonic() - t0 < timeout:
@@ -625,7 +671,9 @@ def _written(st, co, timeout=5.0):
 
 
 def test_state_uses_the_configured_scratch_dir_and_starts_the_writer(tmp_path):
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path / "s")
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path / "s"
+    )
     assert st.scratch_dir == tmp_path / "s" and st.scratch_dir.is_dir()
     st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.1)
@@ -635,17 +683,22 @@ def test_state_uses_the_configured_scratch_dir_and_starts_the_writer(tmp_path):
     st.shutdown()
 
 
-def test_uncreatable_scratch_dir_falls_back_to_default_and_continues(tmp_path, monkeypatch):
+def test_uncreatable_scratch_dir_falls_back_to_default_and_continues(
+    tmp_path, monkeypatch
+):
     """F1: an uncreatable configured scratch_dir (bad drive, permission
     denied, stale removable-media path, ...) must not brick launch --
     AppState falls back to config.default_scratch_dir() and records what
     happened instead of raising out of __init__."""
-    import flashback_sampler.app.state as state_mod
     from pathlib import Path as _Path
+
+    import flashback_sampler.app.state as state_mod
 
     bad_dir = tmp_path / "unwritable"
     fallback_dir = tmp_path / "fallback"
-    monkeypatch.setattr(state_mod.app_config, "default_scratch_dir", lambda: fallback_dir)
+    monkeypatch.setattr(
+        state_mod.app_config, "default_scratch_dir", lambda: fallback_dir
+    )
 
     real_mkdir = _Path.mkdir
 
@@ -668,7 +721,9 @@ def test_uncreatable_scratch_dir_falls_back_to_default_and_continues(tmp_path, m
 
 
 def test_adoption_restores_checkouts_into_a_matching_slot(tmp_path):
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
     co = st.checkout_manager.create(duration_s=0.5)
     st.checkout_manager.set_trim(co.id, 10, 20)
@@ -676,24 +731,35 @@ def test_adoption_restores_checkouts_into_a_matching_slot(tmp_path):
     _written(st, co)
     st.shutdown()  # files stay
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     cos = st2.slots[0].checkout_manager.list()
     assert [c.id for c in cos] == [co.id]
     back = cos[0]
-    assert (back.n_frames, back.trim_in_samples, back.trim_out_samples, back.state) == (500, 10, 20, "saved")
+    assert (back.n_frames, back.trim_in_samples, back.trim_out_samples, back.state) == (
+        500,
+        10,
+        20,
+        "saved",
+    )
     assert back.bins["540"].shape == (540, 2, 1)
     assert len(st2.slots) == 1
     st2.shutdown()
 
 
 def test_adoption_makes_an_unarmed_slot_for_a_foreign_rate(tmp_path):
-    st = AppState(buffer_seconds=1.0, sample_rate=2000, channels=2, scratch_dir=tmp_path)
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=2000, channels=2, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((2000, 2), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.2)
     _written(st, co)
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     assert len(st2.slots) == 2
     adopted = st2.slots[1]
     assert (adopted.sample_rate, adopted.channels, adopted.armed) == (2000, 2, False)
@@ -706,13 +772,17 @@ def test_adoption_does_not_match_a_slot_on_rate_alone(tmp_path):
     """R-h9c: same rate as the Main slot, DIFFERENT channels. Pins the
     channels half of `s.sample_rate == m.rate and s.channels == m.channels`
     -- a rate-only match would wrongly fold this into slot 0."""
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=2, scratch_dir=tmp_path)
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=2, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((1000, 2), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.2)
     _written(st, co)
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     assert len(st2.slots) == 2
     adopted = st2.slots[1]
     assert (adopted.sample_rate, adopted.channels, adopted.armed) == (1000, 2, False)
@@ -724,13 +794,17 @@ def test_adoption_does_not_match_a_slot_on_channels_alone(tmp_path):
     """R-h9c: same channels as the Main slot, DIFFERENT rate. Pins the
     rate half of the same compound condition -- a channels-only match
     would wrongly fold this into slot 0."""
-    st = AppState(buffer_seconds=1.0, sample_rate=2000, channels=1, scratch_dir=tmp_path)
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=2000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((2000, 1), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.2)
     _written(st, co)
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     assert len(st2.slots) == 2
     adopted = st2.slots[1]
     assert (adopted.sample_rate, adopted.channels, adopted.armed) == (2000, 1, False)
@@ -742,7 +816,9 @@ def test_adoption_survives_add_slot_refusing_a_foreign_rate(tmp_path, monkeypatc
     """R-h9b: add_slot raises RuntimeError on a project-RAM refusal.
     adopt_scratch must swallow that and skip the manifest -- a launch
     must never raise because of what's sitting on disk."""
-    st = AppState(buffer_seconds=1.0, sample_rate=2000, channels=2, scratch_dir=tmp_path)
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=2000, channels=2, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((2000, 2), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.2)
     _written(st, co)
@@ -754,9 +830,13 @@ def test_adoption_survives_add_slot_refusing_a_foreign_rate(tmp_path, monkeypatc
         raise RuntimeError("Max footprint exceeded")
 
     monkeypatch.setattr(state_mod.AppState, "add_slot", raising_add_slot)
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     assert len(st2.slots) == 1  # no slot could be created for the foreign rate
-    assert st2.slots[0].checkout_manager.list() == []  # the manifest was skipped, not adopted
+    assert (
+        st2.slots[0].checkout_manager.list() == []
+    )  # the manifest was skipped, not adopted
     st2.shutdown()
 
 
@@ -767,67 +847,162 @@ def test_adoption_survives_a_range_corrupt_manifest_and_still_adopts_others(tmp_
     adopt_scratch must skip it (leaving its files in place) and keep
     adopting everything else."""
     from flashback_sampler.core.manifest import Manifest, write_manifest
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.5)
     _written(st, co)
     st.shutdown()
 
     (tmp_path / "badrate.wav").write_bytes(b"\x00" * 64)  # just needs to exist
-    write_manifest(tmp_path, Manifest(id="badrate", slot="Ghost", rate=0, channels=1, abs_start=0, abs_end=1,
-                                      created_at=5.0, parent=None, file="badrate", start_frame=0, n_frames=1, trim_in=0, trim_out=0,
-                                      state="pending", partial=False, bins=None))
+    write_manifest(
+        tmp_path,
+        Manifest(
+            id="badrate",
+            slot="Ghost",
+            rate=0,
+            channels=1,
+            abs_start=0,
+            abs_end=1,
+            created_at=5.0,
+            parent=None,
+            file="badrate",
+            start_frame=0,
+            n_frames=1,
+            trim_in=0,
+            trim_out=0,
+            state="pending",
+            partial=False,
+            bins=None,
+        ),
+    )
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)  # must not raise
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )  # must not raise
     ids = [c.id for c in st2.slots[0].checkout_manager.list()]
     assert ids == [co.id]  # the real checkout still adopted
     assert len(st2.slots) == 1  # no slot was left half-built for the bad manifest
-    assert (tmp_path / "badrate.json").exists() and (tmp_path / "badrate.wav").exists()  # left in place
+    assert (tmp_path / "badrate.json").exists() and (
+        tmp_path / "badrate.wav"
+    ).exists()  # left in place
     st2.shutdown()
 
 
 def test_adoption_takes_a_part_file_as_partial_and_skips_junk(tmp_path):
     from flashback_sampler.core.manifest import Manifest, write_manifest
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.5)
     _written(st, co)
     st.shutdown()
     p = tmp_path / f"{co.id}.wav"
     data = p.read_bytes()
-    (tmp_path / f"{co.id}.wav.part").write_bytes(data[:44 + 100 * 4])
+    (tmp_path / f"{co.id}.wav.part").write_bytes(data[: 44 + 100 * 4])
     p.unlink()
     # a manifest with no audio at all, and a corrupt one
-    write_manifest(tmp_path, Manifest(id="ghost", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=0.0, parent=None, file="ghost", start_frame=0, n_frames=1, trim_in=0, trim_out=0,
-                                      state="pending", partial=False, bins=None))
+    write_manifest(
+        tmp_path,
+        Manifest(
+            id="ghost",
+            slot="Main",
+            rate=1000,
+            channels=1,
+            abs_start=0,
+            abs_end=1,
+            created_at=0.0,
+            parent=None,
+            file="ghost",
+            start_frame=0,
+            n_frames=1,
+            trim_in=0,
+            trim_out=0,
+            state="pending",
+            partial=False,
+            bins=None,
+        ),
+    )
     (tmp_path / "bad.json").write_text("{")
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     cos = st2.slots[0].checkout_manager.list()
     assert [c.id for c in cos] == [co.id]
     assert cos[0].partial is True and cos[0].n_frames == 100
-    assert (tmp_path / "ghost.json").exists() and (tmp_path / "bad.json").exists()  # left in place
+    assert (tmp_path / "ghost.json").exists() and (
+        tmp_path / "bad.json"
+    ).exists()  # left in place
     st2.shutdown()
 
 
 def test_adoption_of_a_slice_needs_its_parent(tmp_path):
     from flashback_sampler.core.manifest import Manifest, write_manifest
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.zeros((1000, 1), dtype=np.float32))
     co = st.checkout_manager.create(duration_s=0.5)
     _written(st, co)
     st.shutdown()
-    write_manifest(tmp_path, Manifest(id="sl", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=9.0, parent=co.id, file=co.id, start_frame=100, n_frames=50, trim_in=0, trim_out=0,
-                                      state="saved", partial=False, bins=None))
-    write_manifest(tmp_path, Manifest(id="orphan", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=9.5, parent="missing", file="missing", start_frame=0, n_frames=5, trim_in=0, trim_out=0,
-                                      state="saved", partial=False, bins=None))
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    write_manifest(
+        tmp_path,
+        Manifest(
+            id="sl",
+            slot="Main",
+            rate=1000,
+            channels=1,
+            abs_start=0,
+            abs_end=1,
+            created_at=9.0,
+            parent=co.id,
+            file=co.id,
+            start_frame=100,
+            n_frames=50,
+            trim_in=0,
+            trim_out=0,
+            state="saved",
+            partial=False,
+            bins=None,
+        ),
+    )
+    write_manifest(
+        tmp_path,
+        Manifest(
+            id="orphan",
+            slot="Main",
+            rate=1000,
+            channels=1,
+            abs_start=0,
+            abs_end=1,
+            created_at=9.5,
+            parent="missing",
+            file="missing",
+            start_frame=0,
+            n_frames=5,
+            trim_in=0,
+            trim_out=0,
+            state="saved",
+            partial=False,
+            bins=None,
+        ),
+    )
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     ids = [c.id for c in st2.slots[0].checkout_manager.list()]
     assert ids == [co.id, "sl"]
     sl = st2.slots[0].checkout_manager.get("sl")
-    assert sl.parent_id == co.id and sl.start_frame == 100 and sl.path == st2.slots[0].checkout_manager.get(co.id).path
+    assert (
+        sl.parent_id == co.id
+        and sl.start_frame == 100
+        and sl.path == st2.slots[0].checkout_manager.get(co.id).path
+    )
     st2.shutdown()
 
 
@@ -836,6 +1011,7 @@ def _stamp_created_at(scratch_dir, checkout_id, when):
     The Windows `time.time()` tick is ~15.6 ms, so two manifests written
     in one tick would otherwise sort by id."""
     import json
+
     p = scratch_dir / f"{checkout_id}.json"
     d = json.loads(p.read_text(encoding="utf-8"))
     d["created_at"] = when
@@ -849,7 +1025,10 @@ def test_adoption_keeps_a_slice_whose_parent_is_gone(tmp_path):
     it: as a ROOT over that file at the slice's own span. Skipping it
     leaks both the WAV and the slice's own manifest forever."""
     from flashback_sampler.core import native
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
     mgr = st.checkout_manager
     co = mgr.create(duration_s=0.5)
@@ -860,15 +1039,24 @@ def test_adoption_keeps_a_slice_whose_parent_is_gone(tmp_path):
     assert parent_wav.exists()
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     mgr2 = st2.slots[0].checkout_manager
     assert [c.id for c in mgr2.list()] == [sl.id]
     back = mgr2.get(sl.id)
-    assert (back.path, back.start_frame, back.n_frames, back.state) == (parent_wav, 100, 50, "saved")
+    assert (back.path, back.start_frame, back.n_frames, back.state) == (
+        parent_wav,
+        100,
+        50,
+        "saved",
+    )
     assert back.parent_id == co.id  # recorded, so the next launch takes this same path
     # Through the handle: the adopted checkout must read the slice's
     # samples, not the file's first 50 frames.
-    got = native.wav_read(mgr2.export_range(back.id, tmp_path / "out" / "orphan.wav", 0, 50), 0, 50)
+    got = native.wav_read(
+        mgr2.export_range(back.id, tmp_path / "out" / "orphan.wav", 0, 50), 0, 50
+    )
     assert np.array_equal(got, native.wav_read(parent_wav, 100, 50))
     mgr2.discard(back.id)  # the last reference to the file
     assert not parent_wav.exists() and not (tmp_path / f"{sl.id}.json").exists()
@@ -881,24 +1069,38 @@ def test_adoption_keeps_a_nested_slice_whose_intermediate_parent_is_gone(tmp_pat
     must open s2 over `<root>.wav` at its absolute offset; skipping it
     strands the clip and pins the root's WAV for nothing."""
     from flashback_sampler.core import native
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
     mgr = st.checkout_manager
     root = mgr.create(duration_s=0.5)
     _written(st, root)
-    s1 = mgr.slice(root.id, 100, 300)   # file frames 100..400
-    s2 = mgr.slice(s1.id, 250, 50)      # file frames 350..400
-    before = native.wav_read(mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50)
+    s1 = mgr.slice(root.id, 100, 300)  # file frames 100..400
+    s2 = mgr.slice(s1.id, 250, 50)  # file frames 350..400
+    before = native.wav_read(
+        mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50
+    )
     mgr.discard(s1.id)
     _stamp_created_at(tmp_path, s2.id, 20.0)
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     mgr2 = st2.slots[0].checkout_manager
     assert sorted(c.id for c in mgr2.list()) == sorted([root.id, s2.id])
     back = mgr2.get(s2.id)
-    assert (back.path, back.start_frame, back.n_frames, back.state) == (root.path, 350, 50, "saved")
-    after = native.wav_read(mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50)
+    assert (back.path, back.start_frame, back.n_frames, back.state) == (
+        root.path,
+        350,
+        50,
+        "saved",
+    )
+    after = native.wav_read(
+        mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50
+    )
     assert np.array_equal(after, before)
     # The root's file is shared by both: the refcount says so, and the
     # last discard removes it.
@@ -917,25 +1119,34 @@ def test_adoption_of_a_slice_of_a_slice_reads_the_same_audio(tmp_path):
     reads at `parent.start + start` -- the wrong audio, or (here) past
     the parent's end, where Zig's range guard drops the slice."""
     from flashback_sampler.core import native
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
     mgr = st.checkout_manager
     co = mgr.create(duration_s=0.5)
     _written(st, co)
-    s1 = mgr.slice(co.id, 100, 300)   # file frames 100..400
-    s2 = mgr.slice(s1.id, 250, 50)    # file frames 350..400
-    assert s2.start_frame == 350      # absolute into the file
-    before = native.wav_read(mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50)
+    s1 = mgr.slice(co.id, 100, 300)  # file frames 100..400
+    s2 = mgr.slice(s1.id, 250, 50)  # file frames 350..400
+    assert s2.start_frame == 350  # absolute into the file
+    before = native.wav_read(
+        mgr.export_range(s2.id, tmp_path / "out" / "before.wav", 0, 50), 0, 50
+    )
     _stamp_created_at(tmp_path, s1.id, 10.0)
     _stamp_created_at(tmp_path, s2.id, 20.0)
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     mgr2 = st2.slots[0].checkout_manager
     assert sorted(c.id for c in mgr2.list()) == sorted([co.id, s1.id, s2.id])
     back = mgr2.get(s2.id)
     assert back.start_frame == 350
-    after = native.wav_read(mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50)
+    after = native.wav_read(
+        mgr2.export_range(s2.id, tmp_path / "out" / "after.wav", 0, 50), 0, 50
+    )
     assert np.array_equal(after, before)
     st2.shutdown()
 
@@ -945,30 +1156,165 @@ def test_adoption_skips_a_slice_that_starts_before_its_parent(tmp_path):
     a manifest that disagrees with its parent. Skip it like any other
     corrupt manifest, and keep adopting everything else."""
     from flashback_sampler.core.manifest import Manifest, write_manifest
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
+
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
     st.buffer.write(np.arange(1000, dtype=np.float32).reshape(-1, 1))
     mgr = st.checkout_manager
     co = mgr.create(duration_s=0.5)
     _written(st, co)
     s1 = mgr.slice(co.id, 100, 300)
     _stamp_created_at(tmp_path, s1.id, 10.0)
-    write_manifest(tmp_path, Manifest(id="before", slot="Main", rate=1000, channels=1, abs_start=0, abs_end=1,
-                                      created_at=20.0, parent=s1.id, file=co.id, start_frame=50, n_frames=10, trim_in=0,
-                                      trim_out=0, state="saved", partial=False, bins=None))
+    write_manifest(
+        tmp_path,
+        Manifest(
+            id="before",
+            slot="Main",
+            rate=1000,
+            channels=1,
+            abs_start=0,
+            abs_end=1,
+            created_at=20.0,
+            parent=s1.id,
+            file=co.id,
+            start_frame=50,
+            n_frames=10,
+            trim_in=0,
+            trim_out=0,
+            state="saved",
+            partial=False,
+            bins=None,
+        ),
+    )
     st.shutdown()
 
-    st2 = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
-    assert sorted(c.id for c in st2.slots[0].checkout_manager.list()) == sorted([co.id, s1.id])
+    st2 = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
+    assert sorted(c.id for c in st2.slots[0].checkout_manager.list()) == sorted(
+        [co.id, s1.id]
+    )
     assert (tmp_path / "before.json").exists()  # left in place
     st2.shutdown()
 
 
 def test_remove_slot_discards_its_checkouts_and_files(tmp_path):
-    from flashback_sampler.core.quality_presets import preset_by_name
-    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path)
-    slot = st.add_slot(preset_by_name("SCRATCH"))
+    st = AppState(
+        buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
+    )
+    slot = st.add_slot(_preset("SCRATCH"))
     slot.buffer.write(np.zeros((16_000, 1), dtype=np.float32))
     co = slot.checkout_manager.create(duration_s=0.1)
     st.remove_slot(1)
     assert not co.path.exists() and not (tmp_path / f"{co.id}.json").exists()
     st.shutdown()
+
+
+# ── Teardown errors are logged, never raised (best_effort) ──────────────
+
+
+def _errors(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def _raise(name):
+    def fail():
+        raise RuntimeError(name)
+
+    return fail
+
+
+def test_remove_slot_logs_failing_teardown_and_still_removes(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    slot = st.add_slot(_preset("SCRATCH"))
+    slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    co = slot.checkout_manager
+    monkeypatch.setattr(slot.buffer, "close", _raise("close"))
+
+    st.remove_slot(1)
+
+    assert len(st.slots) == 1
+    assert co.list() == []
+    assert len(_errors(caplog)) == 2
+
+
+def test_start_rolling_returns_the_first_start_error(monkeypatch):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.active_slot.armed = True
+    monkeypatch.setattr(
+        st, "build_capture_for_slot", lambda slot: RaisingCaptureSource(fail=("start",))
+    )
+
+    started, err = st.start_rolling()
+
+    assert started == 0
+    assert isinstance(err, RuntimeError) and err.args == ("start",)
+    assert st.rolling is True
+
+
+def test_stop_rolling_counts_only_the_slots_that_stopped(caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.active_slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    other = st.add_slot(_preset("SCRATCH"))
+    src = FakeCaptureSourceNoThread(other.buffer)
+    other.bind_capture(src)
+    other.start_capture()
+    st.rolling = True
+
+    assert st.stop_rolling() == 1
+    assert src.is_running() is False
+    assert st.rolling is False
+    assert len(_errors(caplog)) == 1
+
+
+def test_rebuild_buffer_keeps_the_ring_when_capture_will_not_stop():
+    """A source that failed to stop may still write into the old ring,
+    so the ring must not be closed or swapped."""
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    src = RaisingCaptureSource(fail=("stop",))
+    st.active_slot.bind_capture(src)
+    old = st.buffer
+
+    with pytest.raises(RuntimeError, match="stop"):
+        st.rebuild_buffer(2.0)
+
+    assert st.buffer is old and st.active_slot.capture_source is src
+
+
+def test_rebuild_buffer_logs_a_failing_close_and_still_rebuilds(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    monkeypatch.setattr(st.buffer, "close", _raise("close"))
+
+    st.rebuild_buffer(2.0)
+
+    assert st.buffer.duration == 2.0
+    assert len(_errors(caplog)) == 1
+
+
+def test_shutdown_runs_every_step_when_each_one_raises(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    src = RaisingCaptureSource(fail=("stop",))
+    st.active_slot.bind_capture(src)
+    called: list[str] = []
+
+    def failing(name):
+        def fail():
+            called.append(name)
+            raise RuntimeError(name)
+
+        return fail
+
+    mgr, scratch, player = st.checkout_manager, st.scratch, st.scrub_player
+    real = (mgr.close, scratch.close, player.close)
+    monkeypatch.setattr(mgr, "close", failing("checkouts"))
+    monkeypatch.setattr(scratch, "close", failing("scratch"))
+    monkeypatch.setattr(player, "close", failing("player"))
+
+    st.shutdown()
+
+    assert src.calls == ["stop"]
+    assert called == ["checkouts", "scratch", "player"]
+    assert len(_errors(caplog)) == 4
+    for close in real:
+        close()

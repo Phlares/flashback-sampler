@@ -68,7 +68,7 @@ class ProcessPickerDialog(QDialog):
             root.addWidget(hint)
             root.addStretch(1)
 
-            btns = QDialogButtonBox(QDialogButtonBox.Cancel)
+            btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
             btns.rejected.connect(self.reject)
             root.addWidget(btns)
             return
@@ -85,7 +85,7 @@ class ProcessPickerDialog(QDialog):
         self._filter_edit.textChanged.connect(self._on_filter_changed)
         filter_row.addWidget(self._filter_edit, 1)
         refresh_btn = QPushButton("Refresh")
-        refresh_btn.setFocusPolicy(Qt.NoFocus)
+        refresh_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         refresh_btn.clicked.connect(self._populate)
         filter_row.addWidget(refresh_btn, 0)
         root.addLayout(filter_row)
@@ -97,7 +97,7 @@ class ProcessPickerDialog(QDialog):
 
         # OK / Cancel
         btns = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -107,7 +107,9 @@ class ProcessPickerDialog(QDialog):
         if not hasattr(self, "_list"):
             return
         self._all_rows = native.list_processes()
-        self._apply_filter(self._filter_edit.text() if hasattr(self, "_filter_edit") else "")
+        self._apply_filter(
+            self._filter_edit.text() if hasattr(self, "_filter_edit") else ""
+        )
 
     def _on_filter_changed(self, text: str) -> None:
         self._apply_filter(text)
@@ -120,14 +122,14 @@ class ProcessPickerDialog(QDialog):
                 continue
             label = f"  {pid:>6}   {name}"
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, (pid, name))
+            item.setData(Qt.ItemDataRole.UserRole, (pid, name))
             self._list.addItem(item)
 
-    def accept(self) -> None:  # noqa: D401
+    def accept(self) -> None:
         if hasattr(self, "_list"):
             item = self._list.currentItem()
             if item is not None:
-                data = item.data(Qt.UserRole)
+                data = item.data(Qt.ItemDataRole.UserRole)
                 if isinstance(data, tuple) and len(data) == 2:
                     pid, name = data
                     self._selected_device = CaptureDevice(

@@ -8,20 +8,14 @@ smoke test.
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication as _QApp
 
 from flashback_sampler.app.widgets.selectable_waveform import (
     EDGE_GRAB_PX,
     SelectableWaveform,
 )
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # _edge_at
@@ -32,6 +26,12 @@ def _new_wave(qapp, width: int = 1012) -> SelectableWaveform:
     w = SelectableWaveform()
     w.resize(width, 200)
     return w
+
+
+def _sel(w: SelectableWaveform) -> tuple[float, float]:
+    sel = w.manual_selection()
+    assert sel is not None
+    return sel
 
 
 def test_edge_at_returns_none_with_no_selection(qapp):
@@ -47,7 +47,6 @@ def test_edge_at_detects_start_edge(qapp):
     inner_x, inner_w = w._inner_bounds()
     assert inner_w == 1000  # 1012 - 6 - 6
     start_x = inner_x + 0.25 * inner_w  # 256
-    end_x = inner_x + 0.75 * inner_w  # 756
 
     # Exactly on the start edge
     assert w._edge_at(start_x) == "start"
@@ -109,7 +108,7 @@ def test_drag_start_edge_leftward_extends_selection(qapp):
     new_frac = 0.25
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_start = max(0.0, min(float(w._manual_end) - epsilon, new_frac))
+    w._manual_start = max(0.0, min(_sel(w)[1] - epsilon, new_frac))
     assert w._manual_start == pytest.approx(0.25)
     assert w._manual_end == pytest.approx(0.75)
 
@@ -122,11 +121,11 @@ def test_drag_start_edge_cannot_cross_end(qapp):
     new_frac = 0.9  # past end
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_start = max(0.0, min(float(w._manual_end) - epsilon, new_frac))
+    w._manual_start = max(0.0, min(_sel(w)[1] - epsilon, new_frac))
 
     # Should be clamped to just before end
     assert w._manual_start == pytest.approx(0.7 - epsilon)
-    assert w._manual_start < w._manual_end
+    assert w.has_manual_selection()  # only while start < end
 
 
 def test_drag_end_edge_rightward_extends_selection(qapp):
@@ -137,7 +136,7 @@ def test_drag_end_edge_rightward_extends_selection(qapp):
     new_frac = 0.8
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_end = min(1.0, max(float(w._manual_start) + epsilon, new_frac))
+    w._manual_end = min(1.0, max(_sel(w)[0] + epsilon, new_frac))
     assert w._manual_end == pytest.approx(0.8)
     assert w._manual_start == pytest.approx(0.2)
 
@@ -150,42 +149,42 @@ def test_drag_end_edge_cannot_cross_start(qapp):
     new_frac = 0.1  # past start
     inner_x, inner_w = w._inner_bounds()
     epsilon = 1.0 / max(1, inner_w)
-    w._manual_end = min(1.0, max(float(w._manual_start) + epsilon, new_frac))
+    w._manual_end = min(1.0, max(_sel(w)[0] + epsilon, new_frac))
 
     assert w._manual_end == pytest.approx(0.3 + epsilon)
-    assert w._manual_start < w._manual_end
+    assert w.has_manual_selection()  # only while start < end
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # Drag-out gesture
 # ─────────────────────────────────────────────────────────────────────────
 
-from PySide6.QtCore import QEvent, QPointF
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication as _QApp
+
+def _mouse_ev(
+    kind,
+    x,
+    y=100.0,
+    button=Qt.MouseButton.LeftButton,
+    buttons=Qt.MouseButton.LeftButton,
+    mods=Qt.KeyboardModifier.NoModifier,
+):
+    return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, mods)
 
 
-def _mouse_ev(kind, x, y=100.0, button=Qt.LeftButton,
-              buttons=Qt.LeftButton, mods=Qt.NoModifier):
-    return QMouseEvent(
-        kind, QPointF(x, y), QPointF(x, y), button, buttons, mods
+def _press(w, x, mods=Qt.KeyboardModifier.NoModifier):
+    w.mousePressEvent(_mouse_ev(QEvent.Type.MouseButtonPress, x, mods=mods))
+
+
+def _move(w, x, mods=Qt.KeyboardModifier.NoModifier):
+    w.mouseMoveEvent(
+        _mouse_ev(QEvent.Type.MouseMove, x, button=Qt.MouseButton.NoButton, mods=mods)
     )
 
 
-def _press(w, x, mods=Qt.NoModifier):
-    w.mousePressEvent(_mouse_ev(QEvent.MouseButtonPress, x, mods=mods))
-
-
-def _move(w, x, mods=Qt.NoModifier):
-    w.mouseMoveEvent(_mouse_ev(
-        QEvent.MouseMove, x, button=Qt.NoButton, mods=mods
-    ))
-
-
 def _release(w, x):
-    w.mouseReleaseEvent(_mouse_ev(
-        QEvent.MouseButtonRelease, x, buttons=Qt.NoButton
-    ))
+    w.mouseReleaseEvent(
+        _mouse_ev(QEvent.Type.MouseButtonRelease, x, buttons=Qt.MouseButton.NoButton)
+    )
 
 
 def test_press_inside_selection_and_drag_emits_drag_out(qapp):
@@ -227,8 +226,10 @@ def test_ctrl_press_and_drag_emits_full_clip(qapp):
     w = _new_wave(qapp, width=1012)
     got = []
     w.dragFullClipRequested.connect(lambda: got.append(True))
-    _press(w, 300, mods=Qt.ControlModifier)
-    _move(w, 300 + _QApp.startDragDistance() + 1, mods=Qt.ControlModifier)
+    _press(w, 300, mods=Qt.KeyboardModifier.ControlModifier)
+    _move(
+        w, 300 + _QApp.startDragDistance() + 1, mods=Qt.KeyboardModifier.ControlModifier
+    )
     assert got == [True]
 
 

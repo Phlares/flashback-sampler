@@ -23,20 +23,25 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 
 from flashback_sampler.core import native
+from flashback_sampler.core.best_effort import best_effort
 from flashback_sampler.core.manifest import (
-    Manifest, audio_path, bins_from_json, bins_to_json, manifest_path, write_manifest,
+    Manifest,
+    audio_path,
+    bins_from_json,
+    bins_to_json,
+    manifest_path,
+    write_manifest,
 )
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
-
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
-CheckoutFormat = Literal["WAV"]
 CheckoutSubtype = Literal["FLOAT", "PCM_24", "PCM_16"]
 
 # FLOAT keeps the float32 scratch bit-perfect on disk.
@@ -75,7 +80,7 @@ class Checkout:
     start_frame: int
     abs_sample_start: int
     abs_sample_end: int
-    parent_id: Optional[str] = None
+    parent_id: str | None = None
     trim_in_samples: int = 0
     trim_out_samples: int = 0
     state: CheckoutState = "pending"
@@ -93,11 +98,17 @@ class Checkout:
         """(start, n) within the checkout: the trim, or the whole clip."""
         n = self.n_frames
         start = max(0, min(self.trim_in_samples, n))
-        end = n if self.trim_out_samples <= 0 else max(start, min(self.trim_out_samples, n))
+        end = (
+            n
+            if self.trim_out_samples <= 0
+            else max(start, min(self.trim_out_samples, n))
+        )
         return start, end - start
 
 
-def _destroy_quietly(scratch: NativeScratch, handle: Optional[int], path: Optional[Path] = None) -> None:
+def _destroy_quietly(
+    scratch: NativeScratch, handle: int | None, path: Path | None = None
+) -> None:
     """Best-effort cleanup after a failed checkout create/adopt. Swallows
     every error -- cleanup must not mask the original failure the caller
     is about to raise. `path` is passed only by a caller that minted the
@@ -150,8 +161,6 @@ class CheckoutManager:
     corrupt scratch file, or an unwritable disk.
     """
 
-    _VALID_FORMATS: tuple[str, ...] = ("WAV",)
-
     def __init__(
         self,
         buffer: NativeAudioCircularBuffer,
@@ -168,7 +177,23 @@ class CheckoutManager:
         self._lock = threading.Lock()
         self._checkouts: dict[str, Checkout] = {}
         self._file_refs: dict[Path, int] = {}
-        self._pinned_id: Optional[str] = None
+        self._pinned_id: str | None = None
+
+    @property
+    def pinned_id(self) -> str | None:
+        return self._pinned_id
+
+    @property
+    def max_active(self) -> int:
+        return self._max_active
+
+    def set_max_active(self, n: int) -> None:
+        self._max_active = int(n)
+
+    def rebind_buffer(self, buffer: NativeAudioCircularBuffer) -> None:
+        """Cut new checkouts from `buffer`. Existing checkouts are
+        file-backed and keep working."""
+        self._buffer = buffer
 
     # ------------------------------------------------------------------
     # Creation
@@ -185,7 +210,9 @@ class CheckoutManager:
         buf = self._buffer
         sr = buf.sample_rate
         buffered_s = buf.buffered_seconds
-        effective_offset_s = min(float(anchor_offset_s), max(0.0, buffered_s - 1.0 / sr))
+        effective_offset_s = min(
+            float(anchor_offset_s), max(0.0, buffered_s - 1.0 / sr)
+        )
         total = buf.total_written
         abs_end = total - int(effective_offset_s * sr)
         oldest = max(0, total - buf.buffer_size)
@@ -199,16 +226,22 @@ class CheckoutManager:
         drag-select path). Raises RuntimeError when the span is past the
         head, already overwritten, or the count cap is hit."""
         if abs_end <= abs_start:
-            raise ValueError(f"abs_end must be greater than abs_start ({abs_end} <= {abs_start})")
+            raise ValueError(
+                f"abs_end must be greater than abs_start ({abs_end} <= {abs_start})"
+            )
         buf = self._buffer
         total = buf.total_written
         if abs_end > total:
-            raise RuntimeError(f"requested range extends past current head (abs_end={abs_end}, total_written={total})")
+            raise RuntimeError(
+                f"requested range extends past current head (abs_end={abs_end}, total_written={total})"
+            )
         if total - abs_start > buf.buffer_size:
             raise RuntimeError("requested range has already been overwritten")
         with self._lock:
             if len(self._checkouts) >= self._max_active:
-                raise RuntimeError(f"Maximum active checkouts reached ({self._max_active})")
+                raise RuntimeError(
+                    f"Maximum active checkouts reached ({self._max_active})"
+                )
             cid = uuid.uuid4().hex[:12]
             path = audio_path(self._scratch_dir, cid)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,14 +252,24 @@ class CheckoutManager:
                 # scratch dir): every failure past this point surfaces as
                 # ONE RuntimeError (R-h8k) -- the UI handler widens this
                 # further in h10.
-                handle = self._scratch.checkout_create(buf, int(abs_start), int(abs_end), path)
-                co = Checkout(
-                    id=cid, handle=handle, path=path,
-                    sample_rate=buf.sample_rate, channels=buf.channels,
-                    n_frames=int(abs_end - abs_start), start_frame=0,
-                    abs_sample_start=int(abs_start), abs_sample_end=int(abs_end),
+                handle = self._scratch.checkout_create(
+                    buf, int(abs_start), int(abs_end), path
                 )
-                co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+                co = Checkout(
+                    id=cid,
+                    handle=handle,
+                    path=path,
+                    sample_rate=buf.sample_rate,
+                    channels=buf.channels,
+                    n_frames=int(abs_end - abs_start),
+                    start_frame=0,
+                    abs_sample_start=int(abs_start),
+                    abs_sample_end=int(abs_end),
+                )
+                co.bins = {
+                    str(n): self._scratch.checkout_peak_bins(handle, n)
+                    for n in BIN_COUNTS
+                }
                 self._register(co)
             except (RuntimeError, OSError) as e:
                 # R-h8m: this cid's path is freshly minted (uuid4) and was
@@ -249,7 +292,9 @@ class CheckoutManager:
         this call waited for that write."""
         parent = self.get(parent_id)
         if start < 0 or n <= 0 or start + n > parent.n_frames:
-            raise ValueError(f"slice {start}+{n} is outside the parent's {parent.n_frames} frames")
+            raise ValueError(
+                f"slice {start}+{n} is outside the parent's {parent.n_frames} frames"
+            )
         # P13, outside self._lock: write_state takes the lock itself and
         # threading.Lock is not reentrant, and a wait under the lock
         # would stall every other manager call for up to 30 s.
@@ -259,7 +304,9 @@ class CheckoutManager:
             if ws in ("written", "adopted"):
                 break
             if ws == "failed":
-                raise ScratchWriteFailed("scratch write failed for the parent; cannot slice")
+                raise ScratchWriteFailed(
+                    "scratch write failed for the parent; cannot slice"
+                )
             if time.monotonic() > deadline:
                 raise RuntimeError("timed out waiting for the parent's scratch write")
             time.sleep(0.005)
@@ -273,19 +320,29 @@ class CheckoutManager:
                 raise KeyError(parent_id)
             parent = self._checkouts[parent_id]
             if len(self._checkouts) >= self._max_active:
-                raise RuntimeError(f"Maximum active checkouts reached ({self._max_active})")
+                raise RuntimeError(
+                    f"Maximum active checkouts reached ({self._max_active})"
+                )
             handle = None
             try:
                 handle = self._scratch.checkout_slice(parent.handle, int(start), int(n))
                 co = Checkout(
-                    id=uuid.uuid4().hex[:12], handle=handle, path=parent.path,
-                    sample_rate=parent.sample_rate, channels=parent.channels,
-                    n_frames=int(n), start_frame=int(parent.start_frame + start),
+                    id=uuid.uuid4().hex[:12],
+                    handle=handle,
+                    path=parent.path,
+                    sample_rate=parent.sample_rate,
+                    channels=parent.channels,
+                    n_frames=int(n),
+                    start_frame=int(parent.start_frame + start),
                     abs_sample_start=parent.abs_sample_start + int(start),
                     abs_sample_end=parent.abs_sample_start + int(start + n),
-                    parent_id=parent.id, state="saved",
+                    parent_id=parent.id,
+                    state="saved",
                 )
-                co.bins = {str(b): self._scratch.checkout_peak_bins(handle, b) for b in BIN_COUNTS}
+                co.bins = {
+                    str(b): self._scratch.checkout_peak_bins(handle, b)
+                    for b in BIN_COUNTS
+                }
                 self._register(co)
             except (RuntimeError, OSError) as e:
                 # Same rule as adopt_slice: `parent.path` is shared, owned
@@ -307,13 +364,27 @@ class CheckoutManager:
         self._file_refs[co.path] = self._file_refs.get(co.path, 0) + 1
 
     def _write_manifest(self, co: Checkout) -> None:
-        write_manifest(self._scratch_dir, Manifest(
-            id=co.id, slot=self._slot_name, rate=co.sample_rate, channels=co.channels,
-            abs_start=co.abs_sample_start, abs_end=co.abs_sample_end, created_at=time.time(),
-            parent=co.parent_id, file=co.path.stem, start_frame=co.start_frame, n_frames=co.n_frames,
-            trim_in=co.trim_in_samples, trim_out=co.trim_out_samples, state=co.state,
-            partial=co.partial, bins=bins_to_json(co.bins) if co.bins else None,
-        ))
+        write_manifest(
+            self._scratch_dir,
+            Manifest(
+                id=co.id,
+                slot=self._slot_name,
+                rate=co.sample_rate,
+                channels=co.channels,
+                abs_start=co.abs_sample_start,
+                abs_end=co.abs_sample_end,
+                created_at=time.time(),
+                parent=co.parent_id,
+                file=co.path.stem,
+                start_frame=co.start_frame,
+                n_frames=co.n_frames,
+                trim_in=co.trim_in_samples,
+                trim_out=co.trim_out_samples,
+                state=co.state,
+                partial=co.partial,
+                bins=bins_to_json(co.bins) if co.bins else None,
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Adoption (launch)
@@ -330,21 +401,34 @@ class CheckoutManager:
         start_frame = int(m.start_frame)
         handle = None
         try:
-            handle = self._scratch.checkout_open(audio, start_frame, max(1, int(m.n_frames)))
+            handle = self._scratch.checkout_open(
+                audio, start_frame, max(1, int(m.n_frames))
+            )
             info = self._scratch.checkout_info(handle)
             co = Checkout(
-                id=m.id, handle=handle, path=Path(audio),
-                sample_rate=int(info.rate), channels=int(info.channels),
-                n_frames=int(info.n_frames), start_frame=start_frame,
-                abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
+                id=m.id,
+                handle=handle,
+                path=Path(audio),
+                sample_rate=int(info.rate),
+                channels=int(info.channels),
+                n_frames=int(info.n_frames),
+                start_frame=start_frame,
+                abs_sample_start=int(m.abs_start),
+                abs_sample_end=int(m.abs_end),
                 parent_id=m.parent,
-                trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
-                state=m.state if m.state in ("pending", "ready", "saved") else "pending",
+                trim_in_samples=int(m.trim_in),
+                trim_out_samples=int(m.trim_out),
+                state=m.state
+                if m.state in ("pending", "ready", "saved")
+                else "pending",
                 partial=bool(partial or m.partial),
             )
             co.bins = bins_from_json(m.bins, co.channels)
             if set(co.bins) != {str(n) for n in BIN_COUNTS}:
-                co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+                co.bins = {
+                    str(n): self._scratch.checkout_peak_bins(handle, n)
+                    for n in BIN_COUNTS
+                }
             with self._lock:
                 self._register(co)
         except (RuntimeError, OSError) as e:
@@ -365,21 +449,33 @@ class CheckoutManager:
         `adopt_scratch` skips it, like any other corrupt manifest."""
         start = int(m.start_frame) - int(parent.start_frame)
         if start < 0:
-            raise ValueError(f"slice {m.id} starts before its parent ({m.start_frame} < {parent.start_frame})")
+            raise ValueError(
+                f"slice {m.id} starts before its parent ({m.start_frame} < {parent.start_frame})"
+            )
         handle = None
         try:
             handle = self._scratch.checkout_slice(parent.handle, start, int(m.n_frames))
             co = Checkout(
-                id=m.id, handle=handle, path=parent.path,
-                sample_rate=parent.sample_rate, channels=parent.channels,
-                n_frames=int(m.n_frames), start_frame=int(m.start_frame),
-                abs_sample_start=int(m.abs_start), abs_sample_end=int(m.abs_end),
-                parent_id=parent.id, trim_in_samples=int(m.trim_in), trim_out_samples=int(m.trim_out),
+                id=m.id,
+                handle=handle,
+                path=parent.path,
+                sample_rate=parent.sample_rate,
+                channels=parent.channels,
+                n_frames=int(m.n_frames),
+                start_frame=int(m.start_frame),
+                abs_sample_start=int(m.abs_start),
+                abs_sample_end=int(m.abs_end),
+                parent_id=parent.id,
+                trim_in_samples=int(m.trim_in),
+                trim_out_samples=int(m.trim_out),
                 state=m.state if m.state in ("pending", "ready", "saved") else "saved",
             )
             co.bins = bins_from_json(m.bins, co.channels)
             if set(co.bins) != {str(n) for n in BIN_COUNTS}:
-                co.bins = {str(n): self._scratch.checkout_peak_bins(handle, n) for n in BIN_COUNTS}
+                co.bins = {
+                    str(n): self._scratch.checkout_peak_bins(handle, n)
+                    for n in BIN_COUNTS
+                }
             with self._lock:
                 self._register(co)
         except (RuntimeError, OSError) as e:
@@ -447,10 +543,12 @@ class CheckoutManager:
                 raise KeyError(checkout_id)
             co = self._checkouts[checkout_id]
             co.trim_in_samples = max(0, int(trim_in))
-            co.trim_out_samples = max(co.trim_in_samples, int(trim_out)) if trim_out > 0 else 0
+            co.trim_out_samples = (
+                max(co.trim_in_samples, int(trim_out)) if trim_out > 0 else 0
+            )
             self._write_manifest(co)  # takes no lock of its own -- safe to call here
 
-    def pin(self, checkout_id: Optional[str]) -> None:
+    def pin(self, checkout_id: str | None) -> None:
         """The selected clip: pinned (never evicted) and preloaded. One
         at a time per manager; None unpins."""
         # R-h8l (round 2): the previous shape released the lock between
@@ -480,8 +578,15 @@ class CheckoutManager:
     # Save / discard
     # ------------------------------------------------------------------
 
-    def export_range(self, checkout_id: str, target_path: Path | str, start: int, n: int, subtype: str = _DEFAULT_SUBTYPE,
-                     markers: tuple[int, int] | None = None) -> Path:
+    def export_range(
+        self,
+        checkout_id: str,
+        target_path: Path | str,
+        start: int,
+        n: int,
+        subtype: str = _DEFAULT_SUBTYPE,
+        markers: tuple[int, int] | None = None,
+    ) -> Path:
         """Materialise `[start, start + n)` of the checkout into a WAV.
         Zig reads the scratch file (or the RAM copy while the write is
         still in flight) — no audio crosses into Python.
@@ -491,7 +596,9 @@ class CheckoutManager:
         chunks. A marker export needs the audio on disk, so it waits for
         the scratch write and raises if that write failed."""
         if subtype not in _VALID_SUBTYPES:
-            raise ValueError(f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}")
+            raise ValueError(
+                f"Unsupported subtype {subtype!r}; must be one of {_VALID_SUBTYPES}"
+            )
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         # R-h8l: hold the lock across the handle-using export call itself
@@ -505,13 +612,17 @@ class CheckoutManager:
                 raise KeyError(checkout_id)
             handle = self._checkouts[checkout_id].handle
             try:
-                self._scratch.checkout_export(handle, target, int(start), int(n), subtype, markers)
+                self._scratch.checkout_export(
+                    handle, target, int(start), int(n), subtype, markers
+                )
             except (RuntimeError, OSError) as e:
                 # R-h8k: one exception type out of every engine-reaching call.
-                raise RuntimeError(f"could not export checkout {checkout_id}; {e}") from e
+                raise RuntimeError(
+                    f"could not export checkout {checkout_id}; {e}"
+                ) from e
         return target
 
-    def mint_trim(self, checkout_id: str) -> Optional[Checkout]:
+    def mint_trim(self, checkout_id: str) -> Checkout | None:
         """The clip's trim as a saved slice, or None when there is no
         trim or the clip's scratch write failed: a slice needs the file,
         while the RAM copy still exports on its own. Save and drag both
@@ -529,7 +640,6 @@ class CheckoutManager:
         self,
         checkout_id: str,
         target_path: Path | str,
-        fmt: CheckoutFormat = "WAV",
         trimmed: bool = True,
         subtype: CheckoutSubtype | None = None,
         mark_saved: bool = True,
@@ -538,23 +648,19 @@ class CheckoutManager:
         checkout the file came from: the slice a trimmed save mints, or
         the clip itself. A minted slice is already `saved` and the clip
         stays as it was; otherwise `mark_saved` flips the clip."""
-        fmt = fmt.upper()  # type: ignore[assignment]
-        if fmt not in self._VALID_FORMATS:
-            raise ValueError(f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}")
         co = self.get(checkout_id)
         start, n = co.trim_range() if trimmed else (0, co.n_frames)
         minted = self.mint_trim(checkout_id) if trimmed else None
         try:
-            self.export_range(checkout_id, target_path, start, n, subtype or _DEFAULT_SUBTYPE)
+            self.export_range(
+                checkout_id, target_path, start, n, subtype or _DEFAULT_SUBTYPE
+            )
         except BaseException:
             # An export that fails must not strand the slice (a `saved`
-            # manifest adoption would resurrect). Cleanup errors stay
-            # quiet so the export error is the one the caller sees.
+            # manifest adoption would resurrect). A cleanup error is only
+            # logged, so the export error is the one the caller sees.
             if minted is not None:
-                try:
-                    self.discard(minted.id)
-                except Exception:
-                    pass
+                best_effort(partial(self.discard, minted.id))
             raise
         if minted is not None:
             return minted

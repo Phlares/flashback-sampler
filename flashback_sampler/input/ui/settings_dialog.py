@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
@@ -27,6 +26,7 @@ from flashback_sampler.input.sources.global_hotkey import parse_hotkey
 @dataclass
 class _Row:
     action: Action
+    container: QWidget
     binding_label: QLabel
     rebind_btn: QPushButton
     clear_btn: QPushButton
@@ -38,17 +38,21 @@ class _RebindModal(QDialog):
         self.setWindowTitle(f"Rebind: {action_name}")
         self.setModal(True)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"Press a key or chord for '{action_name}' (Esc to cancel):"))
+        lay.addWidget(
+            QLabel(f"Press a key or chord for '{action_name}' (Esc to cancel):")
+        )
         self._edit = QKeySequenceEdit()
         lay.addWidget(self._edit)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
     def selected_code(self) -> str | None:
         seq = self._edit.keySequence()
-        text = seq.toString(QKeySequence.PortableText)
+        text = seq.toString(QKeySequence.SequenceFormat.PortableText)
         return text or None
 
 
@@ -109,7 +113,7 @@ class KeybindingsDialog(QDialog):
 
         # Dialog buttons
         buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -131,8 +135,11 @@ class KeybindingsDialog(QDialog):
         clear_btn.setFixedWidth(28)
         row.addWidget(rebind_btn)
         row.addWidget(clear_btn)
-        rebind_btn.clicked.connect(lambda _=False, aid=action.id, name=action.name:
-                                   self._open_rebind(aid, name))
+        rebind_btn.clicked.connect(
+            lambda _=False, aid=action.id, name=action.name: self._open_rebind(
+                aid, name
+            )
+        )
         clear_btn.clicked.connect(lambda _=False, aid=action.id: self._apply_clear(aid))
         row.addStretch(1)
 
@@ -140,10 +147,15 @@ class KeybindingsDialog(QDialog):
         container.setLayout(row)
         self._list_layout.addWidget(container)
 
-        self._rows.append(_Row(action=action,
-                               binding_label=binding_label,
-                               rebind_btn=rebind_btn,
-                               clear_btn=clear_btn))
+        self._rows.append(
+            _Row(
+                action=action,
+                container=container,
+                binding_label=binding_label,
+                rebind_btn=rebind_btn,
+                clear_btn=clear_btn,
+            )
+        )
 
     def _current_binding(self, action: Action) -> str | None:
         # Check edit buffer first: explicit override or explicit null
@@ -160,7 +172,7 @@ class KeybindingsDialog(QDialog):
 
     def _open_rebind(self, action_id: str, action_name: str) -> None:
         modal = _RebindModal(action_name, parent=self)
-        if modal.exec() == QDialog.Accepted:
+        if modal.exec() == QDialog.DialogCode.Accepted:
             code = modal.selected_code()
             if code:
                 self._attempt_rebind(action_id, code)
@@ -199,6 +211,7 @@ class KeybindingsDialog(QDialog):
         Returns True to proceed with the replacement, False to cancel.
         """
         from PySide6.QtWidgets import QMessageBox
+
         owner = next((a for a in all_actions() if a.id == current_owner_id), None)
         owner_name = owner.name if owner else current_owner_id
         reply = QMessageBox.question(
@@ -213,6 +226,7 @@ class KeybindingsDialog(QDialog):
         """Shown when a global action is rebound to a bare key. Separate method
         so tests can override without invoking QMessageBox."""
         from PySide6.QtWidgets import QMessageBox
+
         QMessageBox.warning(
             self,
             "Can't use as a global hotkey",
@@ -223,8 +237,11 @@ class KeybindingsDialog(QDialog):
 
     def _apply_rebind(self, action_id: str, code: str) -> None:
         # Evict any existing owner of this code and any previous override for this action
-        self._edit_buffer = {c: aid for c, aid in self._edit_buffer.items()
-                             if c != code and aid != action_id}
+        self._edit_buffer = {
+            c: aid
+            for c, aid in self._edit_buffer.items()
+            if c != code and aid != action_id
+        }
         # Assign code to the new action
         self._edit_buffer[code] = action_id
         self._refresh_labels()
@@ -232,7 +249,9 @@ class KeybindingsDialog(QDialog):
     def _apply_clear(self, action_id: str) -> None:
         a = next((x for x in all_actions() if x.id == action_id), None)
         # Drop any overrides mapping to this action
-        self._edit_buffer = {c: aid for c, aid in self._edit_buffer.items() if aid != action_id}
+        self._edit_buffer = {
+            c: aid for c, aid in self._edit_buffer.items() if aid != action_id
+        }
         # If the action has a default binding, record null to suppress it
         if a and a.default_binding:
             self._edit_buffer[a.default_binding] = None
@@ -245,12 +264,11 @@ class KeybindingsDialog(QDialog):
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
         for row in self._rows:
-            container = row.binding_label.parentWidget()
             if not needle:
-                container.setVisible(True)
+                row.container.setVisible(True)
                 continue
             hay = f"{row.action.name} {row.action.category} {row.action.id}".lower()
-            container.setVisible(needle in hay)
+            row.container.setVisible(needle in hay)
 
     def accept(self) -> None:
         # Commit the edit buffer through the table's single normalization path.

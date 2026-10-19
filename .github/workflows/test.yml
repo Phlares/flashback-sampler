@@ -1,10 +1,14 @@
 name: test
 
-# Two jobs: pytest on Windows (py3.12, the version release.yml ships;
-# it builds the DLL anyway) and the Zig unit tests on Ubuntu. Hard
-# timeouts so a hung test stops in minutes. Every pull request runs
-# both jobs: `main` and `dev` require them, and a skipped check blocks
-# the merge. Docs-only pushes skip it; nothing requires a check there.
+# Four jobs, all run through Phlares/workflows check.yml: pytest on
+# Windows (py3.12, the version release.yml ships; it builds the DLL
+# anyway), the Zig unit tests on Ubuntu, `lint`, which runs the hooks
+# in .pre-commit-config.yaml (ruff and zig fmt) on every file, and
+# `typecheck`, which runs pyright on Ubuntu. Hard timeouts so a hung test
+# stops in minutes. Every pull request runs all four jobs. `main` and
+# `dev` require all four checks (lint, pytest, typecheck, zig), and a
+# skipped check blocks the merge. Docs-only pushes skip the workflow;
+# nothing requires a check there.
 on:
   push:
     branches: [main, dev]
@@ -18,58 +22,62 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   pytest:
-    name: pytest (windows / py3.12)
-    runs-on: windows-latest
-    timeout-minutes: 6
-
-    env:
-      QT_QPA_PLATFORM: offscreen
-      PYTHONUTF8: "1"
+    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    with:
+      name: pytest
+      runs-on: windows-latest
+      python-version: "3.12"
+      zig-version: 0.16.0
+      timeout-minutes: 6
       # tests/conftest.py exits the session when the native library is
-      # missing. This variable is kept so a revert of that gate does not
-      # silently lose the CI check.
-      FLASHBACK_REQUIRE_NATIVE: "1"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            requirements.txt
-
-      - name: Install package + dev extras
-        run: pip install -e ".[dev]"
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - name: Build native core (ReleaseSafe)
-        run: zig build -Doptimize=ReleaseSafe
-        working-directory: core
-
-      - name: Run unit tests
-        run: pytest tests/unit -m "not audio_hw and not perf"
+      # missing. FLASHBACK_REQUIRE_NATIVE is kept so a revert of that gate
+      # does not silently lose the CI check.
+      env: |
+        QT_QPA_PLATFORM=offscreen
+        PYTHONUTF8=1
+        FLASHBACK_REQUIRE_NATIVE=1
+      install: pip install -e ".[dev]"
+      run: |
+        (cd core && zig build -Doptimize=ReleaseSafe)
+        pytest tests/unit -m "not audio_hw and not perf"
 
   zig:
-    name: zig (ubuntu)
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    defaults:
-      run:
-        working-directory: core
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - name: Format check
-        run: zig fmt --check build.zig src
-      - name: Unit tests (Debug — full safety checks)
-        run: zig build test
+    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    with:
+      name: zig
+      zig-version: 0.16.0
+      working-directory: core
+      timeout-minutes: 3
+      # zig fmt runs in the lint job.
+      run: zig build test
+
+  lint:
+    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    with:
+      name: lint
+      python-version: "3.12"
+      zig-version: 0.16.0
+      timeout-minutes: 5
+      # Hook versions live in .pre-commit-config.yaml. prek is pinned by hash
+      # in requirements-lint.txt (compiled from requirements-lint.in); Dependabot
+      # moves both files.
+      install: pip install --require-hashes -r requirements-lint.txt
+      run: prek run --all-files --show-diff-on-failure
+
+  typecheck:
+    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    with:
+      name: typecheck
+      python-version: "3.12"
+      timeout-minutes: 5
+      # pyright is pinned by hash in requirements-typecheck.txt (compiled from
+      # requirements-typecheck.in); Dependabot moves both files.
+      install: |
+        pip install --require-hashes -r requirements-typecheck.txt
+        pip install -e ".[dev]"
+      run: pyright

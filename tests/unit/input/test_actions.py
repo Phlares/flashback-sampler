@@ -1,10 +1,23 @@
-from flashback_sampler.input.core.actions import Action
+import pytest
+
+from flashback_sampler.input.core.actions import (
+    Action,
+    all_actions,
+    clear_registry,
+    get,
+    invoke,
+    register,
+)
 
 
 def test_action_construction_with_defaults():
     called = []
-    a = Action(id="transport.record", name="Record", category="Transport",
-               callable=lambda: called.append(1))
+    a = Action(
+        id="transport.record",
+        name="Record",
+        category="Transport",
+        callable=lambda: called.append(1),
+    )
     assert a.id == "transport.record"
     assert a.name == "Record"
     assert a.category == "Transport"
@@ -15,17 +28,16 @@ def test_action_construction_with_defaults():
 
 
 def test_action_with_default_binding_and_repeat_policy():
-    a = Action(id="transport.play", name="Play", category="Transport",
-               callable=lambda: None, default_binding="Space",
-               repeat_policy="ignore_repeat")
+    a = Action(
+        id="transport.play",
+        name="Play",
+        category="Transport",
+        callable=lambda: None,
+        default_binding="Space",
+        repeat_policy="ignore_repeat",
+    )
     assert a.default_binding == "Space"
     assert a.repeat_policy == "ignore_repeat"
-
-
-import pytest
-from flashback_sampler.input.core.actions import (
-    register, get, all_actions, clear_registry,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -68,13 +80,11 @@ def test_clear_registry_empties():
     assert all_actions() == []
 
 
-from flashback_sampler.input.core.actions import invoke
-
-
 def test_invoke_calls_callable():
     called = []
-    register(Action(id="t.x", name="X", category="T",
-                    callable=lambda: called.append(1)))
+    register(
+        Action(id="t.x", name="X", category="T", callable=lambda: called.append(1))
+    )
     invoke("t.x")
     assert called == [1]
 
@@ -85,9 +95,15 @@ def test_invoke_unknown_action_is_noop():
 
 def test_invoke_fire_policy_fires_on_repeat():
     called = []
-    register(Action(id="t.x", name="X", category="T",
-                    callable=lambda: called.append(1),
-                    repeat_policy="fire"))
+    register(
+        Action(
+            id="t.x",
+            name="X",
+            category="T",
+            callable=lambda: called.append(1),
+            repeat_policy="fire",
+        )
+    )
     invoke("t.x", is_repeat=False)
     invoke("t.x", is_repeat=True)
     invoke("t.x", is_repeat=True)
@@ -96,9 +112,15 @@ def test_invoke_fire_policy_fires_on_repeat():
 
 def test_invoke_ignore_repeat_policy_suppresses_repeats():
     called = []
-    register(Action(id="t.x", name="X", category="T",
-                    callable=lambda: called.append(1),
-                    repeat_policy="ignore_repeat"))
+    register(
+        Action(
+            id="t.x",
+            name="X",
+            category="T",
+            callable=lambda: called.append(1),
+            repeat_policy="ignore_repeat",
+        )
+    )
     invoke("t.x", is_repeat=False)
     invoke("t.x", is_repeat=True)
     invoke("t.x", is_repeat=True)

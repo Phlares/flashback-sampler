@@ -2,6 +2,7 @@
 WAVE_FORMAT_EXTENSIBLE headers. `struct` walks the chunks; numpy decodes
 the samples. This is the oracle for fb_wav_write, so it shares no code
 with wav.zig and never calls the engine."""
+
 from __future__ import annotations
 
 import struct
@@ -31,7 +32,7 @@ def read_wav(path) -> tuple[np.ndarray, WavInfo]:
     pos, fmt, data = 12, None, None
     while pos + 8 <= len(raw):
         cid, size = struct.unpack_from("<4sI", raw, pos)
-        body = raw[pos + 8:pos + 8 + size]
+        body = raw[pos + 8 : pos + 8 + size]
         if cid == b"fmt ":
             fmt = body
         elif cid == b"data":
@@ -39,7 +40,9 @@ def read_wav(path) -> tuple[np.ndarray, WavInfo]:
         pos += 8 + size + (size & 1)  # chunks are word-aligned
     if fmt is None or data is None:
         raise ValueError("missing fmt or data chunk")
-    tag, channels, rate, _byte_rate, _block_align, bits = struct.unpack_from("<HHIIHH", fmt, 0)
+    tag, channels, rate, _byte_rate, _block_align, bits = struct.unpack_from(
+        "<HHIIHH", fmt, 0
+    )
     if tag == _EXTENSIBLE:
         # cbSize(2) validBits(2) channelMask(4) precede the SubFormat GUID
         # at offset 24; its first two bytes carry the real format tag.
@@ -49,7 +52,9 @@ def read_wav(path) -> tuple[np.ndarray, WavInfo]:
         samples = np.frombuffer(data, dtype="<f4").astype(np.float32)
         subtype = "FLOAT"
     elif kind == "PCM" and bits == 16:
-        samples = np.frombuffer(data, dtype="<i2").astype(np.float32) / np.float32(32768.0)
+        samples = np.frombuffer(data, dtype="<i2").astype(np.float32) / np.float32(
+            32768.0
+        )
         subtype = "PCM_16"
     elif kind == "PCM" and bits == 24:
         b = np.frombuffer(data, dtype=np.uint8).reshape(-1, 3).astype(np.int32)

@@ -15,7 +15,7 @@ Spec (from the frontend-design skill pass):
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QPushButton
 
@@ -38,11 +38,11 @@ class TactileButton(QPushButton):
         super().__init__(text, parent)
         self._variant = variant
         self.setFlat(True)  # suppress Qt's default painting
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         # Buttons don't take keyboard focus — Space is reserved for
         # the Preview shortcut, and keyboard activation of arbitrary
         # buttons would be too easy a footgun.
-        self.setFocusPolicy(Qt.NoFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Size hints — kept compact; main window overrides where needed
         self.setMinimumHeight(44 if variant == "secondary" else 52)
         self.setMinimumWidth(120)
@@ -52,14 +52,14 @@ class TactileButton(QPushButton):
     def variant(self) -> str:
         return self._variant
 
-    def setVariant(self, variant: str) -> None:  # noqa: N802
+    def setVariant(self, variant: str) -> None:
         if variant != self._variant:
             self._variant = variant
             self.update()
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         w = self.width()
         h = self.height()
@@ -83,7 +83,7 @@ class TactileButton(QPushButton):
         else:
             fill = QColor(EREBUS["ridge"] if is_primary else EREBUS["plate"])
         p.setBrush(fill)
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(0, 0, w, h, radius, radius)
 
         # ── 1 px cream hairline along the top edge (milled lip) ─────
@@ -107,17 +107,15 @@ class TactileButton(QPushButton):
             else:
                 bar_color = QColor(EREBUS["ember"])
             p.setBrush(bar_color)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             # Round only the bottom corners of the bar to match the
             # button's rounded rectangle
             bar_h = 2
-            p.drawRoundedRect(
-                0, h - bar_h - 1, w, bar_h + 1, radius, radius
-            )
+            p.drawRoundedRect(0, h - bar_h - 1, w, bar_h + 1, radius, radius)
             # Paint over the top of the rounded bar so we only see the
             # bottom rounded corners (a flat top edge meeting the fill)
             p.setBrush(fill)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawRect(0, h - bar_h - 1 - radius, w, radius)
 
         # ── Label ────────────────────────────────────────────────────
@@ -130,8 +128,8 @@ class TactileButton(QPushButton):
                 font.setFamily(fam)
             font.setPointSize(9)
             font.setBold(False)
-            font.setCapitalization(QFont.AllUppercase)
-            font.setLetterSpacing(QFont.AbsoluteSpacing, 1.4)
+            font.setCapitalization(QFont.Capitalization.AllUppercase)
+            font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.4)
             p.setFont(font)
 
             if not is_enabled:
@@ -147,6 +145,6 @@ class TactileButton(QPushButton):
             inner = QRect(0, 0, w, h - 3)  # reserve 3 px for the tell bar
             if is_pressed:
                 inner.translate(0, 1)
-            p.drawText(inner, Qt.AlignCenter, label_text)
+            p.drawText(inner, Qt.AlignmentFlag.AlignCenter, label_text)
 
         p.end()

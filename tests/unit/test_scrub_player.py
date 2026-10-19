@@ -2,7 +2,6 @@
 fb_playback_* symbol is a Python stub that records calls and serves a
 scripted state. The fill logic lives in Zig (core/src/Playback.zig) and
 is tested there."""
-import ctypes as C
 
 import numpy as np
 import pytest
@@ -14,7 +13,8 @@ from flashback_sampler.core.scrub_player import NativeScrubPlayer
 class _FakePlaybackLib:
     def __init__(self):
         self.calls = []
-        self.state = (0, 0, 0, 0, 0)  # running, playing, cursor, clip_frames, mix_rate
+        # running, playing, cursor, clip_frames, mix_rate
+        self.state: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
         self.bind_status = 0
         self.play_status = 0
         self.err = b""
@@ -28,29 +28,42 @@ class _FakePlaybackLib:
                 return 0xF00D
             if name == "fb_playback_bind_checkout":
                 _h, _s, co, start, n = a
-                assert _h is not None, "fb_playback_bind_checkout called with a closed/None handle"
+                assert _h is not None, (
+                    "fb_playback_bind_checkout called with a closed/None handle"
+                )
                 self.bound_checkout = (co, start, n)
                 if self.bind_status == 0:
                     self.state = self.state[:3] + (n, self.state[4])
                 return self.bind_status
             if name == "fb_playback_bind":
                 _h, ptr, n, rate, ch = a
-                assert _h is not None, "fb_playback_bind called with a closed/None handle"
-                arr = np.ctypeslib.as_array(ptr, shape=(n * ch,)).copy() if n else np.zeros(0, np.float32)
+                assert _h is not None, (
+                    "fb_playback_bind called with a closed/None handle"
+                )
+                arr = (
+                    np.ctypeslib.as_array(ptr, shape=(n * ch,)).copy()
+                    if n
+                    else np.zeros(0, np.float32)
+                )
                 self.bound = (arr, n, rate, ch)
                 if self.bind_status == 0:
                     self.state = self.state[:3] + (n, self.state[4])
                 return self.bind_status
             if name == "fb_playback_play":
                 if self.play_status == 0:
-                    self.state = (1, 1) + self.state[2:]  # a real play() spawns and sets playing
+                    self.state = (1, 1) + self.state[
+                        2:
+                    ]  # a real play() spawns and sets playing
                 return self.play_status
             if name == "fb_playback_state":
                 st = a[1]._obj if hasattr(a[1], "_obj") else a[1]
-                st.running, st.playing, st.cursor, st.clip_frames, st.mix_rate = self.state
+                st.running, st.playing, st.cursor, st.clip_frames, st.mix_rate = (
+                    self.state
+                )
             if name == "fb_playback_last_error":
                 return self.err
             return None
+
         return _fn
 
 
@@ -75,7 +88,9 @@ def test_create_is_lazy_and_first_bind_passes_rate_channels_and_device(lib):
     assert len(_calls(lib, "fb_playback_create")) == 1  # created once, reused
 
 
-def test_construct_without_library_is_silent_and_the_first_native_call_raises(monkeypatch):
+def test_construct_without_library_is_silent_and_the_first_native_call_raises(
+    monkeypatch,
+):
     """AppState builds a player at startup before any clip exists, so
     construction must not touch the native library; only a call that
     needs the handle may raise."""
@@ -133,7 +148,10 @@ def test_stop_is_pause_then_seek_zero(lib):
     p = NativeScrubPlayer()
     p.play()  # materialize the handle; pause/seek are inert without one
     p.stop()
-    assert [(n, a[1:]) for n, a in lib.calls[-2:]] == [("fb_playback_pause", ()), ("fb_playback_seek", (0,))]
+    assert [(n, a[1:]) for n, a in lib.calls[-2:]] == [
+        ("fb_playback_pause", ()),
+        ("fb_playback_seek", (0,)),
+    ]
 
 
 def test_seek_samples_clamps_negative_to_zero_and_passes_through(lib):
@@ -197,7 +215,9 @@ def test_bind_after_close_is_inert_and_never_recreates_the_handle(lib):
     p = NativeScrubPlayer()
     p.play()  # materialize the handle
     p.close()
-    p.bind(np.zeros((4, 1), dtype=np.float32), 48_000)  # neither crashes nor reaches the fake
+    p.bind(
+        np.zeros((4, 1), dtype=np.float32), 48_000
+    )  # neither crashes nor reaches the fake
     assert not _calls(lib, "fb_playback_bind")
     # Lazy creation must not resurrect a closed player.
     assert len(_calls(lib, "fb_playback_create")) == 1

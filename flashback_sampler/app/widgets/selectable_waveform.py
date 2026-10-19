@@ -16,7 +16,7 @@ even as the live waveform scrolls).
 from __future__ import annotations
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.theme import EREBUS
@@ -24,7 +24,6 @@ from flashback_sampler.app.widgets.waveform_view import (
     WaveformView,
     _paint_selection_duration_label,
 )
-
 
 # How close (in widget pixels) the cursor must be to an existing
 # selection edge to grab it for dragging. 6 px is comfortable with a
@@ -68,7 +67,7 @@ class SelectableWaveform(WaveformView):
         self._dragging_edge: str | None = None  # "start" | "end" | None
         self._drag_out_origin: QPointF | None = None
         self._drag_out_mode: str | None = None  # "selection" | "full"
-        self._idle_cursor: Qt.CursorShape = Qt.CrossCursor
+        self._idle_cursor: Qt.CursorShape = Qt.CursorShape.CrossCursor
         self.setMouseTracking(True)
         self.setCursor(self._idle_cursor)
 
@@ -77,16 +76,13 @@ class SelectableWaveform(WaveformView):
     # ------------------------------------------------------------------
 
     def has_manual_selection(self) -> bool:
-        return (
-            self._manual_start is not None
-            and self._manual_end is not None
-            and self._manual_end > self._manual_start
-        )
+        return self.manual_selection() is not None
 
     def manual_selection(self) -> tuple[float, float] | None:
-        if not self.has_manual_selection():
+        start, end = self._manual_start, self._manual_end
+        if start is None or end is None or end <= start:
             return None
-        return (float(self._manual_start), float(self._manual_end))
+        return (start, end)
 
     def is_user_interacting(self) -> bool:
         """True while the user is actively dragging — either painting a
@@ -148,11 +144,12 @@ class SelectableWaveform(WaveformView):
         Return "start" or "end" if the widget x-coordinate is within
         EDGE_GRAB_PX of an existing selection edge, else None.
         """
-        if not self.has_manual_selection():
+        sel = self.manual_selection()
+        if sel is None:
             return None
         inner_x, inner_w = self._inner_bounds()
-        start_x = inner_x + float(self._manual_start) * inner_w
-        end_x = inner_x + float(self._manual_end) * inner_w
+        start_x = inner_x + sel[0] * inner_w
+        end_x = inner_x + sel[1] * inner_w
         # If the two edges are very close, prefer whichever is nearest
         d_start = abs(x - start_x)
         d_end = abs(x - end_x)
@@ -163,21 +160,20 @@ class SelectableWaveform(WaveformView):
         return None
 
     def _frac_inside_selection(self, frac: float) -> bool:
-        if not self.has_manual_selection():
-            return False
-        return float(self._manual_start) < frac < float(self._manual_end)
+        sel = self.manual_selection()
+        return sel is not None and sel[0] < frac < sel[1]
 
     def _refresh_hover_cursor(self, x: float) -> None:
         """Update the mouse cursor based on whether we're over an edge."""
         if self._edge_at(x) is not None:
-            self.setCursor(Qt.SizeHorCursor)
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.setCursor(self._idle_cursor)
 
-    def mousePressEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton:
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
             # Priority 1: Ctrl+press arms a full-clip drag-out
-            if ev.modifiers() & Qt.ControlModifier:
+            if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self._drag_out_origin = ev.position()
                 self._drag_out_mode = "full"
                 ev.accept()
@@ -188,7 +184,7 @@ class SelectableWaveform(WaveformView):
                 self._dragging_edge = edge
                 self._is_dragging = False
                 self._drag_anchor = None
-                self.setCursor(Qt.SizeHorCursor)
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
                 ev.accept()
                 return
             # Priority 3: press inside the selection arms a drag-out
@@ -202,7 +198,7 @@ class SelectableWaveform(WaveformView):
             self._is_dragging = True
             ev.accept()
             return
-        if ev.button() == Qt.RightButton:
+        if ev.button() == Qt.MouseButton.RightButton:
             # Context menu: let the host decide what to show based on
             # whether a manual selection currently exists.
             self.contextMenuRequested.emit(ev.globalPosition())
@@ -210,7 +206,7 @@ class SelectableWaveform(WaveformView):
             return
         super().mousePressEvent(ev)
 
-    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+    def mouseMoveEvent(self, ev) -> None:
         x = ev.position().x()
 
         # Armed drag-out: fire once past the OS drag threshold. The host
@@ -223,27 +219,24 @@ class SelectableWaveform(WaveformView):
                 self._drag_out_mode = None
                 if mode == "full":
                     self.dragFullClipRequested.emit()
-                elif self.has_manual_selection():
-                    self.dragOutRequested.emit(
-                        float(self._manual_start), float(self._manual_end)
-                    )
+                elif (sel := self.manual_selection()) is not None:
+                    self.dragOutRequested.emit(*sel)
             ev.accept()
             return
 
         # Edge-drag takes priority over new-selection drag
-        if self._dragging_edge is not None and self.has_manual_selection():
+        if (
+            self._dragging_edge is not None
+            and (sel := self.manual_selection()) is not None
+        ):
             new_frac = self._pos_frac(x)
             # Leave at least one widget pixel between the two edges
             inner_x, inner_w = self._inner_bounds()
             epsilon = 1.0 / max(1, inner_w)
             if self._dragging_edge == "start":
-                self._manual_start = max(
-                    0.0, min(float(self._manual_end) - epsilon, new_frac)
-                )
+                self._manual_start = max(0.0, min(sel[1] - epsilon, new_frac))
             else:  # "end"
-                self._manual_end = min(
-                    1.0, max(float(self._manual_start) + epsilon, new_frac)
-                )
+                self._manual_end = min(1.0, max(sel[0] + epsilon, new_frac))
             self.update()
             ev.accept()
             return
@@ -259,13 +252,13 @@ class SelectableWaveform(WaveformView):
             return
 
         # Hover: update the cursor based on proximity to an edge
-        if ev.buttons() == Qt.NoButton:
+        if ev.buttons() == Qt.MouseButton.NoButton:
             self._refresh_hover_cursor(x)
 
         super().mouseMoveEvent(ev)
 
-    def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton:
+    def mouseReleaseEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
             # An armed drag-out that never crossed the threshold is a
             # plain click — disarm and leave the selection untouched.
             if self._drag_out_origin is not None:
@@ -277,20 +270,16 @@ class SelectableWaveform(WaveformView):
             if self._dragging_edge is not None:
                 self._dragging_edge = None
                 self._refresh_hover_cursor(ev.position().x())
-                if self.has_manual_selection():
-                    self.manualSelectionChanged.emit(
-                        float(self._manual_start), float(self._manual_end)
-                    )
+                if (sel := self.manual_selection()) is not None:
+                    self.manualSelectionChanged.emit(*sel)
                 ev.accept()
                 return
             # Finish a new-selection drag
             if self._is_dragging:
                 self._is_dragging = False
                 self._drag_anchor = None
-                if self.has_manual_selection():
-                    self.manualSelectionChanged.emit(
-                        float(self._manual_start), float(self._manual_end)
-                    )
+                if (sel := self.manual_selection()) is not None:
+                    self.manualSelectionChanged.emit(*sel)
                 else:
                     self._manual_start = None
                     self._manual_end = None
@@ -300,13 +289,13 @@ class SelectableWaveform(WaveformView):
                 return
         super().mouseReleaseEvent(ev)
 
-    def leaveEvent(self, ev) -> None:  # noqa: N802
+    def leaveEvent(self, ev) -> None:
         # Reset to the idle cursor when the mouse leaves the widget
         self.setCursor(self._idle_cursor)
         super().leaveEvent(ev)
 
-    def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.LeftButton:
+    def mouseDoubleClickEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
             self.clear_manual_selection()
             ev.accept()
             return
@@ -318,9 +307,10 @@ class SelectableWaveform(WaveformView):
     # so the user can tell them apart at a glance.
     # ------------------------------------------------------------------
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         super().paintEvent(ev)
-        if not self.has_manual_selection():
+        sel = self.manual_selection()
+        if sel is None:
             return
 
         # Re-derive the inner content rect the same way WaveformView does
@@ -336,9 +326,8 @@ class SelectableWaveform(WaveformView):
             return
 
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        s = float(self._manual_start)
-        e = float(self._manual_end)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        s, e = sel
         x1 = inner_x + s * inner_w
         x2 = inner_x + e * inner_w
 

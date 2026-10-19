@@ -14,17 +14,15 @@ RegisterHotKey round-trip is testable on any platform.
 from __future__ import annotations
 
 import ctypes
-from typing import Callable
+from collections.abc import Callable
+from ctypes import wintypes
+from functools import partial
 
 from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtWidgets import QApplication
 
+from flashback_sampler.core.best_effort import best_effort
 from flashback_sampler.input.core import invoke
-
-try:  # wintypes is import-safe everywhere in modern Python; guard just in case
-    from ctypes import wintypes as _wintypes
-except Exception:  # pragma: no cover - non-Windows fallback
-    _wintypes = None
 
 # Win32 modifier flags (winuser.h) + WM_HOTKEY.
 MOD_ALT = 0x0001
@@ -35,10 +33,12 @@ MOD_NOREPEAT = 0x4000  # one fire per physical press, no auto-repeat storm
 WM_HOTKEY = 0x0312
 
 _MODIFIERS = {
-    "Ctrl": MOD_CONTROL, "Control": MOD_CONTROL,
+    "Ctrl": MOD_CONTROL,
+    "Control": MOD_CONTROL,
     "Alt": MOD_ALT,
     "Shift": MOD_SHIFT,
-    "Meta": MOD_WIN, "Win": MOD_WIN,
+    "Meta": MOD_WIN,
+    "Win": MOD_WIN,
 }
 
 
@@ -108,16 +108,19 @@ def _win_register(hwnd: int, hotkey_id: int, mods: int, vk: int) -> bool:
     # 64-bit handle gets truncated to 32 bits and RegisterHotKey targets nothing.
     user32 = ctypes.windll.user32
     user32.RegisterHotKey.argtypes = [
-        _wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_uint,
     ]
-    user32.RegisterHotKey.restype = _wintypes.BOOL
-    return bool(user32.RegisterHotKey(_wintypes.HWND(hwnd), hotkey_id, mods, vk))
+    user32.RegisterHotKey.restype = wintypes.BOOL
+    return bool(user32.RegisterHotKey(wintypes.HWND(hwnd), hotkey_id, mods, vk))
 
 
 def _win_unregister(hwnd: int, hotkey_id: int) -> None:
     user32 = ctypes.windll.user32
-    user32.UnregisterHotKey.argtypes = [_wintypes.HWND, ctypes.c_int]
-    user32.UnregisterHotKey(_wintypes.HWND(hwnd), hotkey_id)
+    user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.UnregisterHotKey(wintypes.HWND(hwnd), hotkey_id)
 
 
 class GlobalHotkeySource(QAbstractNativeEventFilter):
@@ -182,16 +185,16 @@ class GlobalHotkeySource(QAbstractNativeEventFilter):
     # (dispatcher_MSG is kept too, harmlessly, for the NULL-hwnd path).
     _MSG_TYPES = (b"windows_generic_MSG", b"windows_dispatcher_MSG")
 
-    def nativeEventFilter(self, event_type, message):  # noqa: N802
+    def nativeEventFilter(self, event_type, message):
         # Runs for every native message — keep it allocation-light and early-out.
         # NOTE: do NOT guard on `not message` — PySide6 hands us a sip.voidptr
         # that is falsy even when it wraps a valid non-null pointer, so that
         # check would drop every event. A bad/null pointer is caught by the
         # from_address try/except below instead.
-        if _wintypes is None or event_type not in self._MSG_TYPES:
+        if event_type not in self._MSG_TYPES:
             return False, 0
         try:
-            msg = _wintypes.MSG.from_address(int(message))
+            msg = wintypes.MSG.from_address(int(message))
         except Exception:
             return False, 0
         # _dispatch/invoke run outside the try so a real handler bug isn't swallowed.
@@ -201,10 +204,7 @@ class GlobalHotkeySource(QAbstractNativeEventFilter):
 
     def close(self) -> None:
         for hotkey_id in list(self._registered):
-            try:
-                self._unregister_fn(self._hwnd, hotkey_id)
-            except Exception:
-                pass
+            best_effort(partial(self._unregister_fn, self._hwnd, hotkey_id))
         self._registered.clear()
         app = QApplication.instance()
         if app is not None:

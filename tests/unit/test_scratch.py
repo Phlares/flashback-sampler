@@ -1,5 +1,6 @@
 """NativeScratch + checkout handles over the real library: create from a
 ring, background write, adoption, slice, export, peak bins, pin/evict."""
+
 from __future__ import annotations
 
 import time
@@ -45,7 +46,12 @@ def test_create_writes_the_span_to_disk_and_reports_written(ring, scratch, tmp_p
     p = tmp_path / "a.wav"
     h = scratch.checkout_create(ring, 100, 110, p)
     info = scratch.checkout_info(h)
-    assert (info.rate, info.channels, info.n_frames, info.start_frame) == (1000, 2, 10, 0)
+    assert (info.rate, info.channels, info.n_frames, info.start_frame) == (
+        1000,
+        2,
+        10,
+        0,
+    )
     assert info.resident_bytes == 10 * 2 * 4
     _wait_state(scratch, h, "written")
     assert p.exists() and not p.with_suffix(".wav.part").exists()
@@ -62,7 +68,9 @@ def test_create_rejects_a_lapped_or_inverted_span(ring, scratch, tmp_path):
         scratch.checkout_create(ring, 10, 10, tmp_path / "y.wav")
 
 
-def test_budget_zero_evicts_after_write_and_peak_bins_still_work(ring, scratch, tmp_path):
+def test_budget_zero_evicts_after_write_and_peak_bins_still_work(
+    ring, scratch, tmp_path
+):
     scratch.set_budget(0)
     h = scratch.checkout_create(ring, 0, 1000, tmp_path / "b.wav")
     before = scratch.checkout_peak_bins(h, 10)
@@ -138,7 +146,9 @@ def test_export_from_file_agrees_across_two_calls(ring, scratch, tmp_path):
     _wait_state(scratch, h, "written")
     scratch.set_budget(0)
     scratch.checkout_pin(h, False)
-    assert scratch.checkout_info(h).resident_bytes == 0  # both exports below hit the file branch
+    assert (
+        scratch.checkout_info(h).resident_bytes == 0
+    )  # both exports below hit the file branch
     out_a = tmp_path / "a.wav"
     out_b = tmp_path / "b.wav"
     scratch.checkout_export(h, out_a, 100, 50, "PCM_16")
@@ -154,6 +164,7 @@ def test_bind_checkout_plays_the_range(ring, scratch, tmp_path):
     # The real library binds; a fake player would not exercise Zig. Use
     # the real player only for bind (no device open happens at bind).
     from flashback_sampler.core.scrub_player import NativeScrubPlayer
+
     h = scratch.checkout_create(ring, 0, 100, tmp_path / "g.wav")
     player = NativeScrubPlayer(1000, 2)
     try:
@@ -174,7 +185,9 @@ def test_checkout_peak_bins_passes_the_real_out_len(ring, scratch, tmp_path):
     h = scratch.checkout_create(ring, 0, 100, tmp_path / "h.wav")
     channels = int(scratch.checkout_info(h).channels)
     n_bins = 5
-    out = np.zeros((n_bins, channels, 2), dtype=np.float32)  # the shape checkout_peak_bins documents building
+    out = np.zeros(
+        (n_bins, channels, 2), dtype=np.float32
+    )  # the shape checkout_peak_bins documents building
     lib = scratch._lib
     orig = lib.fb_checkout_peak_bins
     calls = []
@@ -188,3 +201,15 @@ def test_checkout_peak_bins_passes_the_real_out_len(ring, scratch, tmp_path):
     assert len(calls) == 1
     assert calls[0][-1] == out.size // 2  # the buffer's own FbPeakBin count
     scratch.checkout_destroy(h)
+
+
+def test_closed_scratch_reports_zero_resident_bytes():
+    # #81: the tray poll reads resident_bytes after AppState.shutdown()
+    # closed the handle. A closed scratch must answer 0, not call into
+    # the library with NULL.
+    s = NativeScratch(budget_bytes=1 << 20)
+    s.start()
+    s.close()
+    assert s.resident_bytes == 0
+    s.set_budget(1)  # no-op on a closed handle
+    s.close()  # idempotent

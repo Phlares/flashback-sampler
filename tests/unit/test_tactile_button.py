@@ -6,16 +6,7 @@ paintEvent correctness is verified by manual QA on Windows.
 
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication
-
 from flashback_sampler.app.widgets.tactile_button import TactileButton
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_default_variant_is_secondary(qapp):

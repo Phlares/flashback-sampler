@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from flashback_sampler.core.source_status import (
     Severity,
     SourceSnapshot,
@@ -11,8 +13,14 @@ from flashback_sampler.core.source_status import (
 
 
 def snap(**kw):
-    base = dict(capturing=True, peak=0.2, silent_seconds=0.0, buffer_fill=0.0,
-                xrun_rate=0.0, error=None)
+    base: dict[str, Any] = dict(
+        capturing=True,
+        peak=0.2,
+        silent_seconds=0.0,
+        buffer_fill=0.0,
+        xrun_rate=0.0,
+        error=None,
+    )
     base.update(kw)
     return SourceSnapshot(**base)
 
@@ -73,8 +81,8 @@ def test_healthy_signal_is_ok():
 
 
 def test_worst_returns_highest_severity():
-    a = evaluate(snap(peak=0.2))                 # OK
-    b = evaluate(snap(peak=0.006))               # INFO
+    a = evaluate(snap(peak=0.2))  # OK
+    b = evaluate(snap(peak=0.006))  # INFO
     c = evaluate(snap(peak=0.0, silent_seconds=9))  # WARN
     assert worst([a, b, c]).severity is Severity.WARN
     assert worst([a, b]).severity is Severity.INFO

@@ -20,13 +20,20 @@ from flashback_sampler.core.native_capture import NativeCaptureSource, NativeMix
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("seconds", nargs="?", type=int, default=300)
-p.add_argument("--mixed", action="store_true", help="2-source NativeMixedSource: default loopback + default mic")
+p.add_argument(
+    "--mixed",
+    action="store_true",
+    help="2-source NativeMixedSource: default loopback + default mic",
+)
 args = p.parse_args()
 SECONDS = args.seconds
 
 buf = NativeAudioCircularBuffer(duration_seconds=900.0, sample_rate=48_000, channels=2)
 if args.mixed:
-    specs = [dict(kind="loopback", device_id="", pid=0), dict(kind="input", device_id="", pid=0)]
+    specs = [
+        dict(kind="loopback", device_id="", pid=0),
+        dict(kind="input", device_id="", pid=0),
+    ]
     cap = NativeMixedSource(buf, specs=specs, sample_rate=48_000, channels=2)
     engine = "NativeMixedSource(2)"
 else:
@@ -62,11 +69,15 @@ print(f"\n=== {engine} ===")
 print(f"elapsed            : {elapsed:.1f}s")
 print(f"frames written     : {buf.total_written}")
 print(f"frames expected    : ~{expected}")
-print(f"shortfall          : {expected - buf.total_written} frames "
-      f"({(expected - buf.total_written) / 48_000:.2f}s)")
+print(
+    f"shortfall          : {expected - buf.total_written} frames "
+    f"({(expected - buf.total_written) / 48_000:.2f}s)"
+)
 print(f"xruns              : {cap.xrun_count()}")
 print(f"discontinuities    : {cap.xrun_count()}")
-print(f"blocks with signal : {loud}/{len(peaks)}  "
-      f"<-- must be high, or the run was silent and proves nothing")
+print(
+    f"blocks with signal : {loud}/{len(peaks)}  "
+    f"<-- must be high, or the run was silent and proves nothing"
+)
 cap.close()
 buf.close()

@@ -6,7 +6,7 @@ so there's no OK/Apply step — Close just dismisses.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -226,6 +226,6 @@ class PreferencesDialog(QDialog):
         root.addWidget(self.footprint_hint)
 
         root.addStretch(1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)

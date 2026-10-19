@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
+from .best_effort import best_effort
 from .capture_source import CaptureSource
 from .checkout import CheckoutManager
 from .quality_presets import (
@@ -64,7 +64,7 @@ class CaptureSlot:
     quality_preset: str  # name of the QualityPreset used (for display / presets)
     buffer: NativeAudioCircularBuffer
     checkout_manager: CheckoutManager
-    capture_source: Optional[CaptureSource] = None
+    capture_source: CaptureSource | None = None
     # Per-slot capture routing. `capture_specs` is the canonical list:
     # empty means follow AppState's global spec; one entry means a
     # standard single-source route; two-or-more entries are passed to
@@ -83,7 +83,7 @@ class CaptureSlot:
     # slot. Restored when the user switches back so each source
     # remembers its own "which clip was I looking at" state. Cleared
     # when the referenced checkout is discarded or saved out.
-    focused_checkout_id: Optional[str] = None
+    focused_checkout_id: str | None = None
 
     # ------------------------------------------------------------------
     # Backwards-compatible single-spec access
@@ -116,7 +116,7 @@ class CaptureSlot:
         *,
         scratch: NativeScratch,
         scratch_dir,
-    ) -> "CaptureSlot":
+    ) -> CaptureSlot:
         """
         Build a new slot from a QualityPreset. The ring buffer and
         checkout manager are constructed immediately; the capture
@@ -158,47 +158,30 @@ class CaptureSlot:
         to begin writing frames.
         """
         if self.capture_source is not None and self.capture_source is not source:
-            try:
-                self.capture_source.stop()
-            except Exception:  # pragma: no cover
-                pass
+            best_effort(self.capture_source.stop)
         self.capture_source = source
 
     def start_capture(self) -> None:
         if self.capture_source is None:
-            raise RuntimeError(
-                f"CaptureSlot {self.name!r} has no capture source bound"
-            )
+            raise RuntimeError(f"CaptureSlot {self.name!r} has no capture source bound")
         self.capture_source.start()
 
     def stop_capture(self) -> None:
         if self.capture_source is not None:
-            try:
-                self.capture_source.stop()
-            except Exception:  # pragma: no cover
-                pass
+            self.capture_source.stop()
 
     def is_capturing(self) -> bool:
-        return (
-            self.capture_source is not None
-            and self.capture_source.is_running()
-        )
+        return self.capture_source is not None and self.capture_source.is_running()
 
     def xrun_count(self) -> int:
         if self.capture_source is None:
             return 0
         return self.capture_source.xrun_count()
 
-    def last_error(self) -> Optional[str]:
+    def last_error(self) -> str | None:
         if self.capture_source is None:
             return None
-        fn = getattr(self.capture_source, "last_error", None)
-        if fn is None:
-            return None
-        try:
-            return fn()
-        except Exception:  # pragma: no cover
-            return None
+        return self.capture_source.last_error()
 
     # ------------------------------------------------------------------
     # Queries
@@ -209,14 +192,10 @@ class CaptureSlot:
         RAM held by THIS slot's ring buffer (excluding checkouts — the
         scratch cache accounts for those).
         """
-        return compute_ram_bytes(
-            self.sample_rate, self.channels, self.buffer_seconds
-        )
+        return compute_ram_bytes(self.sample_rate, self.channels, self.buffer_seconds)
 
     def ram_mb(self) -> float:
-        return compute_ram_mb(
-            self.sample_rate, self.channels, self.buffer_seconds
-        )
+        return compute_ram_mb(self.sample_rate, self.channels, self.buffer_seconds)
 
     def buffered_seconds(self) -> float:
         return self.buffer.buffered_seconds

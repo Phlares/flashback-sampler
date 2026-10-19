@@ -1,19 +1,10 @@
 """Tests for TurntableWidget."""
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
-from PySide6.QtCore import QPointF, Qt, QEvent
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
 
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_buffer_turntable_instantiates(qapp):
@@ -69,7 +60,7 @@ def test_needle_head_centered_below_selected_rim_header_buffer(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(300, 300)
     tt.select_track(1)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     header_cx, header_cy = g.rim_header_center("buffer", 1)
     needle = g.needle_head_rect("buffer", 1)
     # Needle centered on header's x
@@ -82,7 +73,7 @@ def test_needle_head_centered_below_selected_rim_header_clip(qapp):
     tt = TurntableWidget(side="clip")
     tt.resize(300, 300)
     tt.select_track(2)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     header_cx, header_cy = g.rim_header_center("clip", 2)
     needle = g.needle_head_rect("clip", 2)
     assert abs(needle.center().x() - header_cx) < 0.5
@@ -92,17 +83,17 @@ def test_needle_head_centered_below_selected_rim_header_clip(qapp):
 def test_arm_target_is_bottom_inner_corner_buffer(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(400, 300)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     x, y = g.arm_target("buffer", 400.0, 300.0)
     # Bottom-right-ish (buffer arm points right-inward toward OUT→ column)
-    assert abs(x - 398) < 5    # near right edge
-    assert abs(y - 298) < 5    # near bottom edge
+    assert abs(x - 398) < 5  # near right edge
+    assert abs(y - 298) < 5  # near bottom edge
 
 
 def test_arm_target_is_bottom_inner_corner_clip(qapp):
     tt = TurntableWidget(side="clip")
     tt.resize(400, 300)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     x, y = g.arm_target("clip", 400.0, 300.0)
     # Bottom-left-ish (clip arm points left-inward toward OUT→ column)
     assert abs(x - 2) < 5
@@ -149,7 +140,9 @@ def test_set_track_waveform_clamps_fill_fraction(qapp):
 def test_paint_with_partial_fill_no_exceptions(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(300, 300)
-    tt.set_track_waveform(0, np.array([0.5, 0.7, 0.3], dtype=np.float32), fill_fraction=0.25)
+    tt.set_track_waveform(
+        0, np.array([0.5, 0.7, 0.3], dtype=np.float32), fill_fraction=0.25
+    )
     tt.repaint()
 
 

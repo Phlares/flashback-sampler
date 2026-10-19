@@ -4,14 +4,15 @@ Wireframe phase: empty concentric rings, colored track headers with status
 lights, center spindle with colored selector chips, needle head below the
 selected rim header, and an arm line to the bottom-inner corner of the widget.
 """
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPen, QMouseEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from flashback_sampler.app.theme import EREBUS
@@ -29,7 +30,7 @@ class TurntableGeometry:
     spindle_r: float
     ring_gap: float
     ring_width: float
-    size: float         # min(widget_w, widget_h)
+    size: float  # min(widget_w, widget_h)
 
     def ring_radius(self, i: int) -> float:
         return self.spindle_r + self.ring_gap * (i + 1) + self.ring_width * (i + 0.5)
@@ -62,7 +63,9 @@ class TurntableGeometry:
         y = header_cy + header_h / 2 + 2
         return QRectF(x, y, header_w, 4)
 
-    def arm_target(self, side: str, widget_w: float, widget_h: float) -> tuple[float, float]:
+    def arm_target(
+        self, side: str, widget_w: float, widget_h: float
+    ) -> tuple[float, float]:
         """Return the arm destination within the widget (bottom-inner corner)."""
         if side == "buffer":
             return (widget_w - 2, widget_h - 2)
@@ -79,7 +82,7 @@ class TurntableWidget(QWidget):
         self._track_count = 3
         self._selected_track = 0
         self._track_statuses: list[str] = ["armed", "armed", "paused"]
-        self._track_waveforms: dict[int, tuple["np.ndarray", float]] = {}
+        self._track_waveforms: dict[int, tuple[np.ndarray, float]] = {}
         self._track_selections: dict[int, tuple[float, float, str]] = {}
         self.setMinimumSize(200, 200)
 
@@ -123,25 +126,36 @@ class TurntableWidget(QWidget):
         return -1 if self._side == "buffer" else +1
 
     def set_track_waveform(
-        self, track_idx: int, samples: "np.ndarray", fill_fraction: float = 1.0
+        self, track_idx: int, samples: np.ndarray, fill_fraction: float = 1.0
     ) -> None:
         """Store normalized amplitudes [0, 1] to plot as perpendicular bars
         along the track's ring arc. fill_fraction in [0, 1] = what portion
         of the ring (starting at play angle, sweeping clockwise) is filled.
         The remainder of the ring shows only the clean ring outline."""
         import numpy as np
+
         arr = np.asarray(samples, dtype=np.float32)
         ff = max(0.0, min(1.0, float(fill_fraction)))
         self._track_waveforms[track_idx] = (arr, ff)
         self.update()
 
-    def set_track_selection(self, track_idx: int, start_frac: float | None, end_frac: float | None, color: str) -> None:
+    def set_track_selection(
+        self,
+        track_idx: int,
+        start_frac: float | None,
+        end_frac: float | None,
+        color: str,
+    ) -> None:
         """Store or clear a selection range on a track's ring.
         Passing None for either bound clears the selection for that track."""
         if start_frac is None or end_frac is None or end_frac <= start_frac:
             self._track_selections.pop(track_idx, None)
         else:
-            self._track_selections[track_idx] = (float(start_frac), float(end_frac), color)
+            self._track_selections[track_idx] = (
+                float(start_frac),
+                float(end_frac),
+                color,
+            )
         self.update()
 
     def _track_colors(self) -> list[str]:
@@ -162,18 +176,22 @@ class TurntableWidget(QWidget):
         ring_width = track_area / max(self._track_count, 1)
 
         return TurntableGeometry(
-            cx=cx, cy=cy, disc_r=disc_r, spindle_r=spindle_r,
-            ring_gap=ring_gap, ring_width=ring_width,
+            cx=cx,
+            cy=cy,
+            disc_r=disc_r,
+            spindle_r=spindle_r,
+            ring_gap=ring_gap,
+            ring_width=ring_width,
             size=size,
         )
 
-    def geometry(self) -> TurntableGeometry:
+    def turntable_geometry(self) -> TurntableGeometry:
         """Public accessor for layout geometry — used by tests."""
         return self._compute_geometry()
 
     def paintEvent(self, ev) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         g = self._compute_geometry()
         colors = self._track_colors()
@@ -193,7 +211,7 @@ class TurntableWidget(QWidget):
             ring_outline_color.setAlpha(180)
             ring_pen_w = max(g.ring_width * 0.5, 2)
             p.setPen(QPen(ring_outline_color, ring_pen_w))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(QPointF(g.cx, g.cy), r, r)
 
             # Waveform bars carry their own colour and opacity — no
@@ -209,7 +227,7 @@ class TurntableWidget(QWidget):
             bar_color = QColor(colors[i])
             bar_color.setAlpha(220)
             bar_pen = QPen(bar_color, 1)
-            bar_pen.setCapStyle(Qt.FlatCap)
+            bar_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(bar_pen)
             arc_span_rad = fill_frac * 2 * math.pi
             play_angle_rad = math.radians(self.header_angle_deg())
@@ -244,7 +262,7 @@ class TurntableWidget(QWidget):
             edge_color.setAlpha(200)
             edge_pen = QPen(edge_color, 1)
             p.setPen(edge_pen)
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(QPointF(g.cx, g.cy), r_sel - band_half, r_sel - band_half)
             p.drawEllipse(QPointF(g.cx, g.cy), r_sel + band_half, r_sel + band_half)
 
@@ -272,26 +290,32 @@ class TurntableWidget(QWidget):
             # (start_f) and let the span carry us forward to end_f.
             # A positive span sweeps CCW in Qt's convention; the sign
             # falls out from end_f − start_f after the dir_sign flip.
-            start_angle = play_angle_deg + dir_sign * (1.0 - start_f) * fill_frac * 360.0
+            start_angle = (
+                play_angle_deg + dir_sign * (1.0 - start_f) * fill_frac * 360.0
+            )
             span = -dir_sign * (end_f - start_f) * fill_frac * 360.0
             band_w = max(g.ring_width * 0.8, 3)
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
 
             body = QColor(color_hex)
             body.setAlphaF(0.25)
             body_pen = QPen(body, band_w)
-            body_pen.setCapStyle(Qt.FlatCap)
+            body_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(body_pen)
             rect_body = QRectF(g.cx - r, g.cy - r, 2 * r, 2 * r)
             p.drawArc(rect_body, int(start_angle * 16), int(span * 16))
 
             edge_pen = QPen(QColor(color_hex), 1)
-            edge_pen.setCapStyle(Qt.FlatCap)
+            edge_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(edge_pen)
             r_outer = r + band_w / 2
             r_inner = r - band_w / 2
-            rect_outer = QRectF(g.cx - r_outer, g.cy - r_outer, 2 * r_outer, 2 * r_outer)
-            rect_inner = QRectF(g.cx - r_inner, g.cy - r_inner, 2 * r_inner, 2 * r_inner)
+            rect_outer = QRectF(
+                g.cx - r_outer, g.cy - r_outer, 2 * r_outer, 2 * r_outer
+            )
+            rect_inner = QRectF(
+                g.cx - r_inner, g.cy - r_inner, 2 * r_inner, 2 * r_inner
+            )
             p.drawArc(rect_outer, int(start_angle * 16), int(span * 16))
             p.drawArc(rect_inner, int(start_angle * 16), int(span * 16))
 
@@ -305,10 +329,12 @@ class TurntableWidget(QWidget):
             hy = g.cy - r * math.sin(header_angle_rad)
             rect = QRectF(hx - header_w / 2, hy - header_h / 2, header_w, header_h)
             p.setBrush(QColor(colors[i]))
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawRect(rect)
             # Status indicator light (small circle on the header)
-            status = self._track_statuses[i] if i < len(self._track_statuses) else "inactive"
+            status = (
+                self._track_statuses[i] if i < len(self._track_statuses) else "inactive"
+            )
             indicator_r = max(3, header_h * 0.2)
             p.setBrush(QColor(STATUS_COLORS.get(status, "#B3ACAC")))
             p.drawEllipse(QPointF(hx, hy), indicator_r, indicator_r)
@@ -327,19 +353,21 @@ class TurntableWidget(QWidget):
             else:
                 color.setAlpha(120)
             p.setBrush(color)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QPointF(chip_x, chip_y), g.spindle_chip_r, g.spindle_chip_r)
 
         # ── Needle head (directly below selected rim header) ────────────
         needle_rect = g.needle_head_rect(self._side, self._selected_track)
         p.setBrush(QColor(EREBUS["cream"]))
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.drawRect(needle_rect)
 
         # ── Arm line from needle head to bottom-inner corner ────────────
         arm_start_x = needle_rect.center().x()
         arm_start_y = needle_rect.bottom()
-        arm_end_x, arm_end_y = g.arm_target(self._side, float(self.width()), float(self.height()))
+        arm_end_x, arm_end_y = g.arm_target(
+            self._side, float(self.width()), float(self.height())
+        )
         p.setPen(QPen(QColor(EREBUS["cream"]), 2))
         p.drawLine(QPointF(arm_start_x, arm_start_y), QPointF(arm_end_x, arm_end_y))
 

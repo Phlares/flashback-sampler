@@ -1,11 +1,11 @@
 from flashback_sampler.input.core.actions import (
     Action,
     RepeatPolicy,
-    register,
-    invoke,
-    get,
     all_actions,
     clear_registry,
+    get,
+    invoke,
+    register,
 )
 from flashback_sampler.input.core.bindings import BindingTable, default_storage_path
 from flashback_sampler.input.core.events import EventKind, InputEvent

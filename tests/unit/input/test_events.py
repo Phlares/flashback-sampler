@@ -1,3 +1,7 @@
+import dataclasses
+
+import pytest
+
 from flashback_sampler.input.core.events import InputEvent
 
 
@@ -18,12 +22,9 @@ def test_input_event_with_value_and_repeat():
 
 def test_input_event_is_frozen():
     e = InputEvent(source="keyboard", kind="press", code="F13")
-    import dataclasses
-    try:
-        e.code = "F14"
-    except dataclasses.FrozenInstanceError:
-        return
-    raise AssertionError("InputEvent must be frozen")
+    for f in dataclasses.fields(e):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(e, f.name, None)
 
 
 def test_input_event_equality_and_hash():

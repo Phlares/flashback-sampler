@@ -10,6 +10,7 @@ common. `NativeCaptureSource` is one device: one class for every kind
 Zig side receives, not a Python class. `NativeMixedSource` is a handle on
 the Zig Mixer: N devices summed onto one ring by a Zig mixer thread.
 """
+
 from __future__ import annotations
 
 import ctypes as C
@@ -39,6 +40,7 @@ class _NativeSource:
     the DLL, not a Python exception."""
 
     _api: str
+    _lib: C.CDLL
     sample_rate: int
     channels: int
 
@@ -112,13 +114,24 @@ class NativeCaptureSource(_NativeSource):
 
     _api = "fb_capture"
 
-    def __init__(self, buffer, kind: str, device_id: str = "", pid: int = 0,
-                 sample_rate: int = 48_000, channels: int = 2):
+    def __init__(
+        self,
+        buffer,
+        kind: str,
+        device_id: str = "",
+        pid: int = 0,
+        sample_rate: int = 48_000,
+        channels: int = 2,
+    ):
         h = getattr(buffer, "_h", None)
         if not h:
-            raise TypeError("NativeCaptureSource needs a NativeAudioCircularBuffer (no native ring handle)")
+            raise TypeError(
+                "NativeCaptureSource needs a NativeAudioCircularBuffer (no native ring handle)"
+            )
         if kind not in native.KIND_INTS:
-            raise ValueError(f"unknown capture kind {kind!r}; expected one of {sorted(native.KIND_INTS)}")
+            raise ValueError(
+                f"unknown capture kind {kind!r}; expected one of {sorted(native.KIND_INTS)}"
+            )
         lib = native.load()
         if lib is None:
             raise RuntimeError("flashback_core library not available")
@@ -131,10 +144,18 @@ class NativeCaptureSource(_NativeSource):
         # Keep the encoded id alive: the spec holds a raw pointer into it
         # for the duration of fb_capture_create (Zig copies it out).
         self._id_bytes = device_id.encode("utf-8")
-        spec = native.FbCaptureSpec(native.KIND_INTS[kind], self.pid, self.sample_rate, self.channels, self._id_bytes)
+        spec = native.FbCaptureSpec(
+            native.KIND_INTS[kind],
+            self.pid,
+            self.sample_rate,
+            self.channels,
+            self._id_bytes,
+        )
         self._h = lib.fb_capture_create(h, C.byref(spec))
         if not self._h:
-            raise RuntimeError("fb_capture_create failed (bad spec, or no capture backend on this OS)")
+            raise RuntimeError(
+                "fb_capture_create failed (bad spec, or no capture backend on this OS)"
+            )
         self._started = False
 
 
@@ -151,10 +172,14 @@ class NativeMixedSource(_NativeSource):
 
     _api = "fb_mixer"
 
-    def __init__(self, buffer, specs: list[dict], sample_rate: int = 48_000, channels: int = 2):
+    def __init__(
+        self, buffer, specs: list[dict], sample_rate: int = 48_000, channels: int = 2
+    ):
         h = getattr(buffer, "_h", None)
         if not h:
-            raise TypeError("NativeMixedSource needs a NativeAudioCircularBuffer (no native ring handle)")
+            raise TypeError(
+                "NativeMixedSource needs a NativeAudioCircularBuffer (no native ring handle)"
+            )
         lib = native.load()
         if lib is None:
             raise RuntimeError("flashback_core library not available")
@@ -164,13 +189,23 @@ class NativeMixedSource(_NativeSource):
         self.specs = [dict(s) for s in specs]
         # Encoded ids stay referenced for the duration of fb_mixer_create
         # (Zig copies them out) — one bytes object per spec.
-        self._id_bytes = [str(s.get("device_id", "")).encode("utf-8") for s in self.specs]
+        self._id_bytes = [
+            str(s.get("device_id", "")).encode("utf-8") for s in self.specs
+        ]
         arr = (native.FbCaptureSpec * max(len(self.specs), 1))()
-        for i, (s, raw) in enumerate(zip(self.specs, self._id_bytes)):
+        for i, (s, raw) in enumerate(zip(self.specs, self._id_bytes, strict=True)):
             kind = s["kind"]
             if kind not in native.KIND_INTS:
-                raise ValueError(f"unknown capture kind {kind!r}; expected one of {sorted(native.KIND_INTS)}")
-            arr[i] = native.FbCaptureSpec(native.KIND_INTS[kind], int(s.get("pid", 0)), self.sample_rate, self.channels, raw)
+                raise ValueError(
+                    f"unknown capture kind {kind!r}; expected one of {sorted(native.KIND_INTS)}"
+                )
+            arr[i] = native.FbCaptureSpec(
+                native.KIND_INTS[kind],
+                int(s.get("pid", 0)),
+                self.sample_rate,
+                self.channels,
+                raw,
+            )
         self._h = lib.fb_mixer_create(h, arr, len(self.specs))
         if not self._h:
             raise RuntimeError(

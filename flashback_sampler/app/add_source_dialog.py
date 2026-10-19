@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
@@ -41,11 +40,19 @@ from flashback_sampler.core.quality_presets import (
     compute_ram_mb,
 )
 
-
 # Sample rate options, ordered high → low. The default (48k) is
 # selected by value via findData, not by position.
 SAMPLE_RATE_CHOICES: tuple[int, ...] = (
-    192_000, 176_400, 96_000, 88_200, 48_000, 44_100, 32_000, 22_050, 16_000, 8_000,
+    192_000,
+    176_400,
+    96_000,
+    88_200,
+    48_000,
+    44_100,
+    32_000,
+    22_050,
+    16_000,
+    8_000,
 )
 CHANNEL_CHOICES: tuple[tuple[int, str], ...] = (
     (2, "2  STEREO"),
@@ -144,7 +151,7 @@ class AddSourceDialog(QDialog):
         # From Process…. Device list hidden behind a submenu so the
         # primary picker stays simple.
         self._source_input_btn = QPushButton(self._selected_label)
-        self._source_input_btn.setCursor(Qt.PointingHandCursor)
+        self._source_input_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._source_input_btn.setStyleSheet(
             f"QPushButton {{ text-align: left; padding: 4px 8px; "
             f"border: 1px solid {EREBUS['ash']}; background: transparent; "
@@ -158,16 +165,14 @@ class AddSourceDialog(QDialog):
 
         # Live footprint readout
         self._ram_label = QLabel("")
-        self._ram_label.setStyleSheet(
-            f"color: {EREBUS['bone']}; padding: 4px 0;"
-        )
+        self._ram_label.setStyleSheet(f"color: {EREBUS['bone']}; padding: 4px 0;")
         root.addWidget(self._ram_label)
         self._update_ram_readout()
 
         root.addStretch(1)
 
         btns = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -200,7 +205,7 @@ class AddSourceDialog(QDialog):
     # Result accessors
     # ------------------------------------------------------------------
 
-    def result_preset(self) -> QualityPreset | None:
+    def result_preset(self) -> QualityPreset:
         sr, ch, secs = self._current_inputs()
         return QualityPreset(
             name="CUSTOM",
@@ -260,16 +265,14 @@ class AddSourceDialog(QDialog):
 
     def _pick_process(self) -> None:
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:
             return
         self._set_source_device(device, f"Process: {device.name}")
 
-    def _set_source_device(
-        self, device: CaptureDevice | None, label: str
-    ) -> None:
+    def _set_source_device(self, device: CaptureDevice | None, label: str) -> None:
         self._selected_device = device
         self._selected_label = label
         self._source_input_btn.setText(label)

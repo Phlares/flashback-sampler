@@ -14,9 +14,15 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from flashback_sampler.app.theme import EREBUS
 
-
 DEFAULT_PRESETS: tuple[float, ...] = (
-    15.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0,
+    15.0,
+    30.0,
+    60.0,
+    120.0,
+    180.0,
+    300.0,
+    600.0,
+    900.0,
 )
 
 
@@ -41,7 +47,7 @@ class DurationPreset(QWidget):
         self._active_idx = max(0, min(len(self._presets) - 1, default_index))
         self._hovered_idx: int | None = None
 
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.setMinimumWidth(80)
         self.setMinimumHeight(len(self._presets) * 22)
         self.setMouseTracking(True)
@@ -81,18 +87,18 @@ class DurationPreset(QWidget):
             return idx
         return None
 
-    def mousePressEvent(self, ev) -> None:  # noqa: N802
+    def mousePressEvent(self, ev) -> None:
         idx = self._cell_at(ev.position().y())
         if idx is not None:
             self.set_active_index(idx)
 
-    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+    def mouseMoveEvent(self, ev) -> None:
         idx = self._cell_at(ev.position().y())
         if idx != self._hovered_idx:
             self._hovered_idx = idx
             self.update()
 
-    def leaveEvent(self, ev) -> None:  # noqa: N802
+    def leaveEvent(self, ev) -> None:
         self._hovered_idx = None
         self.update()
 
@@ -100,9 +106,9 @@ class DurationPreset(QWidget):
     # Paint
     # ------------------------------------------------------------------
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, False)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         w = self.width()
         h = self.height()
@@ -140,8 +146,11 @@ class DurationPreset(QWidget):
             p.setPen(QPen(text_color))
             label = format_preset(dur).upper()
             p.drawText(
-                8, y, w - 12, rh,
-                Qt.AlignLeft | Qt.AlignVCenter,
+                8,
+                y,
+                w - 12,
+                rh,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 label,
             )
 

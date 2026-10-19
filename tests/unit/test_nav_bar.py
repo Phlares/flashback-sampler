@@ -1,16 +1,8 @@
 """Tests for NavBar widget."""
+
 from __future__ import annotations
 
-import pytest
-from PySide6.QtWidgets import QApplication
-
 from flashback_sampler.app.widgets.nav_bar import NavBar
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def test_nav_bar_instantiates(qapp):
@@ -60,32 +52,44 @@ def test_set_source_names_empty_uses_defaults(qapp):
 
 
 def test_source_indicator_right_click_emits_context_menu(qapp):
-    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent
+
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+
     ind = SourceIndicator(0, "SOURCE 1")
     captured = []
     ind.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
-        QEvent.MouseButtonPress, QPoint(5, 5),
-        Qt.RightButton, Qt.RightButton, Qt.NoModifier,
+        QEvent.Type.MouseButtonPress,
+        QPointF(5, 5),
+        QPointF(5, 5),
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     ind.mousePressEvent(ev)
     assert len(captured) == 1
 
 
 def test_source_indicator_left_click_only_emits_clicked(qapp):
-    from PySide6.QtCore import QPoint, Qt, QEvent
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent
+
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+
     ind = SourceIndicator(0, "SOURCE 1")
     clicks = []
     ctx = []
     ind.clicked.connect(lambda: clicks.append(1))
     ind.contextMenuRequested.connect(lambda p: ctx.append(p))
     ev = QMouseEvent(
-        QEvent.MouseButtonPress, QPoint(5, 5),
-        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier,
+        QEvent.Type.MouseButtonPress,
+        QPointF(5, 5),
+        QPointF(5, 5),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     ind.mousePressEvent(ev)
     assert len(clicks) == 1 and len(ctx) == 0
@@ -93,6 +97,7 @@ def test_source_indicator_left_click_only_emits_clicked(qapp):
 
 def test_source_indicator_set_severity(qapp):
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
+
     chip = SourceIndicator(0, "SOURCE 1")
     assert chip._severity == 0
     chip.set_severity(3)
