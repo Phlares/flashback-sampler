@@ -337,6 +337,27 @@ def test_save_trimmed_discards_the_minted_slice_when_the_export_fails(
     assert mgr.file_refcount(co.path) == 1
 
 
+def test_save_logs_a_failing_slice_discard_and_raises_the_export_error(
+    scratch, tmp_path, monkeypatch, caplog
+):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.5)
+    mgr.set_trim(co.id, 100, 300)
+
+    def boom(*a, **kw):
+        raise RuntimeError("the disk is full")
+
+    def discard_fails(cid):
+        raise RuntimeError("discard")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    monkeypatch.setattr(mgr, "discard", discard_fails)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
+    [record] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert record.exc_info is not None and record.exc_info[1].args == ("discard",)
+
+
 def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)

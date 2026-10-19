@@ -23,12 +23,14 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 
 from flashback_sampler.core import native
+from flashback_sampler.core.best_effort import best_effort
 from flashback_sampler.core.manifest import (
     Manifest,
     audio_path,
@@ -651,13 +653,10 @@ class CheckoutManager:
             )
         except BaseException:
             # An export that fails must not strand the slice (a `saved`
-            # manifest adoption would resurrect). Cleanup errors stay
-            # quiet so the export error is the one the caller sees.
+            # manifest adoption would resurrect). A cleanup error is only
+            # logged, so the export error is the one the caller sees.
             if minted is not None:
-                try:
-                    self.discard(minted.id)
-                except Exception:
-                    pass
+                best_effort(partial(self.discard, minted.id))
             raise
         if minted is not None:
             return minted

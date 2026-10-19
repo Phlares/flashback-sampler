@@ -16,10 +16,12 @@ from __future__ import annotations
 import ctypes
 from collections.abc import Callable
 from ctypes import wintypes
+from functools import partial
 
 from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtWidgets import QApplication
 
+from flashback_sampler.core.best_effort import best_effort
 from flashback_sampler.input.core import invoke
 
 # Win32 modifier flags (winuser.h) + WM_HOTKEY.
@@ -202,10 +204,7 @@ class GlobalHotkeySource(QAbstractNativeEventFilter):
 
     def close(self) -> None:
         for hotkey_id in list(self._registered):
-            try:
-                self._unregister_fn(self._hwnd, hotkey_id)
-            except Exception:
-                pass
+            best_effort(partial(self._unregister_fn, self._hwnd, hotkey_id))
         self._registered.clear()
         app = QApplication.instance()
         if app is not None:
