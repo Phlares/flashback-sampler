@@ -173,11 +173,12 @@ def test_bind_capture_logs_a_failing_stop_and_binds_the_new_source(
     assert len(_errors(caplog)) == 1
 
 
-def test_stop_capture_logs_a_failing_stop(scratch, tmp_path, caplog):
+def test_stop_capture_raises_what_stop_raises(scratch, tmp_path):
+    """Callers decide: the UI warns, teardown logs and moves on."""
     slot = _slot(scratch, tmp_path, default_preset())
     slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
-    slot.stop_capture()
-    assert len(_errors(caplog)) == 1
+    with pytest.raises(RuntimeError, match="stop"):
+        slot.stop_capture()
 
 
 def test_last_error_propagates_what_the_source_raises(scratch, tmp_path):

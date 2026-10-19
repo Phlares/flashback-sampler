@@ -434,6 +434,7 @@ def test_flushing_buffer_does_not_invalidate_existing_checkouts(scratch, tmp_pat
 def test_set_max_active_caps_creates(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     mgr.set_max_active(1)
+    assert mgr.max_active == 1
     mgr.create(duration_s=0.1)
     with pytest.raises(RuntimeError, match=r"Maximum active checkouts reached \(1\)"):
         mgr.create(duration_s=0.1)

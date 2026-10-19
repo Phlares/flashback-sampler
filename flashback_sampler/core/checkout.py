@@ -183,6 +183,10 @@ class CheckoutManager:
     def pinned_id(self) -> str | None:
         return self._pinned_id
 
+    @property
+    def max_active(self) -> int:
+        return self._max_active
+
     def set_max_active(self, n: int) -> None:
         self._max_active = int(n)
 

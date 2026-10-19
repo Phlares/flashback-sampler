@@ -166,9 +166,9 @@ class CaptureSlot:
             raise RuntimeError(f"CaptureSlot {self.name!r} has no capture source bound")
         self.capture_source.start()
 
-    def stop_capture(self) -> bool:
-        """Stop the bound source. False when its `stop()` raised (logged)."""
-        return self.capture_source is None or best_effort(self.capture_source.stop)
+    def stop_capture(self) -> None:
+        if self.capture_source is not None:
+            self.capture_source.stop()
 
     def is_capturing(self) -> bool:
         return self.capture_source is not None and self.capture_source.is_running()

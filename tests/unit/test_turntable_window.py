@@ -949,7 +949,7 @@ def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(
         sr = state.active_slot.buffer.sample_rate
         mgr = state.active_slot.checkout_manager
         # Fill to the cap with saved checkouts (as prior drags would)
-        cap = mgr._max_active
+        cap = mgr.max_active
         for _ in range(cap):
             co = mgr.create(duration_s=0.01)
             mgr.mark_saved(co.id)
@@ -979,7 +979,7 @@ def test_buffer_drag_out_at_cap_without_saved_clips_reports_failure(
         _write_one_second(state)
         sr = state.active_slot.buffer.sample_rate
         mgr = state.active_slot.checkout_manager
-        cap = mgr._max_active
+        cap = mgr.max_active
         for _ in range(cap):
             mgr.create(duration_s=0.01)  # all stay pending
         win._export_pool_dir = tmp_path

@@ -230,9 +230,9 @@ def test_apply_checkout_caps_scoped_to_active_slot():
 
     st.apply_checkout_caps(max_active=3)
     # Active slot (0) updated
-    assert st.slots[0].checkout_manager._max_active == 3
+    assert st.slots[0].checkout_manager.max_active == 3
     # Slot 1 left at the default 16
-    assert st.slots[1].checkout_manager._max_active == 16
+    assert st.slots[1].checkout_manager.max_active == 16
 
 
 def test_total_project_ram_bytes_counts_every_slot():
@@ -1268,16 +1268,28 @@ def test_stop_rolling_counts_only_the_slots_that_stopped(caplog):
     assert len(_errors(caplog)) == 1
 
 
-def test_rebuild_buffer_logs_failing_teardown_and_still_rebuilds(monkeypatch, caplog):
+def test_rebuild_buffer_keeps_the_ring_when_capture_will_not_stop():
+    """A source that failed to stop may still write into the old ring,
+    so the ring must not be closed or swapped."""
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.active_slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    src = RaisingCaptureSource(fail=("stop",))
+    st.active_slot.bind_capture(src)
+    old = st.buffer
+
+    with pytest.raises(RuntimeError, match="stop"):
+        st.rebuild_buffer(2.0)
+
+    assert st.buffer is old and st.active_slot.capture_source is src
+
+
+def test_rebuild_buffer_logs_a_failing_close_and_still_rebuilds(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     monkeypatch.setattr(st.buffer, "close", _raise("close"))
 
     st.rebuild_buffer(2.0)
 
     assert st.buffer.duration == 2.0
-    assert st.active_slot.capture_source is None
-    assert len(_errors(caplog)) == 2
+    assert len(_errors(caplog)) == 1
 
 
 def test_shutdown_runs_every_step_when_each_one_raises(monkeypatch, caplog):

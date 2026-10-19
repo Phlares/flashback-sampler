@@ -329,7 +329,7 @@ class AppState:
         if not (0 <= index < len(self.slots)):
             raise IndexError(f"slot index {index} out of range")
         slot = self.slots.pop(index)
-        slot.stop_capture()
+        best_effort(slot.stop_capture)
         # A removed slot's checkouts go with it: manifests and files
         # deleted.
         slot.checkout_manager.discard_all()
@@ -422,7 +422,7 @@ class AppState:
         """
         stopped = 0
         for slot in self.slots:
-            if slot.is_capturing() and slot.stop_capture():
+            if slot.is_capturing() and best_effort(slot.stop_capture):
                 stopped += 1
         self.rolling = False
         return stopped
@@ -517,12 +517,14 @@ class AppState:
         """
         Rebuild the ACTIVE slot's ring buffer with a new duration.
         Stops capture if it was running; the caller is responsible for
-        restarting capture after the rebuild.
+        restarting capture after the rebuild. If the stop raises, the
+        error propagates and the old ring stays in place: a source that
+        did not stop may still be writing into it.
 
         Existing Checkouts are preserved — they're file-backed scratch
         handles, independent of the ring they were cut from. The active
-        slot's CheckoutManager is rebound so new
-        checkouts pull from the fresh ring.
+        slot's CheckoutManager is rebound so new checkouts pull from the
+        fresh ring.
         """
         slot = self.active_slot
         was_running = slot.is_capturing()
@@ -553,7 +555,7 @@ class AppState:
     def shutdown(self) -> None:
         """Called on window close — stop all slots + playback cleanly."""
         for slot in self.slots:
-            slot.stop_capture()
+            best_effort(slot.stop_capture)
         for slot in self.slots:
             best_effort(slot.checkout_manager.close)
         best_effort(self.scratch.close)  # drains the writer
