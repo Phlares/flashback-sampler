@@ -1,0 +1,3 @@
+tests/hw/test_native_capture_hw.py	pytest.skip	1	opt-in hardware test (audio_hw, not run in CI); skips when run before core is built
+tests/hw/test_native_playback_hw.py	pytest.skip	1	opt-in hardware test (audio_hw, not run in CI); skips when run before core is built
+tests/unit/test_alc.py	pytest.mark.skip	1	the spike capture file is a local working note and is not committed
