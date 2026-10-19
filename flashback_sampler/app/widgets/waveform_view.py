@@ -103,7 +103,7 @@ class WaveformView(QWidget):
     # Paint
     # ------------------------------------------------------------------
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 

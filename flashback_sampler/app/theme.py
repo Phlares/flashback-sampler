@@ -49,14 +49,7 @@ def load_fonts(app=None) -> dict[str, str]:
     """
     global _resolved_display, _resolved_label, _resolved_body
 
-    try:
-        from PySide6.QtGui import QFontDatabase
-    except ImportError:  # pragma: no cover
-        return {
-            "display": _resolved_display,
-            "label": _resolved_label,
-            "body": _resolved_body,
-        }
+    from PySide6.QtGui import QFontDatabase
 
     loaded_families: set[str] = set()
     if FONTS_DIR.is_dir():

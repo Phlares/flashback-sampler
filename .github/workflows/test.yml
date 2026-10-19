@@ -5,9 +5,10 @@ name: test
 # anyway), the Zig unit tests on Ubuntu, `lint`, which runs the hooks
 # in .pre-commit-config.yaml (ruff and zig fmt) on every file, and
 # `typecheck`, which runs pyright on Ubuntu. Hard timeouts so a hung test
-# stops in minutes. Every pull request runs all four jobs: `main` and
-# `dev` require them, and a skipped check blocks the merge. Docs-only
-# pushes skip it; nothing requires a check there.
+# stops in minutes. Every pull request runs all four jobs. `main` and
+# `dev` require all four checks (lint, pytest, typecheck, zig), and a
+# skipped check blocks the merge. Docs-only pushes skip the workflow;
+# nothing requires a check there.
 on:
   push:
     branches: [main, dev]

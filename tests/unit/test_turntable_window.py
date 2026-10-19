@@ -268,7 +268,7 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     the developer's desktop during VSCode's auto-test-on-save runs,
     which is exactly what we don't want.
     """
-    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent
 
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
@@ -278,9 +278,8 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     chip.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
         QEvent.Type.MouseButtonPress,
-        chip.rect().center().toPointF()
-        if hasattr(chip.rect().center(), "toPointF")
-        else QPoint(5, 5),
+        QPointF(chip.rect().center()),
+        QPointF(chip.rect().center()),
         Qt.MouseButton.RightButton,
         Qt.MouseButton.RightButton,
         Qt.KeyboardModifier.NoModifier,
@@ -950,7 +949,7 @@ def test_buffer_drag_out_evicts_oldest_saved_checkout_at_cap(
         sr = state.active_slot.buffer.sample_rate
         mgr = state.active_slot.checkout_manager
         # Fill to the cap with saved checkouts (as prior drags would)
-        cap = mgr._max_active
+        cap = mgr.max_active
         for _ in range(cap):
             co = mgr.create(duration_s=0.01)
             mgr.mark_saved(co.id)
@@ -980,7 +979,7 @@ def test_buffer_drag_out_at_cap_without_saved_clips_reports_failure(
         _write_one_second(state)
         sr = state.active_slot.buffer.sample_rate
         mgr = state.active_slot.checkout_manager
-        cap = mgr._max_active
+        cap = mgr.max_active
         for _ in range(cap):
             mgr.create(duration_s=0.01)  # all stay pending
         win._export_pool_dir = tmp_path
@@ -1261,10 +1260,10 @@ def test_selecting_a_clip_pins_it_and_bins_come_from_the_handle(qapp, state):
         a = mgr.create(duration_s=0.2)
         b = mgr.create(duration_s=0.3)
         win._refresh_clip_side(auto_select_newest=True)
-        assert mgr._pinned_id == b.id  # noqa: SLF001
+        assert mgr.pinned_id == b.id
         win.clip_turntable.select_track(0)
         win._refresh_clip_side()
-        assert mgr._pinned_id == a.id  # noqa: SLF001
+        assert mgr.pinned_id == a.id
         assert win._clip_bins_cache[a.id]["panel_bins"].shape == (
             360,
             2,

@@ -25,6 +25,7 @@ from flashback_sampler.app.audio_devices import (
     default_output_device,
 )
 from flashback_sampler.core import native
+from flashback_sampler.core.best_effort import best_effort
 from flashback_sampler.core.capture_slot import CaptureSlot
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
 from flashback_sampler.core.manifest import resolve_audio, scan
@@ -328,17 +329,11 @@ class AppState:
         if not (0 <= index < len(self.slots)):
             raise IndexError(f"slot index {index} out of range")
         slot = self.slots.pop(index)
-        try:
-            slot.stop_capture()
-        except Exception:  # pragma: no cover
-            pass
+        best_effort(slot.stop_capture)
         # A removed slot's checkouts go with it: manifests and files
         # deleted.
         slot.checkout_manager.discard_all()
-        try:
-            slot.buffer.close()
-        except Exception:  # pragma: no cover
-            pass
+        best_effort(slot.buffer.close)
         if self.active_slot_index >= len(self.slots):
             self.active_slot_index = len(self.slots) - 1
         elif self.active_slot_index > index:
@@ -413,7 +408,7 @@ class AppState:
                 slot.bind_capture(source)
                 slot.start_capture()
                 started += 1
-            except Exception as e:  # pragma: no cover — hardware path
+            except Exception as e:
                 first_error = first_error or e
         self.rolling = True
         return started, first_error
@@ -427,12 +422,8 @@ class AppState:
         """
         stopped = 0
         for slot in self.slots:
-            if slot.is_capturing():
-                try:
-                    slot.stop_capture()
-                    stopped += 1
-                except Exception:  # pragma: no cover
-                    pass
+            if slot.is_capturing() and best_effort(slot.stop_capture):
+                stopped += 1
         self.rolling = False
         return stopped
 
@@ -520,26 +511,25 @@ class AppState:
         """
         mgr = self.active_slot.checkout_manager
         if max_active is not None:
-            mgr._max_active = int(max_active)  # noqa: SLF001
+            mgr.set_max_active(max_active)
 
     def rebuild_buffer(self, new_seconds: float) -> None:
         """
         Rebuild the ACTIVE slot's ring buffer with a new duration.
         Stops capture if it was running; the caller is responsible for
-        restarting capture after the rebuild.
+        restarting capture after the rebuild. If the stop raises, the
+        error propagates and the old ring stays in place: a source that
+        did not stop may still be writing into it.
 
         Existing Checkouts are preserved — they're file-backed scratch
         handles, independent of the ring they were cut from. The active
-        slot's CheckoutManager._buffer reference is updated so new
-        checkouts pull from the fresh ring.
+        slot's CheckoutManager is rebound so new checkouts pull from the
+        fresh ring.
         """
         slot = self.active_slot
         was_running = slot.is_capturing()
         if was_running:
-            try:
-                slot.stop_capture()
-            except Exception:  # pragma: no cover
-                pass
+            slot.stop_capture()
 
         old_buf = slot.buffer
         new_buf = NativeAudioCircularBuffer(
@@ -550,7 +540,7 @@ class AppState:
         new_buf.gain = old_buf.gain  # preserve the source's record gain
         slot.buffer = new_buf
         slot.buffer_seconds = float(new_seconds)
-        slot.checkout_manager._buffer = new_buf  # noqa: SLF001
+        slot.checkout_manager.rebind_buffer(new_buf)
         # Capture source, if present, was writing into the old buffer.
         # Drop it so the caller rebuilds from state.build_capture().
         slot.capture_source = None
@@ -560,28 +550,13 @@ class AppState:
         # (stop_capture() joins/closes its stream before returning), and
         # rebuild_buffer runs entirely on the GUI thread, so nothing else
         # can be mid-read on old_buf when we reach this line.
-        try:
-            old_buf.close()
-        except Exception:  # pragma: no cover
-            pass
+        best_effort(old_buf.close)
 
     def shutdown(self) -> None:
         """Called on window close — stop all slots + playback cleanly."""
         for slot in self.slots:
-            try:
-                slot.stop_capture()
-            except Exception:  # pragma: no cover
-                pass
+            best_effort(slot.stop_capture)
         for slot in self.slots:
-            try:
-                slot.checkout_manager.close()
-            except Exception:  # pragma: no cover
-                pass
-        try:
-            self.scratch.close()  # drains the writer
-        except Exception:  # pragma: no cover
-            pass
-        try:
-            self.scrub_player.close()
-        except Exception:  # pragma: no cover
-            pass
+            best_effort(slot.checkout_manager.close)
+        best_effort(self.scratch.close)  # drains the writer
+        best_effort(self.scrub_player.close)

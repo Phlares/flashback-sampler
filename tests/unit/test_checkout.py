@@ -5,6 +5,7 @@ the scratch file back through the Zig reader."""
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 
@@ -33,12 +34,19 @@ def _manifest(scratch_dir, checkout_id) -> Manifest:
     return m
 
 
-def _mgr(scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, **kw):
+def _ring(seconds=2.0, rate=1000, channels=1, frames=1500, start=0):
     buf = NativeAudioCircularBuffer(
         duration_seconds=seconds, sample_rate=rate, channels=channels
     )
     if frames:
-        buf.write(ramp_block(0, frames, channels=channels))
+        buf.write(ramp_block(start, frames, channels=channels))
+    return buf
+
+
+def _mgr(
+    scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, buf=None, **kw
+):
+    buf = buf or _ring(seconds, rate, channels, frames)
     return CheckoutManager(
         buffer=buf, scratch=scratch, scratch_dir=tmp_path, slot_name="Main", **kw
     )
@@ -329,6 +337,27 @@ def test_save_trimmed_discards_the_minted_slice_when_the_export_fails(
     assert mgr.file_refcount(co.path) == 1
 
 
+def test_save_logs_a_failing_slice_discard_and_raises_the_export_error(
+    scratch, tmp_path, monkeypatch, caplog
+):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.5)
+    mgr.set_trim(co.id, 100, 300)
+
+    def boom(*a, **kw):
+        raise RuntimeError("the disk is full")
+
+    def discard_fails(cid):
+        raise RuntimeError("discard")
+
+    monkeypatch.setattr(mgr, "export_range", boom)
+    monkeypatch.setattr(mgr, "discard", discard_fails)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        mgr.save(co.id, tmp_path / "t.wav", trimmed=True)
+    [record] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert record.exc_info is not None and record.exc_info[1].args == ("discard",)
+
+
 def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)
@@ -350,15 +379,17 @@ def test_save_validation(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.1)
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")  # pyright: ignore[reportArgumentType]  # invalid on purpose
-    with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")  # pyright: ignore[reportArgumentType]  # invalid on purpose
+        mgr.export_range(co.id, tmp_path / "x.wav", 0, 10, subtype="PCM_8")
     with pytest.raises(KeyError):
         mgr.save("nope", tmp_path / "x.wav")
     with pytest.raises(KeyError):
         mgr.mark_saved("nope")
     with pytest.raises(KeyError):
         mgr.discard("nope")
+
+
+def test_save_has_no_format_parameter():
+    assert "fmt" not in inspect.signature(CheckoutManager.save).parameters
 
 
 def test_mark_saved_sets_state(scratch, tmp_path):
@@ -392,11 +423,38 @@ def test_discard_cleans_up_manifest_and_wav(scratch, tmp_path):
 
 
 def test_flushing_buffer_does_not_invalidate_existing_checkouts(scratch, tmp_path):
-    mgr = _mgr(scratch, tmp_path)
+    buf = _ring()
+    mgr = _mgr(scratch, tmp_path, buf=buf)
     co = mgr.create(duration_s=0.5)
-    mgr._buffer.flush()  # noqa: SLF001
+    buf.flush()
     audio = _audio(mgr, co)
     assert audio[0, 0] == pytest.approx(1000.0)
+
+
+def test_set_max_active_caps_creates(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    mgr.set_max_active(1)
+    assert mgr.max_active == 1
+    mgr.create(duration_s=0.1)
+    with pytest.raises(RuntimeError, match=r"Maximum active checkouts reached \(1\)"):
+        mgr.create(duration_s=0.1)
+
+
+def test_rebind_buffer_cuts_new_checkouts_from_the_new_ring(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    mgr.rebind_buffer(_ring(start=5000))
+    co = mgr.create(duration_s=0.5)
+    assert _audio(mgr, co)[0, 0] == pytest.approx(6000.0)
+
+
+def test_pinned_id_reports_the_pin(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.1)
+    assert mgr.pinned_id is None
+    mgr.pin(co.id)
+    assert mgr.pinned_id == co.id
+    mgr.pin(None)
+    assert mgr.pinned_id is None
 
 
 def test_pin_and_peak_bins_and_resident_bytes(scratch, tmp_path):

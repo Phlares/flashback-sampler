@@ -5,6 +5,8 @@ source lifecycle, and the ram / buffered_seconds queries.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from flashback_sampler.core.capture_slot import CaptureSlot
@@ -15,7 +17,10 @@ from flashback_sampler.core.quality_presets import (
     default_preset,
     preset_by_name,
 )
-from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
+from tests.fixtures.fake_capture import (
+    FakeCaptureSourceNoThread,
+    RaisingCaptureSource,
+)
 
 
 @pytest.fixture
@@ -151,3 +156,33 @@ def test_all_presets_produce_valid_slots(scratch, tmp_path):
         assert slot.buffer.duration == preset.buffer_seconds
         assert slot.buffer.sample_rate == preset.sample_rate
         assert slot.buffer.channels == preset.channels
+
+
+def _errors(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_bind_capture_logs_a_failing_stop_and_binds_the_new_source(
+    scratch, tmp_path, caplog
+):
+    slot = _slot(scratch, tmp_path, default_preset())
+    slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    new = FakeCaptureSourceNoThread(slot.buffer)
+    slot.bind_capture(new)
+    assert slot.capture_source is new
+    assert len(_errors(caplog)) == 1
+
+
+def test_stop_capture_raises_what_stop_raises(scratch, tmp_path):
+    """Callers decide: the UI warns, teardown logs and moves on."""
+    slot = _slot(scratch, tmp_path, default_preset())
+    slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    with pytest.raises(RuntimeError, match="stop"):
+        slot.stop_capture()
+
+
+def test_last_error_propagates_what_the_source_raises(scratch, tmp_path):
+    slot = _slot(scratch, tmp_path, default_preset())
+    slot.bind_capture(RaisingCaptureSource(fail=("last_error",)))
+    with pytest.raises(RuntimeError, match="last_error"):
+        slot.last_error()

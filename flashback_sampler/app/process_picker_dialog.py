@@ -125,7 +125,7 @@ class ProcessPickerDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, (pid, name))
             self._list.addItem(item)
 
-    def accept(self) -> None:  # noqa: D401
+    def accept(self) -> None:
         if hasattr(self, "_list"):
             item = self._list.currentItem()
             if item is not None:

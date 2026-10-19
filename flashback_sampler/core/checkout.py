@@ -23,12 +23,14 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 
 from flashback_sampler.core import native
+from flashback_sampler.core.best_effort import best_effort
 from flashback_sampler.core.manifest import (
     Manifest,
     audio_path,
@@ -40,7 +42,6 @@ from flashback_sampler.core.manifest import (
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
-CheckoutFormat = Literal["WAV"]
 CheckoutSubtype = Literal["FLOAT", "PCM_24", "PCM_16"]
 
 # FLOAT keeps the float32 scratch bit-perfect on disk.
@@ -160,8 +161,6 @@ class CheckoutManager:
     corrupt scratch file, or an unwritable disk.
     """
 
-    _VALID_FORMATS: tuple[str, ...] = ("WAV",)
-
     def __init__(
         self,
         buffer: NativeAudioCircularBuffer,
@@ -179,6 +178,22 @@ class CheckoutManager:
         self._checkouts: dict[str, Checkout] = {}
         self._file_refs: dict[Path, int] = {}
         self._pinned_id: str | None = None
+
+    @property
+    def pinned_id(self) -> str | None:
+        return self._pinned_id
+
+    @property
+    def max_active(self) -> int:
+        return self._max_active
+
+    def set_max_active(self, n: int) -> None:
+        self._max_active = int(n)
+
+    def rebind_buffer(self, buffer: NativeAudioCircularBuffer) -> None:
+        """Cut new checkouts from `buffer`. Existing checkouts are
+        file-backed and keep working."""
+        self._buffer = buffer
 
     # ------------------------------------------------------------------
     # Creation
@@ -625,7 +640,6 @@ class CheckoutManager:
         self,
         checkout_id: str,
         target_path: Path | str,
-        fmt: CheckoutFormat = "WAV",
         trimmed: bool = True,
         subtype: CheckoutSubtype | None = None,
         mark_saved: bool = True,
@@ -634,11 +648,6 @@ class CheckoutManager:
         checkout the file came from: the slice a trimmed save mints, or
         the clip itself. A minted slice is already `saved` and the clip
         stays as it was; otherwise `mark_saved` flips the clip."""
-        fmt = fmt.upper()  # type: ignore[assignment]
-        if fmt not in self._VALID_FORMATS:
-            raise ValueError(
-                f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}"
-            )
         co = self.get(checkout_id)
         start, n = co.trim_range() if trimmed else (0, co.n_frames)
         minted = self.mint_trim(checkout_id) if trimmed else None
@@ -648,13 +657,10 @@ class CheckoutManager:
             )
         except BaseException:
             # An export that fails must not strand the slice (a `saved`
-            # manifest adoption would resurrect). Cleanup errors stay
-            # quiet so the export error is the one the caller sees.
+            # manifest adoption would resurrect). A cleanup error is only
+            # logged, so the export error is the one the caller sees.
             if minted is not None:
-                try:
-                    self.discard(minted.id)
-                except Exception:
-                    pass
+                best_effort(partial(self.discard, minted.id))
             raise
         if minted is not None:
             return minted

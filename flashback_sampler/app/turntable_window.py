@@ -1368,7 +1368,7 @@ class TurntableWindow(QMainWindow):
             saved = self._with_room(
                 slot,
                 lambda: slot.checkout_manager.save(
-                    co.id, Path(target), fmt="WAV", trimmed=trimmed
+                    co.id, Path(target), trimmed=trimmed
                 ),
                 keep=co.id,
             )

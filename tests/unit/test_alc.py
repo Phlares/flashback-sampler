@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from flashback_sampler.core import alc
+from tests.fixtures.alc import clip_value, read_clip
 
 # The spike capture is a working note, not a shipped file (`.superpowers/`
 # is gitignored), so the byte-identity round trip runs only where it is.
@@ -68,20 +69,6 @@ def _element_name(line: str) -> str:
     return line.strip().split()[0].lstrip("<")
 
 
-def _clip(target: Path) -> ET.Element:
-    with gzip.open(target, "rb") as fh:
-        root = ET.fromstring(fh.read())
-    return next(root.iter("AudioClip"))
-
-
-def _value(clip: ET.Element, path: str, attr: str = "Value") -> str:
-    el = clip.find(path)
-    assert el is not None, path
-    value = el.get(attr)
-    assert value is not None, (path, attr)
-    return value
-
-
 @pytest.mark.skipif(
     not CAPTURE.exists(), reason="spike capture is a local working note"
 )
@@ -99,19 +86,19 @@ def test_write_alc_gzips_xml_that_reads_back_as_the_substituted_values(tmp_path)
     out = alc.write_alc(tmp_path / "deck.alc", wav, 1.5, 3.5, frames=96000, rate=24000)
 
     assert out == tmp_path / "deck.alc"
-    clip = _clip(out)
-    assert _value(clip, "Loop/LoopStart") == "1.5"
-    assert _value(clip, "Loop/LoopEnd") == "3.5"
-    assert _value(clip, "Loop/HiddenLoopStart") == "0"
-    assert _value(clip, "Loop/HiddenLoopEnd") == "4"  # 96000 / 24000 s
-    assert _value(clip, "CurrentStart") == "0"
-    assert _value(clip, "CurrentEnd") == "4.266666666666667"  # 2 s at 128 BPM
-    assert _value(clip, "Name") == "deck_a_20260715-130509_2.0s"
-    assert _value(clip, "SampleRef/FileRef/Path") == wav.resolve().as_posix()
-    assert _value(clip, "SampleRef/FileRef/RelativePath") == wav.name
-    assert _value(clip, "SampleRef/FileRef/OriginalFileSize") == "4321"
-    assert _value(clip, "SampleRef/DefaultDuration") == "96000"
-    assert _value(clip, "SampleRef/DefaultSampleRate") == "24000"
+    clip = read_clip(out)
+    assert clip_value(clip, "Loop/LoopStart") == "1.5"
+    assert clip_value(clip, "Loop/LoopEnd") == "3.5"
+    assert clip_value(clip, "Loop/HiddenLoopStart") == "0"
+    assert clip_value(clip, "Loop/HiddenLoopEnd") == "4"  # 96000 / 24000 s
+    assert clip_value(clip, "CurrentStart") == "0"
+    assert clip_value(clip, "CurrentEnd") == "4.266666666666667"  # 2 s at 128 BPM
+    assert clip_value(clip, "Name") == "deck_a_20260715-130509_2.0s"
+    assert clip_value(clip, "SampleRef/FileRef/Path") == wav.resolve().as_posix()
+    assert clip_value(clip, "SampleRef/FileRef/RelativePath") == wav.name
+    assert clip_value(clip, "SampleRef/FileRef/OriginalFileSize") == "4321"
+    assert clip_value(clip, "SampleRef/DefaultDuration") == "96000"
+    assert clip_value(clip, "SampleRef/DefaultSampleRate") == "24000"
     markers = clip.findall("WarpMarkers/WarpMarker")
     assert [m.get("SecTime") for m in markers] == ["1.5", "1.5146484375"]
     assert [m.get("BeatTime") for m in markers] == ["0", "0.03125"]
@@ -122,7 +109,7 @@ def test_write_alc_writes_a_forward_slash_path_even_on_windows(tmp_path):
     wav.parent.mkdir(parents=True)
     wav.write_bytes(b"")
     out = alc.write_alc(tmp_path / "slice.alc", wav, 0.0, 1.0, frames=48000, rate=48000)
-    path_value = _value(_clip(out), "SampleRef/FileRef/Path")
+    path_value = clip_value(read_clip(out), "SampleRef/FileRef/Path")
     assert "\\" not in path_value
     assert path_value.endswith("/nested/pool/slice.wav")
 
@@ -134,9 +121,9 @@ def test_write_alc_escapes_xml_specials_in_the_path_and_the_name(tmp_path):
     wav.parent.mkdir()
     wav.write_bytes(b"")
     out = alc.write_alc(tmp_path / "amp.alc", wav, 0.0, 1.0, frames=48000, rate=48000)
-    clip = _clip(out)
-    assert _value(clip, "Name") == "x&y"
-    assert _value(clip, "SampleRef/FileRef/Path").endswith("/a & b/x&y.wav")
+    clip = read_clip(out)
+    assert clip_value(clip, "Name") == "x&y"
+    assert clip_value(clip, "SampleRef/FileRef/Path").endswith("/a & b/x&y.wav")
 
 
 def test_render_alc_xml_escapes_a_quote_in_the_path(tmp_path):
@@ -154,8 +141,8 @@ def test_render_alc_xml_escapes_a_quote_in_the_path(tmp_path):
     import xml.etree.ElementTree as _ET
 
     clip = next(_ET.fromstring(xml).iter("AudioClip"))
-    assert _value(clip, "SampleRef/FileRef/Path") == '/pool/say "hi".wav'
-    assert _value(clip, "Name") == 'say "hi"'
+    assert clip_value(clip, "SampleRef/FileRef/Path") == '/pool/say "hi".wav'
+    assert clip_value(clip, "Name") == 'say "hi"'
 
 
 def test_write_alc_output_is_gzipped_xml(tmp_path):
@@ -192,7 +179,7 @@ def test_rendering_leaves_the_session_level_loop_start_alone():
     `Loop/LoopStart`. A substitution matched by element name instead of
     by the captured line would move the set's loop brace."""
     root = ET.fromstring(alc.render_alc_xml(**SUBSTITUTED))
-    assert _value(root, "LiveSet/Transport/LoopStart") == "8"
+    assert clip_value(root, "LiveSet/Transport/LoopStart") == "8"
 
 
 def test_numbers_are_plain_decimals_never_exponents():
@@ -209,10 +196,10 @@ def test_numbers_are_plain_decimals_never_exponents():
         size=44,
     )
     clip = next(ET.fromstring(xml).iter("AudioClip"))
-    start = _value(clip, "Loop/LoopStart")
+    start = clip_value(clip, "Loop/LoopStart")
     assert "e" not in start.lower() and start.startswith("0.0000208")
-    assert "e" not in _value(clip, "CurrentEnd").lower()
-    marker = _value(clip, "WarpMarkers/WarpMarker", "SecTime")
+    assert "e" not in clip_value(clip, "CurrentEnd").lower()
+    marker = clip_value(clip, "WarpMarkers/WarpMarker", "SecTime")
     assert "e" not in marker.lower()
 
 

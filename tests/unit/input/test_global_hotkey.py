@@ -275,3 +275,26 @@ def test_failed_registration_is_skipped(qapp):
         unregister_fn=lambda *a: None,
     )
     assert src._registered == {}  # nothing registered, no crash
+
+
+def test_source_close_logs_a_failing_unregister_and_clears(qapp, caplog):
+    from flashback_sampler.input.core import Action, register
+    from flashback_sampler.input.sources.global_hotkey import GlobalHotkeySource
+
+    register(
+        Action(id="clip.checkout", name="C", category="Clip", callable=lambda: None)
+    )
+
+    def fail(hwnd, hid):
+        raise OSError("unregister")
+
+    src = GlobalHotkeySource(
+        {"Ctrl+Alt+O": "clip.checkout"},
+        hwnd=7,
+        register_fn=lambda *a: True,
+        unregister_fn=fail,
+    )
+    n = len(src._registered)
+    src.close()
+    assert not src._registered
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == n

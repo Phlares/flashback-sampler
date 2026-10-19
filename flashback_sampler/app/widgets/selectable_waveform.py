@@ -170,7 +170,7 @@ class SelectableWaveform(WaveformView):
         else:
             self.setCursor(self._idle_cursor)
 
-    def mousePressEvent(self, ev) -> None:  # noqa: N802
+    def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton:
             # Priority 1: Ctrl+press arms a full-clip drag-out
             if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -206,7 +206,7 @@ class SelectableWaveform(WaveformView):
             return
         super().mousePressEvent(ev)
 
-    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+    def mouseMoveEvent(self, ev) -> None:
         x = ev.position().x()
 
         # Armed drag-out: fire once past the OS drag threshold. The host
@@ -257,7 +257,7 @@ class SelectableWaveform(WaveformView):
 
         super().mouseMoveEvent(ev)
 
-    def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton:
             # An armed drag-out that never crossed the threshold is a
             # plain click — disarm and leave the selection untouched.
@@ -289,12 +289,12 @@ class SelectableWaveform(WaveformView):
                 return
         super().mouseReleaseEvent(ev)
 
-    def leaveEvent(self, ev) -> None:  # noqa: N802
+    def leaveEvent(self, ev) -> None:
         # Reset to the idle cursor when the mouse leaves the widget
         self.setCursor(self._idle_cursor)
         super().leaveEvent(ev)
 
-    def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
+    def mouseDoubleClickEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton:
             self.clear_manual_selection()
             ev.accept()
@@ -307,7 +307,7 @@ class SelectableWaveform(WaveformView):
     # so the user can tell them apart at a glance.
     # ------------------------------------------------------------------
 
-    def paintEvent(self, ev) -> None:  # noqa: N802
+    def paintEvent(self, ev) -> None:
         super().paintEvent(ev)
         sel = self.manual_selection()
         if sel is None:
