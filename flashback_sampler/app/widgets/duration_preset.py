@@ -47,7 +47,7 @@ class DurationPreset(QWidget):
         self._active_idx = max(0, min(len(self._presets) - 1, default_index))
         self._hovered_idx: int | None = None
 
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.setMinimumWidth(80)
         self.setMinimumHeight(len(self._presets) * 22)
         self.setMouseTracking(True)
@@ -108,7 +108,7 @@ class DurationPreset(QWidget):
 
     def paintEvent(self, ev) -> None:  # noqa: N802
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, False)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         w = self.width()
         h = self.height()
@@ -150,7 +150,7 @@ class DurationPreset(QWidget):
                 y,
                 w - 12,
                 rh,
-                Qt.AlignLeft | Qt.AlignVCenter,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 label,
             )
 

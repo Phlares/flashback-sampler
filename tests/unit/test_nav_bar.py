@@ -61,11 +61,11 @@ def test_source_indicator_right_click_emits_context_menu(qapp):
     captured = []
     ind.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
-        QEvent.MouseButtonPress,
+        QEvent.Type.MouseButtonPress,
         QPoint(5, 5),
-        Qt.RightButton,
-        Qt.RightButton,
-        Qt.NoModifier,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     ind.mousePressEvent(ev)
     assert len(captured) == 1
@@ -83,11 +83,11 @@ def test_source_indicator_left_click_only_emits_clicked(qapp):
     ind.clicked.connect(lambda: clicks.append(1))
     ind.contextMenuRequested.connect(lambda p: ctx.append(p))
     ev = QMouseEvent(
-        QEvent.MouseButtonPress,
+        QEvent.Type.MouseButtonPress,
         QPoint(5, 5),
-        Qt.LeftButton,
-        Qt.LeftButton,
-        Qt.NoModifier,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     ind.mousePressEvent(ev)
     assert len(clicks) == 1 and len(ctx) == 0

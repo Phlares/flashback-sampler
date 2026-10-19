@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from flashback_sampler.core.checkout import CheckoutSubtype
 
 APP_DIR_NAME = "flashback-sampler"
 CONFIG_FILE_NAME = "config.json"
@@ -92,7 +95,7 @@ def save_global_hotkeys_enabled(enabled: bool, path: Path | None = None) -> None
 
 EXPORT_POOL_DIR_KEY = "export_pool_dir"
 EXPORT_BIT_DEPTH_KEY = "export_bit_depth"
-VALID_EXPORT_BIT_DEPTHS = ("FLOAT", "PCM_24", "PCM_16")
+VALID_EXPORT_BIT_DEPTHS: tuple[CheckoutSubtype, ...] = ("FLOAT", "PCM_24", "PCM_16")
 
 
 def default_export_pool_dir() -> Path:
@@ -111,18 +114,19 @@ def save_export_pool_dir(pool_dir: Path | str, path: Path | None = None) -> None
     set_pref(EXPORT_POOL_DIR_KEY, str(pool_dir), path)
 
 
-def load_export_bit_depth(path: Path | None = None) -> str:
+def load_export_bit_depth(path: Path | None = None) -> CheckoutSubtype:
     raw = get_pref(EXPORT_BIT_DEPTH_KEY, "FLOAT", path)
     return raw if raw in VALID_EXPORT_BIT_DEPTHS else "FLOAT"
 
 
-def save_export_bit_depth(depth: str, path: Path | None = None) -> None:
+def save_export_bit_depth(depth: str, path: Path | None = None) -> CheckoutSubtype:
     if depth not in VALID_EXPORT_BIT_DEPTHS:
         raise ValueError(
             f"invalid export bit depth {depth!r}; "
             f"must be one of {VALID_EXPORT_BIT_DEPTHS}"
         )
     set_pref(EXPORT_BIT_DEPTH_KEY, depth, path)
+    return depth
 
 
 SCRATCH_DIR_KEY = "scratch_dir"

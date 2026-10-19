@@ -10,6 +10,7 @@ from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -56,6 +57,7 @@ from flashback_sampler.app.widgets.nav_bar import NavBar
 from flashback_sampler.app.widgets.tactile_button import TactileButton
 from flashback_sampler.app.widgets.turntable_widget import TurntableWidget
 from flashback_sampler.app.widgets.waveform_panel import WaveformPanel
+from flashback_sampler.core.checkout import CheckoutSubtype
 from flashback_sampler.core.drag_export import (
     BYTES_PER_SAMPLE,
     export_span,
@@ -120,7 +122,7 @@ class TurntableWindow(QMainWindow):
 
         self.buffer_turntable = TurntableWidget(side="buffer")
         self.buffer_turntable.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         turntable_row.addWidget(self.buffer_turntable, stretch=1)
 
@@ -128,7 +130,9 @@ class TurntableWindow(QMainWindow):
         turntable_row.addWidget(self.center_bridge)
 
         self.clip_turntable = TurntableWidget(side="clip")
-        self.clip_turntable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.clip_turntable.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         turntable_row.addWidget(self.clip_turntable, stretch=1)
 
         root.addLayout(turntable_row, stretch=6)
@@ -142,7 +146,9 @@ class TurntableWindow(QMainWindow):
 
         self.out_btn = TactileButton("OUT →", variant="primary")
         self.out_btn.setFixedWidth(56)
-        self.out_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.out_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        )
 
         # Align OUT→ vertically with the container, not the full panel height.
         # Top spacing ≈ header row height (8pt label + panel top margin + spacing).
@@ -346,7 +352,7 @@ class TurntableWindow(QMainWindow):
         # Drag-out export prefs — pool dir + bit depth used when rendering
         # a clip for an OS drag (see _render_for_drag).
         self._export_pool_dir: Path = load_export_pool_dir()
-        self._export_bit_depth: str = load_export_bit_depth()
+        self._export_bit_depth: CheckoutSubtype = load_export_bit_depth()
         self._drag_handle_mb: float = load_drag_handle_mb()
         self._drag_alc_sidecar: bool = load_drag_alc_sidecar()
 
@@ -400,7 +406,7 @@ class TurntableWindow(QMainWindow):
             )
             self._tray.show()
             # Keep capture alive when the last window is hidden/closed.
-            QApplication.instance().setQuitOnLastWindowClosed(False)
+            QApplication.setQuitOnLastWindowClosed(False)
         # Poll source health at 1 Hz — drives the in-app chip badges always,
         # and the tray ring/tooltip + error toasts when a tray exists.
         self._status_timer = QTimer(self)
@@ -428,7 +434,7 @@ class TurntableWindow(QMainWindow):
         self.close()
         if self._tray is not None:
             self._tray.hide()
-        QApplication.instance().quit()
+        QApplication.quit()
 
     def _sync_tray(self) -> None:
         if self._tray is not None:
@@ -604,8 +610,7 @@ class TurntableWindow(QMainWindow):
         save_export_pool_dir(path_str)
 
     def _set_export_bit_depth(self, depth: str) -> None:
-        self._export_bit_depth = depth
-        save_export_bit_depth(depth)
+        self._export_bit_depth = save_export_bit_depth(depth)
 
     def _set_drag_handle_mb(self, mb: float) -> None:
         self._drag_handle_mb = float(mb)
@@ -1379,7 +1384,7 @@ class TurntableWindow(QMainWindow):
         """Render for an OS drag; returns a DragRender or None on failure
         (already reported). A clip-deck drag mints a slice when the clip
         has a trim; otherwise the whole clip goes."""
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             if trimmed:
                 # A trimmed drag MINTS a slice, so it meets the same
@@ -1682,11 +1687,9 @@ class TurntableWindow(QMainWindow):
             default_channels=active.channels,
             parent=self,
         )
-        if dlg.exec() != AddSourceDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         preset = dlg.result_preset()
-        if preset is None:
-            return
         name = dlg.result_name() or default_name
         device = dlg.result_device()
         preset = self._probe_and_notify(preset, device)
@@ -2180,7 +2183,7 @@ class TurntableWindow(QMainWindow):
         """Open the ProcessPickerDialog and, on accept, set the slot's
         capture_spec to a per-process CaptureDevice."""
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:
@@ -2189,7 +2192,7 @@ class TurntableWindow(QMainWindow):
 
     def _add_mux_input_from_process(self, slot_index: int) -> None:
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:
@@ -2245,10 +2248,10 @@ class TurntableWindow(QMainWindow):
                 "clipping.\n\n"
                 "Continue?"
             ),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return False
         self._mux_warning_shown = True
         return True
@@ -2294,10 +2297,10 @@ class TurntableWindow(QMainWindow):
             self,
             "Flush buffer?",
             f"Flush all buffered audio on {slot.name!r}?",
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         slot.buffer.flush()
 
@@ -2314,10 +2317,10 @@ class TurntableWindow(QMainWindow):
                 "Existing checkouts on this slot will also be lost — "
                 "they live in the slot's CheckoutManager."
             ),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         try:
             self._state.remove_slot(slot_index)

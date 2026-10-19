@@ -60,7 +60,7 @@ def test_needle_head_centered_below_selected_rim_header_buffer(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(300, 300)
     tt.select_track(1)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     header_cx, header_cy = g.rim_header_center("buffer", 1)
     needle = g.needle_head_rect("buffer", 1)
     # Needle centered on header's x
@@ -73,7 +73,7 @@ def test_needle_head_centered_below_selected_rim_header_clip(qapp):
     tt = TurntableWidget(side="clip")
     tt.resize(300, 300)
     tt.select_track(2)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     header_cx, header_cy = g.rim_header_center("clip", 2)
     needle = g.needle_head_rect("clip", 2)
     assert abs(needle.center().x() - header_cx) < 0.5
@@ -83,7 +83,7 @@ def test_needle_head_centered_below_selected_rim_header_clip(qapp):
 def test_arm_target_is_bottom_inner_corner_buffer(qapp):
     tt = TurntableWidget(side="buffer")
     tt.resize(400, 300)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     x, y = g.arm_target("buffer", 400.0, 300.0)
     # Bottom-right-ish (buffer arm points right-inward toward OUT→ column)
     assert abs(x - 398) < 5  # near right edge
@@ -93,7 +93,7 @@ def test_arm_target_is_bottom_inner_corner_buffer(qapp):
 def test_arm_target_is_bottom_inner_corner_clip(qapp):
     tt = TurntableWidget(side="clip")
     tt.resize(400, 300)
-    g = tt.geometry()
+    g = tt.turntable_geometry()
     x, y = g.arm_target("clip", 400.0, 300.0)
     # Bottom-left-ish (clip arm points left-inward toward OUT→ column)
     assert abs(x - 2) < 5

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtWidgets import QVBoxLayout
+
 from flashback_sampler.app.widgets.center_bridge import CenterBridge
 
 
@@ -25,11 +27,12 @@ def test_buttons_sit_in_lower_portion(qapp):
     """Top stretch should be heavier than bottom stretch so buttons sit low."""
     bridge = CenterBridge()
     layout = bridge.layout()
+    assert isinstance(layout, QVBoxLayout)
     # Layout items: [top_stretch, stop_btn, start_btn, bottom_stretch]
     assert layout.count() == 4
-    top_stretch = layout.itemAt(0).spacerItem()
-    bottom_stretch = layout.itemAt(layout.count() - 1).spacerItem()
-    assert top_stretch is not None
-    assert bottom_stretch is not None
+    top_item = layout.itemAt(0)
+    bottom_item = layout.itemAt(layout.count() - 1)
+    assert top_item is not None and top_item.spacerItem() is not None
+    assert bottom_item is not None and bottom_item.spacerItem() is not None
     # Compare via the layout's stretch factors stored on the items
     assert layout.stretch(0) > layout.stretch(layout.count() - 1)

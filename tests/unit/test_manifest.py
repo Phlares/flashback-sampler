@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -18,7 +19,7 @@ from flashback_sampler.core.manifest import (
 
 
 def _m(**kw) -> Manifest:
-    base = dict(
+    base: dict[str, Any] = dict(
         id="abc123",
         slot="Main",
         rate=48_000,
@@ -49,13 +50,15 @@ def test_read_manifest_fills_file_for_a_manifest_written_before_the_field(tmp_pa
     data = json.loads(root.read_text())
     del data["file"]
     root.write_text(json.dumps(data))
-    assert read_manifest(root).file == "r1"
+    back = read_manifest(root)
+    assert back is not None and back.file == "r1"
 
     sl = write_manifest(tmp_path, _m(id="s1", parent="r1", file="r1"))
     data = json.loads(sl.read_text())
     del data["file"]
     sl.write_text(json.dumps(data))
-    assert read_manifest(sl).file == "r1"
+    back = read_manifest(sl)
+    assert back is not None and back.file == "r1"
 
     del data["n_frames"]
     sl.write_text(json.dumps(data))
@@ -185,7 +188,7 @@ def test_bins_from_json_skips_corrupt_key_and_keeps_valid_one():
 
 def test_bins_from_json_returns_empty_for_non_dict_or_none():
     assert bins_from_json(None, channels=2) == {}
-    assert bins_from_json([1, 2, 3], channels=2) == {}
+    assert bins_from_json([1, 2, 3], channels=2) == {}  # pyright: ignore[reportArgumentType]  # non-dict on purpose
 
 
 def test_read_manifest_tolerates_extra_unknown_fields(tmp_path):

@@ -18,7 +18,8 @@ _qapp: QApplication | None = None
 @pytest.fixture(scope="session")
 def qapp() -> QApplication:
     global _qapp
-    _qapp = QApplication.instance() or QApplication([])
+    existing = QApplication.instance()
+    _qapp = existing if isinstance(existing, QApplication) else QApplication([])
     return _qapp
 
 
@@ -32,7 +33,7 @@ def _delete_top_level_widgets():
     app = QApplication.instance()
     if app is None:
         return
-    for widget in app.topLevelWidgets():
+    for widget in QApplication.topLevelWidgets():
         widget.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 

@@ -23,6 +23,7 @@ from flashback_sampler.core.drag_export import (
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from tests.fixtures.sine_source import ramp_block
 from tests.fixtures.wavread import read_wav
+from tests.unit.test_alc import _value
 
 WHEN = datetime(2026, 7, 15, 13, 5, 9)
 
@@ -240,16 +241,15 @@ def test_render_slice_drag_writes_an_alc_sidecar_at_the_slice(scratch, tmp_path)
     r = render_slice_drag(
         mgr, co.id, tmp_path, "Deck A", handle_mb=handles, alc=True, now=WHEN
     )
-    assert r.sidecar == r.path.with_suffix(".alc") and r.sidecar.exists()
+    assert r.sidecar is not None and r.sidecar == r.path.with_suffix(".alc")
+    assert r.sidecar.exists()
     clip = _alc_clip(r.sidecar)
     # span 150..350, slice 200..300 -> 0.05 s .. 0.15 s into the export
-    assert clip.find("Loop/LoopStart").get("Value") == "0.05"
-    assert clip.find("Loop/LoopEnd").get("Value") == "0.15"
-    assert clip.find("Loop/HiddenLoopEnd").get("Value") == "0.2"  # 200 exported frames
-    assert (
-        clip.find("SampleRef/FileRef/Path").get("Value") == r.path.resolve().as_posix()
-    )
-    assert clip.find("SampleRef/DefaultDuration").get("Value") == "200"
+    assert _value(clip, "Loop/LoopStart") == "0.05"
+    assert _value(clip, "Loop/LoopEnd") == "0.15"
+    assert _value(clip, "Loop/HiddenLoopEnd") == "0.2"  # 200 exported frames
+    assert _value(clip, "SampleRef/FileRef/Path") == r.path.resolve().as_posix()
+    assert _value(clip, "SampleRef/DefaultDuration") == "200"
 
 
 def test_render_slice_drag_writes_no_sidecar_unless_asked(scratch, tmp_path):
@@ -272,8 +272,8 @@ def test_render_root_drag_writes_a_sidecar_only_when_it_has_markers(scratch, tmp
     )
     assert marked.sidecar == marked.path.with_suffix(".alc")
     clip = _alc_clip(marked.sidecar)
-    assert clip.find("Loop/LoopStart").get("Value") == "0.1"
-    assert clip.find("Loop/LoopEnd").get("Value") == "0.3"
+    assert _value(clip, "Loop/LoopStart") == "0.1"
+    assert _value(clip, "Loop/LoopEnd") == "0.3"
 
 
 def test_render_slice_drag_cleans_up_the_wav_and_the_slice_when_the_sidecar_fails(

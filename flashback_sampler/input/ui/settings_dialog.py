@@ -26,6 +26,7 @@ from flashback_sampler.input.sources.global_hotkey import parse_hotkey
 @dataclass
 class _Row:
     action: Action
+    container: QWidget
     binding_label: QLabel
     rebind_btn: QPushButton
     clear_btn: QPushButton
@@ -42,14 +43,16 @@ class _RebindModal(QDialog):
         )
         self._edit = QKeySequenceEdit()
         lay.addWidget(self._edit)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
     def selected_code(self) -> str | None:
         seq = self._edit.keySequence()
-        text = seq.toString(QKeySequence.PortableText)
+        text = seq.toString(QKeySequence.SequenceFormat.PortableText)
         return text or None
 
 
@@ -109,7 +112,9 @@ class KeybindingsDialog(QDialog):
         self._list_layout.addStretch(1)
 
         # Dialog buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -145,6 +150,7 @@ class KeybindingsDialog(QDialog):
         self._rows.append(
             _Row(
                 action=action,
+                container=container,
                 binding_label=binding_label,
                 rebind_btn=rebind_btn,
                 clear_btn=clear_btn,
@@ -166,7 +172,7 @@ class KeybindingsDialog(QDialog):
 
     def _open_rebind(self, action_id: str, action_name: str) -> None:
         modal = _RebindModal(action_name, parent=self)
-        if modal.exec() == QDialog.Accepted:
+        if modal.exec() == QDialog.DialogCode.Accepted:
             code = modal.selected_code()
             if code:
                 self._attempt_rebind(action_id, code)
@@ -258,12 +264,11 @@ class KeybindingsDialog(QDialog):
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
         for row in self._rows:
-            container = row.binding_label.parentWidget()
             if not needle:
-                container.setVisible(True)
+                row.container.setVisible(True)
                 continue
             hay = f"{row.action.name} {row.action.category} {row.action.id}".lower()
-            container.setVisible(needle in hay)
+            row.container.setVisible(needle in hay)
 
     def accept(self) -> None:
         # Commit the edit buffer through the table's single normalization path.

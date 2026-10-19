@@ -115,7 +115,7 @@ def test_default_capture_device_matches_available_devices():
     devices = list_capture_devices()
     dev = default_capture_device()
     if any(d.kind == "loopback" for d in devices):
-        assert dev is DEFAULT_LOOPBACK and dev.follow_default
+        assert dev is DEFAULT_LOOPBACK and DEFAULT_LOOPBACK.follow_default
     elif devices:
         assert dev == devices[0]
     else:
@@ -233,7 +233,8 @@ def test_list_output_devices_maps_render_rows_only(monkeypatch):
 
 def test_default_output_device_is_the_default_render_row(monkeypatch):
     monkeypatch.setattr(audio_devices.native, "list_devices", _fake_devices)
-    assert audio_devices.default_output_device().id == "{spk}"
+    dev = audio_devices.default_output_device()
+    assert dev is not None and dev.id == "{spk}"
 
 
 def test_capture_list_ignores_render_rows(monkeypatch):

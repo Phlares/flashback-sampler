@@ -20,9 +20,11 @@ def _clean_registry():
 
 
 def _press(
-    key: int, modifiers: Qt.KeyboardModifier = Qt.NoModifier, auto_repeat: bool = False
+    key: int,
+    modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+    auto_repeat: bool = False,
 ) -> QKeyEvent:
-    return QKeyEvent(QEvent.KeyPress, key, modifiers, 0, 0, 0, "", auto_repeat, 1)
+    return QKeyEvent(QEvent.Type.KeyPress, key, modifiers, 0, 0, 0, "", auto_repeat, 1)
 
 
 def test_press_event_invokes_bound_action(qapp):
@@ -40,7 +42,7 @@ def test_press_event_invokes_bound_action(qapp):
     widget = QWidget()
     source = KeyboardSource(table, widget)
 
-    source.eventFilter(widget, _press(Qt.Key_Space))
+    source.eventFilter(widget, _press(Qt.Key.Key_Space))
     assert fired == [1]
 
 
@@ -59,7 +61,15 @@ def test_release_event_ignored(qapp):
     widget = QWidget()
     source = KeyboardSource(table, widget)
     release = QKeyEvent(
-        QEvent.KeyRelease, Qt.Key_Space, Qt.NoModifier, 0, 0, 0, "", False, 1
+        QEvent.Type.KeyRelease,
+        Qt.Key.Key_Space,
+        Qt.KeyboardModifier.NoModifier,
+        0,
+        0,
+        0,
+        "",
+        False,
+        1,
     )
     source.eventFilter(widget, release)
     assert fired == []
@@ -79,7 +89,10 @@ def test_modifier_chord_resolves(qapp):
     table = BindingTable()
     widget = QWidget()
     source = KeyboardSource(table, widget)
-    event = _press(Qt.Key_R, Qt.ControlModifier | Qt.ShiftModifier)
+    event = _press(
+        Qt.Key.Key_R,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
     source.eventFilter(widget, event)
     assert fired == [1]
 
@@ -99,7 +112,7 @@ def test_auto_repeat_flag_respects_ignore_repeat_policy(qapp):
     table = BindingTable()
     widget = QWidget()
     source = KeyboardSource(table, widget)
-    source.eventFilter(widget, _press(Qt.Key_R, auto_repeat=False))
-    source.eventFilter(widget, _press(Qt.Key_R, auto_repeat=True))
-    source.eventFilter(widget, _press(Qt.Key_R, auto_repeat=True))
+    source.eventFilter(widget, _press(Qt.Key.Key_R, auto_repeat=False))
+    source.eventFilter(widget, _press(Qt.Key.Key_R, auto_repeat=True))
+    source.eventFilter(widget, _press(Qt.Key.Key_R, auto_repeat=True))
     assert fired == [1]

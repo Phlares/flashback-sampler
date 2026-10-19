@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from flashback_sampler.core.source_status import (
     Severity,
     SourceSnapshot,
@@ -11,7 +13,7 @@ from flashback_sampler.core.source_status import (
 
 
 def snap(**kw):
-    base = dict(
+    base: dict[str, Any] = dict(
         capturing=True,
         peak=0.2,
         silent_seconds=0.0,

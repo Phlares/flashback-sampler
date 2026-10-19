@@ -49,7 +49,7 @@ class WaveformPanel(QWidget):
 
         # Container: visible bordered box holding waveform + time readouts
         self.container = QFrame(self)
-        self.container.setFrameShape(QFrame.NoFrame)
+        self.container.setFrameShape(QFrame.Shape.NoFrame)
         self.container.setStyleSheet(
             f"QFrame {{ background-color: {EREBUS['plate']}; border: 1px solid {EREBUS['hairline_strong']}; }}"
         )

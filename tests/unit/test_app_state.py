@@ -13,7 +13,14 @@ import pytest
 from flashback_sampler.app.state import AppState
 from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.native import NativeAudioCircularBuffer
+from flashback_sampler.core.quality_presets import QualityPreset, preset_by_name
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
+
+
+def _preset(name: str) -> QualityPreset:
+    preset = preset_by_name(name)
+    assert preset is not None, name
+    return preset
 
 
 def test_core_package_exports_nothing_from_a_python_buffer():
@@ -74,10 +81,8 @@ def test_backward_compat_properties_delegate_to_active_slot():
 
 
 def test_add_slot_appends_and_does_not_change_active():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
-    new_slot = st.add_slot(preset_by_name("SCRATCH"), name="Discord")
+    new_slot = st.add_slot(_preset("SCRATCH"), name="Discord")
     assert len(st.slots) == 2
     assert st.slots[1] is new_slot
     assert new_slot.name == "Discord"
@@ -86,10 +91,8 @@ def test_add_slot_appends_and_does_not_change_active():
 
 
 def test_set_active_slot_index_rotates_backward_compat_properties():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=16_000, channels=1)
-    slot_b = st.add_slot(preset_by_name("SCRATCH"), name="Discord")
+    slot_b = st.add_slot(_preset("SCRATCH"), name="Discord")
 
     # Before switch: properties point at slot 0 (rate 16_000)
     assert st.sample_rate == 16_000
@@ -112,11 +115,9 @@ def test_set_active_slot_out_of_range_raises():
 
 
 def test_remove_slot_adjusts_active_index():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
-    st.add_slot(preset_by_name("CHAT"))
+    st.add_slot(_preset("SCRATCH"))
+    st.add_slot(_preset("CHAT"))
     assert len(st.slots) == 3
 
     st.set_active_slot_index(2)
@@ -132,11 +133,10 @@ def test_remove_last_slot_raises():
 
 
 def test_remove_slot_stops_capture():
-    from flashback_sampler.core.quality_presets import preset_by_name
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    new_slot = st.add_slot(preset_by_name("SCRATCH"))
+    new_slot = st.add_slot(_preset("SCRATCH"))
     src = FakeCaptureSourceNoThread(
         new_slot.buffer,
         sample_rate=new_slot.sample_rate,
@@ -151,9 +151,7 @@ def test_remove_slot_stops_capture():
     assert len(st.slots) == 1
 
 
-def test_remove_slot_closes_buffer():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
+def test_remove_slot_closes_buffer(monkeypatch):
     class _RecordingBuffer:
         def __init__(self):
             self.close_calls = 0
@@ -162,11 +160,11 @@ def test_remove_slot_closes_buffer():
             self.close_calls += 1
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(_preset("SCRATCH"))
     survivor_buffer = _RecordingBuffer()
     removed_buffer = _RecordingBuffer()
-    st.slots[0].buffer = survivor_buffer
-    st.slots[1].buffer = removed_buffer
+    monkeypatch.setattr(st.slots[0], "buffer", survivor_buffer)
+    monkeypatch.setattr(st.slots[1], "buffer", removed_buffer)
 
     st.remove_slot(1)
 
@@ -174,12 +172,16 @@ def test_remove_slot_closes_buffer():
     assert survivor_buffer.close_calls == 0
 
 
-def test_remove_slot_stop_precedes_close():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
+def test_remove_slot_stop_precedes_close(monkeypatch):
     call_order: list[str] = []
 
     class _RecordingSource:
+        sample_rate = 1000
+        channels = 1
+
+        def start(self) -> None:
+            pass
+
         def stop(self) -> None:
             call_order.append("stop")
 
@@ -197,9 +199,9 @@ def test_remove_slot_stop_precedes_close():
             call_order.append("close")
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    new_slot = st.add_slot(preset_by_name("SCRATCH"))
+    new_slot = st.add_slot(_preset("SCRATCH"))
     new_slot.bind_capture(_RecordingSource())
-    new_slot.buffer = _RecordingBuffer()
+    monkeypatch.setattr(new_slot, "buffer", _RecordingBuffer())
 
     st.remove_slot(1)
 
@@ -207,10 +209,8 @@ def test_remove_slot_stop_precedes_close():
 
 
 def test_rebuild_buffer_scoped_to_active_slot():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))  # slot 1
+    st.add_slot(_preset("SCRATCH"))  # slot 1
     assert len(st.slots) == 2
 
     # Active is still slot 0
@@ -222,10 +222,8 @@ def test_rebuild_buffer_scoped_to_active_slot():
 
 
 def test_apply_checkout_caps_scoped_to_active_slot():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(_preset("SCRATCH"))
 
     st.apply_checkout_caps(max_active=3)
     # Active slot (0) updated
@@ -235,8 +233,6 @@ def test_apply_checkout_caps_scoped_to_active_slot():
 
 
 def test_total_project_ram_bytes_counts_every_slot():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
     # Main slot ~1.92 MB (5s * 48k * 2 * 4). capacity_bytes, not
     # .buffer.nbytes -- the latter is the raw storage array, which is
@@ -245,7 +241,7 @@ def test_total_project_ram_bytes_counts_every_slot():
     main_bytes = st.slots[0].buffer.capacity_bytes
     assert main_bytes == 5 * 48_000 * 2 * 4
 
-    st.add_slot(preset_by_name("SCRATCH"))  # +~11 MB
+    st.add_slot(_preset("SCRATCH"))  # +~11 MB
     total = st.total_project_ram_bytes()
     assert total > main_bytes
     # SCRATCH = 16k mono 180s = 16000 * 180 * 4 = 11_520_000
@@ -273,39 +269,34 @@ def test_total_project_ram_includes_checkouts():
 
 
 def test_add_slot_rejects_when_over_the_max_footprint():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=5.0, sample_rate=48_000, channels=2)
     # A footprint that only fits the initial slot
     current = st.total_project_ram_mb()
     st.set_max_footprint_mb(current + 1)  # tiny headroom
 
     with pytest.raises(RuntimeError, match="Max footprint") as info:
-        st.add_slot(preset_by_name("FULL"))
+        st.add_slot(_preset("FULL"))
     # The message carries both numbers the user needs to act.
     assert f"{current + 1:.0f} MB" in str(info.value)
 
 
 def test_add_slot_succeeds_within_the_max_footprint():
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(4096.0)
-    slot = st.add_slot(preset_by_name("CHAT"))
+    slot = st.add_slot(_preset("CHAT"))
     assert slot is not None
     assert len(st.slots) == 2
 
 
 def test_max_footprint_zero_means_uncapped(monkeypatch):
     import flashback_sampler.app.state as state_mod
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)
     assert st.max_footprint_mb == 0.0
     # Plenty of free memory reported: only the cap could refuse, and there is none.
     monkeypatch.setattr(state_mod.native, "mem_info", lambda: (1 << 40, 1 << 40))
-    assert st.add_slot(preset_by_name("FULL")) is not None
+    assert st.add_slot(_preset("FULL")) is not None
 
 
 def test_max_footprint_negative_floors_to_uncapped():
@@ -316,7 +307,6 @@ def test_max_footprint_negative_floors_to_uncapped():
 
 def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
     import flashback_sampler.app.state as state_mod
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)  # uncapped: only the free-memory clause can refuse
@@ -324,18 +314,17 @@ def test_add_slot_rejects_a_ring_larger_than_free_physical_memory(monkeypatch):
         state_mod.native, "mem_info", lambda: (1 << 40, 1024 * 1024)
     )  # 1 MB free
     with pytest.raises(RuntimeError, match="free") as info:
-        st.add_slot(preset_by_name("FULL"))
+        st.add_slot(_preset("FULL"))
     assert "1 MB" in str(info.value)
 
 
 def test_free_memory_clause_is_skipped_when_the_platform_cannot_say(monkeypatch):
     import flashback_sampler.app.state as state_mod
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.set_max_footprint_mb(0)
     monkeypatch.setattr(state_mod.native, "mem_info", lambda: (0, 0))
-    assert st.add_slot(preset_by_name("CHAT")) is not None
+    assert st.add_slot(_preset("CHAT")) is not None
 
 
 def test_default_max_footprint_is_a_quarter_of_physical_ram(monkeypatch, tmp_path):
@@ -360,7 +349,6 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
     spec, a slot override, or a mux list). Unarmed slots and inputs do
     not count. Warn, do not block: the caller decides what to show."""
     from flashback_sampler.app.audio_devices import CaptureDevice, OutputDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     st.output_spec = OutputDevice(
@@ -371,17 +359,17 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
     )
     main = st.slots[0]
     st.add_slot(
-        preset_by_name("SCRATCH"),
+        _preset("SCRATCH"),
         name="Mic",
         capture_spec=CaptureDevice(kind="input", name="Mic", id="{mic}"),
     )
-    mux = st.add_slot(preset_by_name("SCRATCH"), name="Mux")
+    mux = st.add_slot(_preset("SCRATCH"), name="Mux")
     mux.capture_specs = [
         CaptureDevice(kind="input", name="Line", id="{line}"),
         CaptureDevice(kind="loopback", name="Speakers  [loopback]", id="{spk}"),
     ]
     off = st.add_slot(
-        preset_by_name("SCRATCH"),
+        _preset("SCRATCH"),
         name="Off",
         armed=False,
         capture_spec=CaptureDevice(
@@ -390,6 +378,7 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
     )
 
     msg = st.preview_feedback_warning()
+    assert msg is not None
     assert "Main" in msg and "Default output" in msg and "Speakers" in msg
     assert "Mux" in msg and "Mic" not in msg and "Off" not in msg and "Line" not in msg
 
@@ -400,7 +389,8 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
         st.preview_feedback_warning() is None
     )  # {spk} is no longer the preview endpoint
     st.set_output_spec(OutputDevice(id="{spk}", name="Speakers", max_output_channels=2))
-    assert "Off" in st.preview_feedback_warning()
+    msg = st.preview_feedback_warning()
+    assert msg is not None and "Off" in msg
     main.armed = mux.armed = off.armed = False
     assert st.preview_feedback_warning() is None
     st.shutdown()
@@ -408,11 +398,10 @@ def test_preview_feedback_warning_names_every_armed_source_on_the_preview_endpoi
 
 def test_effective_capture_spec_prefers_slot_override():
     from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     slot_a = st.slots[0]
-    slot_b = st.add_slot(preset_by_name("SCRATCH"))
+    slot_b = st.add_slot(_preset("SCRATCH"))
 
     global_dev = CaptureDevice(kind="loopback", name="GlobalSpeaker", id="gs")
     override_dev = CaptureDevice(kind="input", name="MicA", id="7")
@@ -438,11 +427,10 @@ def test_effective_capture_spec_falls_through_when_slot_has_none():
 
 def test_add_slot_carries_capture_spec_override():
     from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
     dev = CaptureDevice(kind="input", name="MicB", id="9")
-    slot = st.add_slot(preset_by_name("SCRATCH"), capture_spec=dev)
+    slot = st.add_slot(_preset("SCRATCH"), capture_spec=dev)
     assert slot.capture_spec is dev
 
 
@@ -453,7 +441,6 @@ def test_build_capture_for_slot_uses_override_path():
     """
     import flashback_sampler.app.state as state_mod
     from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     captured_device = {}
 
@@ -468,7 +455,7 @@ def test_build_capture_for_slot_uses_override_path():
         global_dev = CaptureDevice(kind="loopback", name="G", id="g")
         override_dev = CaptureDevice(kind="input", name="O", id="11")
         st.capture_spec = global_dev
-        slot = st.add_slot(preset_by_name("SCRATCH"), capture_spec=override_dev)
+        slot = st.add_slot(_preset("SCRATCH"), capture_spec=override_dev)
         st.build_capture_for_slot(slot)
         assert captured_device["d"] is override_dev
 
@@ -481,11 +468,10 @@ def test_build_capture_for_slot_uses_override_path():
 
 
 def test_shutdown_stops_all_slots():
-    from flashback_sampler.core.quality_presets import preset_by_name
     from tests.fixtures.fake_capture import FakeCaptureSourceNoThread
 
     st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-    st.add_slot(preset_by_name("SCRATCH"))
+    st.add_slot(_preset("SCRATCH"))
     for slot in st.slots:
         src = FakeCaptureSourceNoThread(
             slot.buffer, sample_rate=slot.sample_rate, channels=slot.channels
@@ -621,7 +607,6 @@ def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
     devices themselves — no factories, no staging buffers in Python."""
     import flashback_sampler.app.state as state_mod
     from flashback_sampler.app.audio_devices import CaptureDevice
-    from flashback_sampler.core.quality_presets import preset_by_name
 
     seen = {}
 
@@ -647,7 +632,7 @@ def test_build_capture_for_slot_routes_two_specs_to_the_mixer():
     )
     try:
         st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
-        slot = st.add_slot(preset_by_name("SCRATCH"))
+        slot = st.add_slot(_preset("SCRATCH"))
         d1 = CaptureDevice(kind="loopback", name="A", id="a")
         d2 = CaptureDevice(kind="input", name="B", id="b")
         slot.capture_specs = [d1, d2]
@@ -1212,12 +1197,10 @@ def test_adoption_skips_a_slice_that_starts_before_its_parent(tmp_path):
 
 
 def test_remove_slot_discards_its_checkouts_and_files(tmp_path):
-    from flashback_sampler.core.quality_presets import preset_by_name
-
     st = AppState(
         buffer_seconds=1.0, sample_rate=1000, channels=1, scratch_dir=tmp_path
     )
-    slot = st.add_slot(preset_by_name("SCRATCH"))
+    slot = st.add_slot(_preset("SCRATCH"))
     slot.buffer.write(np.zeros((16_000, 1), dtype=np.float32))
     co = slot.checkout_manager.create(duration_s=0.1)
     st.remove_slot(1)

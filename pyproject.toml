@@ -80,3 +80,9 @@ output = "coverage.xml"
 select = ["E", "F", "W", "I", "B", "UP"]
 # Line length belongs to the formatter.
 ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+pythonPlatform = "Windows"
+# Setting exclude replaces pyright's default list, so the defaults are repeated.
+exclude = ["build", "dist", "_ToRemove", "**/node_modules", "**/__pycache__", "**/.*"]

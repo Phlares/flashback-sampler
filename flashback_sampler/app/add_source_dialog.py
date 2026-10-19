@@ -151,7 +151,7 @@ class AddSourceDialog(QDialog):
         # From Process…. Device list hidden behind a submenu so the
         # primary picker stays simple.
         self._source_input_btn = QPushButton(self._selected_label)
-        self._source_input_btn.setCursor(Qt.PointingHandCursor)
+        self._source_input_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._source_input_btn.setStyleSheet(
             f"QPushButton {{ text-align: left; padding: 4px 8px; "
             f"border: 1px solid {EREBUS['ash']}; background: transparent; "
@@ -171,7 +171,9 @@ class AddSourceDialog(QDialog):
 
         root.addStretch(1)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
@@ -203,7 +205,7 @@ class AddSourceDialog(QDialog):
     # Result accessors
     # ------------------------------------------------------------------
 
-    def result_preset(self) -> QualityPreset | None:
+    def result_preset(self) -> QualityPreset:
         sr, ch, secs = self._current_inputs()
         return QualityPreset(
             name="CUSTOM",
@@ -263,7 +265,7 @@ class AddSourceDialog(QDialog):
 
     def _pick_process(self) -> None:
         dlg = ProcessPickerDialog(parent=self)
-        if dlg.exec() != ProcessPickerDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         device = dlg.result_device()
         if device is None:

@@ -277,13 +277,13 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     captured = []
     chip.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
-        QEvent.MouseButtonPress,
+        QEvent.Type.MouseButtonPress,
         chip.rect().center().toPointF()
         if hasattr(chip.rect().center(), "toPointF")
         else QPoint(5, 5),
-        Qt.RightButton,
-        Qt.RightButton,
-        Qt.NoModifier,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     chip.mousePressEvent(ev)
     assert len(captured) == 1
@@ -749,7 +749,8 @@ def test_save_trimmed_mints_a_slice_and_makes_room_at_the_cap(
         )
         assert mgr.get(co.id).state == "pending"
         assert read_wav(target)[1].frames == n // 4
-        assert win._currently_displayed_checkout().id == s.id
+        shown = win._currently_displayed_checkout()
+        assert shown is not None and shown.id == s.id
     finally:
         win.close()
 
@@ -1018,12 +1019,15 @@ def test_set_export_prefs_persist_and_apply(qapp, state, tmp_path, monkeypatch):
     import flashback_sampler.app.turntable_window as tw
 
     saved = {}
+
+    def save_depth(d):
+        saved["depth"] = d
+        return d
+
     monkeypatch.setattr(
         tw, "save_export_pool_dir", lambda p: saved.__setitem__("dir", str(p))
     )
-    monkeypatch.setattr(
-        tw, "save_export_bit_depth", lambda d: saved.__setitem__("depth", d)
-    )
+    monkeypatch.setattr(tw, "save_export_bit_depth", save_depth)
     win = TurntableWindow(state)
     try:
         win._set_export_pool_dir(str(tmp_path / "pool"))
@@ -1318,7 +1322,7 @@ def test_flush_confirm_names_the_action_not_a_stale_seconds_figure(
 
     def question(parent, title, text, *a, **k):
         asked.append(text)
-        return tw.QMessageBox.Yes
+        return tw.QMessageBox.StandardButton.Yes
 
     monkeypatch.setattr(tw.QMessageBox, "question", question)
     flushed = []
@@ -1615,3 +1619,36 @@ def test_clip_drag_at_the_cap_never_evicts_the_clip_being_dragged(
         assert [i for i in ids if mgr.get(i).parent_id == co.id]  # the slice was minted
     finally:
         win.close()
+
+
+def _no_app_instance(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: None))
+
+
+def test_tray_setup_without_app(qapp, state, monkeypatch):
+    """With a tray, the window keeps the app alive past its last window.
+    That call must not need a QApplication instance."""
+    import flashback_sampler.app.turntable_window as tw
+
+    monkeypatch.setattr(tw, "tray_supported", lambda: True)
+    _no_app_instance(monkeypatch)
+    keep = qapp.quitOnLastWindowClosed()
+    win = TurntableWindow(state)
+    try:
+        assert win._tray is not None
+        assert not qapp.quitOnLastWindowClosed()
+    finally:
+        win._quitting = True
+        win.close()
+        qapp.setQuitOnLastWindowClosed(keep)
+
+
+def test_request_quit_without_app(qapp, state, monkeypatch):
+    """Tray Quit tears the window down even when there is no
+    QApplication instance to quit."""
+    win = TurntableWindow(state)
+    _no_app_instance(monkeypatch)
+    win._request_quit()
+    assert win._quitting

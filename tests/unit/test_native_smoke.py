@@ -61,7 +61,7 @@ def test_zero_copy_storage_view_sees_writes():
         duration_seconds=1.0, sample_rate=8, channels=1
     )
     buf.write(np.array([0.5], dtype=np.float32))
-    assert buf.buffer[0, 0] == np.float32(0.5)
+    assert buf.buffer is not None and buf.buffer[0, 0] == np.float32(0.5)
     buf.close()
 
 

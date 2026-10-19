@@ -13,37 +13,43 @@ from flashback_sampler.input.sources.global_hotkey import (
 )
 
 
+def _parsed(code: str) -> tuple[int, int]:
+    result = parse_hotkey(code)
+    assert result is not None, code
+    return result
+
+
 def test_modifier_plus_letter():
-    mods, vk = parse_hotkey("Ctrl+Alt+O")
+    mods, vk = _parsed("Ctrl+Alt+O")
     assert mods == (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT)
     assert vk == ord("O")
 
 
 def test_single_modifier():
-    mods, vk = parse_hotkey("Alt+R")
+    mods, vk = _parsed("Alt+R")
     assert mods == (MOD_ALT | MOD_NOREPEAT)
     assert vk == ord("R")
 
 
 def test_shift_combo():
-    mods, vk = parse_hotkey("Ctrl+Shift+C")
+    mods, vk = _parsed("Ctrl+Shift+C")
     assert mods == (MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT)
     assert vk == ord("C")
 
 
 def test_function_key():
-    mods, vk = parse_hotkey("Alt+F5")
+    mods, vk = _parsed("Alt+F5")
     assert mods == (MOD_ALT | MOD_NOREPEAT)
     assert vk == 0x74  # VK_F5
 
 
 def test_digit():
-    mods, vk = parse_hotkey("Ctrl+Alt+1")
+    mods, vk = _parsed("Ctrl+Alt+1")
     assert vk == ord("1")
 
 
 def test_modified_space_is_ok():
-    mods, vk = parse_hotkey("Ctrl+Space")
+    mods, vk = _parsed("Ctrl+Space")
     assert mods == (MOD_CONTROL | MOD_NOREPEAT)
     assert vk == 0x20
 

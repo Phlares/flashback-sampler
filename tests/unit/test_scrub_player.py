@@ -13,7 +13,8 @@ from flashback_sampler.core.scrub_player import NativeScrubPlayer
 class _FakePlaybackLib:
     def __init__(self):
         self.calls = []
-        self.state = (0, 0, 0, 0, 0)  # running, playing, cursor, clip_frames, mix_rate
+        # running, playing, cursor, clip_frames, mix_rate
+        self.state: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
         self.bind_status = 0
         self.play_status = 0
         self.err = b""

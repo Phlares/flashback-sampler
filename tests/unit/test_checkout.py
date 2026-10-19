@@ -13,7 +13,7 @@ import pytest
 
 from flashback_sampler.core import native
 from flashback_sampler.core.checkout import Checkout, CheckoutManager
-from flashback_sampler.core.manifest import manifest_path, read_manifest
+from flashback_sampler.core.manifest import Manifest, manifest_path, read_manifest
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 from tests.fixtures.sine_source import ramp_block
 from tests.fixtures.wavread import read_wav
@@ -25,6 +25,12 @@ def scratch():
     s.start()
     yield s
     s.close()
+
+
+def _manifest(scratch_dir, checkout_id) -> Manifest:
+    m = read_manifest(manifest_path(scratch_dir, checkout_id))
+    assert m is not None
+    return m
 
 
 def _mgr(scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, **kw):
@@ -75,9 +81,9 @@ def test_create_checkout_snapshots_latest_n_seconds(scratch, tmp_path):
 def test_create_writes_a_manifest_with_bins(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.5)
-    m = read_manifest(manifest_path(tmp_path, co.id))
-    assert m is not None and m.slot == "Main" and m.n_frames == 500 and m.parent is None
-    assert set(m.bins) == {"540", "360"}
+    m = _manifest(tmp_path, co.id)
+    assert m.slot == "Main" and m.n_frames == 500 and m.parent is None
+    assert m.bins is not None and set(m.bins) == {"540", "360"}
     assert co.bins["540"].shape == (540, 2, 1) and co.bins["360"].shape == (360, 2, 1)
     # 360 bins over 500 frames: binEdge truncation gives bin 0 exactly
     # one frame (frame 0 only, abs sample 1000) -- not two.
@@ -332,7 +338,7 @@ def test_save_trimmed_uses_the_trim_and_updates_the_manifest(scratch, tmp_path):
     mgr.save(co.id, out, trimmed=True, subtype="PCM_16")
     audio, info = read_wav(out)
     assert info.frames == 200 and info.subtype == "PCM_16"
-    m = read_manifest(manifest_path(tmp_path, co.id))
+    m = _manifest(tmp_path, co.id)
     assert (m.trim_in, m.trim_out) == (100, 300)
     full = tmp_path / "f.wav"
     mgr.save(co.id, full, trimmed=False, mark_saved=False)
@@ -344,9 +350,9 @@ def test_save_validation(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.1)
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")
+        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")  # pyright: ignore[reportArgumentType]  # invalid on purpose
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")
+        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")  # pyright: ignore[reportArgumentType]  # invalid on purpose
     with pytest.raises(KeyError):
         mgr.save("nope", tmp_path / "x.wav")
     with pytest.raises(KeyError):
@@ -360,7 +366,7 @@ def test_mark_saved_sets_state(scratch, tmp_path):
     co = mgr.create(duration_s=0.1)
     mgr.mark_saved(co.id)
     assert mgr.get(co.id).state == "saved"
-    m = read_manifest(manifest_path(tmp_path, co.id))
+    m = _manifest(tmp_path, co.id)
     assert m.state == "saved"
 
 
@@ -411,12 +417,12 @@ def test_pin_and_peak_bins_and_resident_bytes(scratch, tmp_path):
 
 
 def test_adopt_root_and_slice_share_one_file_with_a_refcount(scratch, tmp_path):
-    from flashback_sampler.core.manifest import Manifest, write_manifest
+    from flashback_sampler.core.manifest import write_manifest
 
     mgr = _mgr(scratch, tmp_path)
     root = mgr.create(duration_s=0.5)
     _wait_written(mgr, root)
-    m_root = read_manifest(manifest_path(tmp_path, root.id))
+    m_root = _manifest(tmp_path, root.id)
     mgr.close()  # handles gone, files stay
     mgr2 = _mgr(scratch, tmp_path, frames=0)
     a = mgr2.adopt_root(m_root, root.path, partial=False)
@@ -455,7 +461,7 @@ def test_adopt_root_partial_clamps_to_the_file(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     root = mgr.create(duration_s=0.5)
     _wait_written(mgr, root)
-    m = read_manifest(manifest_path(tmp_path, root.id))
+    m = _manifest(tmp_path, root.id)
     mgr.close()
     # chop the file to 200 frames
     data = root.path.read_bytes()
@@ -463,7 +469,7 @@ def test_adopt_root_partial_clamps_to_the_file(scratch, tmp_path):
     mgr2 = _mgr(scratch, tmp_path, frames=0)
     a = mgr2.adopt_root(m, root.path, partial=True)
     assert a.n_frames == 200 and a.partial is True
-    assert read_manifest(manifest_path(tmp_path, a.id)).partial is True
+    assert _manifest(tmp_path, a.id).partial is True
 
 
 def _boom(*_a, **_k):
@@ -477,7 +483,7 @@ def test_engine_errors_surface_as_one_runtimeerror_everywhere(
     (RuntimeError, OSError) into a single RuntimeError, regardless of
     which underlying call fails -- create_from_abs_range, export_range
     (save's path), adopt_root, adopt_slice."""
-    from flashback_sampler.core.manifest import Manifest, write_manifest
+    from flashback_sampler.core.manifest import write_manifest
 
     mgr = _mgr(scratch, tmp_path)
     with monkeypatch.context() as m:
@@ -493,7 +499,7 @@ def test_engine_errors_surface_as_one_runtimeerror_everywhere(
 
     root = mgr.create(duration_s=0.5)
     _wait_written(mgr, root)
-    m_root = read_manifest(manifest_path(tmp_path, root.id))
+    m_root = _manifest(tmp_path, root.id)
     mgr.close()
     mgr2 = _mgr(scratch, tmp_path, frames=0)
     with monkeypatch.context() as m:
@@ -591,7 +597,7 @@ def test_slice_references_the_parent_file_and_is_saved(scratch, tmp_path):
         1299.0
     )  # slice frame 199 = parent frame 299
     assert mgr.file_refcount(parent.path) == 2
-    m = read_manifest(manifest_path(tmp_path, s.id))
+    m = _manifest(tmp_path, s.id)
     assert m.parent == parent.id and m.start_frame == 100
     mgr.discard(parent.id)
     assert parent.path.exists()
@@ -608,9 +614,9 @@ def test_manifests_name_the_file_owning_checkout(scratch, tmp_path):
     root = mgr.create(duration_s=0.5)
     s1 = mgr.slice(root.id, 100, 300)
     s2 = mgr.slice(s1.id, 50, 100)
-    assert read_manifest(manifest_path(tmp_path, root.id)).file == root.id
-    assert read_manifest(manifest_path(tmp_path, s1.id)).file == root.id
-    assert read_manifest(manifest_path(tmp_path, s2.id)).file == root.id
+    assert _manifest(tmp_path, root.id).file == root.id
+    assert _manifest(tmp_path, s1.id).file == root.id
+    assert _manifest(tmp_path, s2.id).file == root.id
 
 
 def test_slice_rejects_a_span_past_the_parent_and_a_failed_parent(
