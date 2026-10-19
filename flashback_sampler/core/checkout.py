@@ -177,6 +177,18 @@ class CheckoutManager:
         self._file_refs: dict[Path, int] = {}
         self._pinned_id: str | None = None
 
+    @property
+    def pinned_id(self) -> str | None:
+        return self._pinned_id
+
+    def set_max_active(self, n: int) -> None:
+        self._max_active = int(n)
+
+    def rebind_buffer(self, buffer: NativeAudioCircularBuffer) -> None:
+        """Cut new checkouts from `buffer`. Existing checkouts are
+        file-backed and keep working."""
+        self._buffer = buffer
+
     # ------------------------------------------------------------------
     # Creation
     # ------------------------------------------------------------------

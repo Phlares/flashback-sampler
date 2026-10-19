@@ -146,7 +146,7 @@ def bins_to_json(bins: dict[str, np.ndarray]) -> dict:
     }
 
 
-def bins_from_json(d: dict | None, channels: int) -> dict[str, np.ndarray]:
+def bins_from_json(d: object, channels: int) -> dict[str, np.ndarray]:
     """Same skip-don't-crash contract as `read_manifest`: a corrupt key
     (not an int string), a non-dict `bins`, or non-numeric contents are
     dropped rather than raised — adoption drops one bin size, not the

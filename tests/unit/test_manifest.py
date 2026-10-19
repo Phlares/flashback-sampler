@@ -188,7 +188,7 @@ def test_bins_from_json_skips_corrupt_key_and_keeps_valid_one():
 
 def test_bins_from_json_returns_empty_for_non_dict_or_none():
     assert bins_from_json(None, channels=2) == {}
-    assert bins_from_json([1, 2, 3], channels=2) == {}  # pyright: ignore[reportArgumentType]  # non-dict on purpose
+    assert bins_from_json([1, 2, 3], channels=2) == {}
 
 
 def test_read_manifest_tolerates_extra_unknown_fields(tmp_path):

@@ -1261,10 +1261,10 @@ def test_selecting_a_clip_pins_it_and_bins_come_from_the_handle(qapp, state):
         a = mgr.create(duration_s=0.2)
         b = mgr.create(duration_s=0.3)
         win._refresh_clip_side(auto_select_newest=True)
-        assert mgr._pinned_id == b.id  # noqa: SLF001
+        assert mgr.pinned_id == b.id
         win.clip_turntable.select_track(0)
         win._refresh_clip_side()
-        assert mgr._pinned_id == a.id  # noqa: SLF001
+        assert mgr.pinned_id == a.id
         assert win._clip_bins_cache[a.id]["panel_bins"].shape == (
             360,
             2,

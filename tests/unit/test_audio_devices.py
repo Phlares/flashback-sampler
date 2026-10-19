@@ -32,16 +32,17 @@ class _FakeBuffer:
     channels = 2
 
 
-def test_capture_device_is_frozen():
-    d = CaptureDevice(kind="loopback", name="Speakers", id="Speakers")
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        d.name = "other"  # type: ignore[misc]
-
-
-def test_output_device_is_frozen():
-    d = OutputDevice(id="{spk}", name="Out", max_output_channels=2)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        d.id = "{hp}"  # type: ignore[misc]
+@pytest.mark.parametrize(
+    "device",
+    [
+        CaptureDevice(kind="loopback", name="Speakers", id="Speakers"),
+        OutputDevice(id="{spk}", name="Out", max_output_channels=2),
+    ],
+)
+def test_devices_are_frozen(device):
+    for f in dataclasses.fields(device):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(device, f.name, None)
 
 
 def test_list_capture_devices_does_not_raise():

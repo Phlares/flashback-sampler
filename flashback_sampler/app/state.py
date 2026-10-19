@@ -511,7 +511,7 @@ class AppState:
         """
         mgr = self.active_slot.checkout_manager
         if max_active is not None:
-            mgr._max_active = int(max_active)  # noqa: SLF001
+            mgr.set_max_active(max_active)
 
     def rebuild_buffer(self, new_seconds: float) -> None:
         """
@@ -521,7 +521,7 @@ class AppState:
 
         Existing Checkouts are preserved — they're file-backed scratch
         handles, independent of the ring they were cut from. The active
-        slot's CheckoutManager._buffer reference is updated so new
+        slot's CheckoutManager is rebound so new
         checkouts pull from the fresh ring.
         """
         slot = self.active_slot
@@ -538,7 +538,7 @@ class AppState:
         new_buf.gain = old_buf.gain  # preserve the source's record gain
         slot.buffer = new_buf
         slot.buffer_seconds = float(new_seconds)
-        slot.checkout_manager._buffer = new_buf  # noqa: SLF001
+        slot.checkout_manager.rebind_buffer(new_buf)
         # Capture source, if present, was writing into the old buffer.
         # Drop it so the caller rebuilds from state.build_capture().
         slot.capture_source = None

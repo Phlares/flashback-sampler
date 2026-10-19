@@ -34,12 +34,19 @@ def _manifest(scratch_dir, checkout_id) -> Manifest:
     return m
 
 
-def _mgr(scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, **kw):
+def _ring(seconds=2.0, rate=1000, channels=1, frames=1500, start=0):
     buf = NativeAudioCircularBuffer(
         duration_seconds=seconds, sample_rate=rate, channels=channels
     )
     if frames:
-        buf.write(ramp_block(0, frames, channels=channels))
+        buf.write(ramp_block(start, frames, channels=channels))
+    return buf
+
+
+def _mgr(
+    scratch, tmp_path, seconds=2.0, rate=1000, channels=1, frames=1500, buf=None, **kw
+):
+    buf = buf or _ring(seconds, rate, channels, frames)
     return CheckoutManager(
         buffer=buf, scratch=scratch, scratch_dir=tmp_path, slot_name="Main", **kw
     )
@@ -395,11 +402,37 @@ def test_discard_cleans_up_manifest_and_wav(scratch, tmp_path):
 
 
 def test_flushing_buffer_does_not_invalidate_existing_checkouts(scratch, tmp_path):
-    mgr = _mgr(scratch, tmp_path)
+    buf = _ring()
+    mgr = _mgr(scratch, tmp_path, buf=buf)
     co = mgr.create(duration_s=0.5)
-    mgr._buffer.flush()  # noqa: SLF001
+    buf.flush()
     audio = _audio(mgr, co)
     assert audio[0, 0] == pytest.approx(1000.0)
+
+
+def test_set_max_active_caps_creates(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    mgr.set_max_active(1)
+    mgr.create(duration_s=0.1)
+    with pytest.raises(RuntimeError, match=r"Maximum active checkouts reached \(1\)"):
+        mgr.create(duration_s=0.1)
+
+
+def test_rebind_buffer_cuts_new_checkouts_from_the_new_ring(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    mgr.rebind_buffer(_ring(start=5000))
+    co = mgr.create(duration_s=0.5)
+    assert _audio(mgr, co)[0, 0] == pytest.approx(6000.0)
+
+
+def test_pinned_id_reports_the_pin(scratch, tmp_path):
+    mgr = _mgr(scratch, tmp_path)
+    co = mgr.create(duration_s=0.1)
+    assert mgr.pinned_id is None
+    mgr.pin(co.id)
+    assert mgr.pinned_id == co.id
+    mgr.pin(None)
+    assert mgr.pinned_id is None
 
 
 def test_pin_and_peak_bins_and_resident_bytes(scratch, tmp_path):
