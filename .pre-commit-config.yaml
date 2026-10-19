@@ -17,3 +17,7 @@ repos:
         entry: zig fmt
         language: system
         files: ^core/.*\.zig$
+  - repo: https://github.com/Phlares/workflows
+    rev: da54b249f7f172a4d686fd911dc2f92d48cff63d  # frozen: v1.5.0
+    hooks:
+      - id: suppressions
