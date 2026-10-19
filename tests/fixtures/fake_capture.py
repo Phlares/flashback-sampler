@@ -122,3 +122,36 @@ class FakeCaptureSourceNoThread:
 
     def bump_xrun(self) -> None:
         self._xruns += 1
+
+
+class RaisingCaptureSource:
+    """Every method named in `fail` raises `RuntimeError(<name>)`.
+    Reports running from construction, so every stop path is taken."""
+
+    sample_rate = 48_000
+    channels = 2
+
+    def __init__(self, fail=("start", "stop", "last_error")):
+        self.fail = set(fail)
+        self.calls: list[str] = []
+
+    def _call(self, name: str) -> None:
+        self.calls.append(name)
+        if name in self.fail:
+            raise RuntimeError(name)
+
+    def start(self) -> None:
+        self._call("start")
+
+    def stop(self) -> None:
+        self._call("stop")
+
+    def is_running(self) -> bool:
+        return True
+
+    def xrun_count(self) -> int:
+        return 0
+
+    def last_error(self) -> str | None:
+        self._call("last_error")
+        return None

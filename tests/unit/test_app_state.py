@@ -7,6 +7,8 @@ that owns the buffer, checkout manager, and scrub player.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -15,6 +17,7 @@ from flashback_sampler.core.checkout import CheckoutManager
 from flashback_sampler.core.native import NativeAudioCircularBuffer
 from flashback_sampler.core.quality_presets import QualityPreset, preset_by_name
 from flashback_sampler.core.scrub_player import NativeScrubPlayer
+from tests.fixtures.fake_capture import FakeCaptureSourceNoThread, RaisingCaptureSource
 
 
 def _preset(name: str) -> QualityPreset:
@@ -1206,3 +1209,100 @@ def test_remove_slot_discards_its_checkouts_and_files(tmp_path):
     st.remove_slot(1)
     assert not co.path.exists() and not (tmp_path / f"{co.id}.json").exists()
     st.shutdown()
+
+
+# ── Teardown errors are logged, never raised (best_effort) ──────────────
+
+
+def _errors(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def _raise(name):
+    def fail():
+        raise RuntimeError(name)
+
+    return fail
+
+
+def test_remove_slot_logs_failing_teardown_and_still_removes(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    slot = st.add_slot(_preset("SCRATCH"))
+    slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    co = slot.checkout_manager
+    monkeypatch.setattr(slot.buffer, "close", _raise("close"))
+
+    st.remove_slot(1)
+
+    assert len(st.slots) == 1
+    assert co.list() == []
+    assert len(_errors(caplog)) == 2
+
+
+def test_start_rolling_returns_the_first_start_error(monkeypatch):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.active_slot.armed = True
+    monkeypatch.setattr(
+        st, "build_capture_for_slot", lambda slot: RaisingCaptureSource(fail=("start",))
+    )
+
+    started, err = st.start_rolling()
+
+    assert started == 0
+    assert isinstance(err, RuntimeError) and err.args == ("start",)
+    assert st.rolling is True
+
+
+def test_stop_rolling_counts_only_the_slots_that_stopped(caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.active_slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    other = st.add_slot(_preset("SCRATCH"))
+    src = FakeCaptureSourceNoThread(other.buffer)
+    other.bind_capture(src)
+    other.start_capture()
+    st.rolling = True
+
+    assert st.stop_rolling() == 1
+    assert src.is_running() is False
+    assert st.rolling is False
+    assert len(_errors(caplog)) == 1
+
+
+def test_rebuild_buffer_logs_failing_teardown_and_still_rebuilds(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    st.active_slot.bind_capture(RaisingCaptureSource(fail=("stop",)))
+    monkeypatch.setattr(st.buffer, "close", _raise("close"))
+
+    st.rebuild_buffer(2.0)
+
+    assert st.buffer.duration == 2.0
+    assert st.active_slot.capture_source is None
+    assert len(_errors(caplog)) == 2
+
+
+def test_shutdown_runs_every_step_when_each_one_raises(monkeypatch, caplog):
+    st = AppState(buffer_seconds=1.0, sample_rate=1000, channels=1)
+    src = RaisingCaptureSource(fail=("stop",))
+    st.active_slot.bind_capture(src)
+    called: list[str] = []
+
+    def failing(name):
+        def fail():
+            called.append(name)
+            raise RuntimeError(name)
+
+        return fail
+
+    mgr, scratch, player = st.checkout_manager, st.scratch, st.scrub_player
+    real = (mgr.close, scratch.close, player.close)
+    monkeypatch.setattr(mgr, "close", failing("checkouts"))
+    monkeypatch.setattr(scratch, "close", failing("scratch"))
+    monkeypatch.setattr(player, "close", failing("player"))
+
+    st.shutdown()
+
+    assert src.calls == ["stop"]
+    assert called == ["checkouts", "scratch", "player"]
+    assert len(_errors(caplog)) == 4
+    for close in real:
+        close()
