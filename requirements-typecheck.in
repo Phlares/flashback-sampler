@@ -1,3 +1,0 @@
-# The pyright pin for the typecheck job in CI.
-# Lock: the uv command in the header of requirements-typecheck.txt.
-pyright

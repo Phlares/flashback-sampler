@@ -15,9 +15,8 @@ updates:
       actions-security:
         applies-to: security-updates
         patterns: ["*"]
-  # requirements*.in compile to hash-locked requirements*.txt (uv pip
-  # compile). lockfile-only: Dependabot moves the locks, not the .in files
-  # or pyproject.toml.
+  # uv.lock holds every Python pin with hashes. lockfile-only: Dependabot
+  # moves uv.lock, not the ranges in pyproject.toml.
   - package-ecosystem: uv
     directory: /
     target-branch: dev
