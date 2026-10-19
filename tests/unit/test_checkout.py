@@ -5,6 +5,7 @@ the scratch file back through the Zig reader."""
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 
@@ -350,15 +351,17 @@ def test_save_validation(scratch, tmp_path):
     mgr = _mgr(scratch, tmp_path)
     co = mgr.create(duration_s=0.1)
     with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.flac", fmt="FLAC")  # pyright: ignore[reportArgumentType]  # invalid on purpose
-    with pytest.raises(ValueError):
-        mgr.save(co.id, tmp_path / "x.wav", subtype="PCM_8")  # pyright: ignore[reportArgumentType]  # invalid on purpose
+        mgr.export_range(co.id, tmp_path / "x.wav", 0, 10, subtype="PCM_8")
     with pytest.raises(KeyError):
         mgr.save("nope", tmp_path / "x.wav")
     with pytest.raises(KeyError):
         mgr.mark_saved("nope")
     with pytest.raises(KeyError):
         mgr.discard("nope")
+
+
+def test_save_has_no_format_parameter():
+    assert "fmt" not in inspect.signature(CheckoutManager.save).parameters
 
 
 def test_mark_saved_sets_state(scratch, tmp_path):

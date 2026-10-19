@@ -40,7 +40,6 @@ from flashback_sampler.core.manifest import (
 from flashback_sampler.core.native import NativeAudioCircularBuffer, NativeScratch
 
 CheckoutState = Literal["pending", "ready", "saved", "discarded"]
-CheckoutFormat = Literal["WAV"]
 CheckoutSubtype = Literal["FLOAT", "PCM_24", "PCM_16"]
 
 # FLOAT keeps the float32 scratch bit-perfect on disk.
@@ -159,8 +158,6 @@ class CheckoutManager:
     regardless of whether the underlying failure was a ring race, a
     corrupt scratch file, or an unwritable disk.
     """
-
-    _VALID_FORMATS: tuple[str, ...] = ("WAV",)
 
     def __init__(
         self,
@@ -625,7 +622,6 @@ class CheckoutManager:
         self,
         checkout_id: str,
         target_path: Path | str,
-        fmt: CheckoutFormat = "WAV",
         trimmed: bool = True,
         subtype: CheckoutSubtype | None = None,
         mark_saved: bool = True,
@@ -634,11 +630,6 @@ class CheckoutManager:
         checkout the file came from: the slice a trimmed save mints, or
         the clip itself. A minted slice is already `saved` and the clip
         stays as it was; otherwise `mark_saved` flips the clip."""
-        fmt = fmt.upper()  # type: ignore[assignment]
-        if fmt not in self._VALID_FORMATS:
-            raise ValueError(
-                f"Unsupported format {fmt!r}; must be one of {self._VALID_FORMATS}"
-            )
         co = self.get(checkout_id)
         start, n = co.trim_range() if trimmed else (0, co.n_frames)
         minted = self.mint_trim(checkout_id) if trimmed else None
