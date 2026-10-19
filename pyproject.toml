@@ -25,6 +25,11 @@ release = [
     "pyinstaller>=6.0",
 ]
 
+# CI installs one group per job from uv.lock (uv sync --locked).
+[dependency-groups]
+lint = ["prek"]
+typecheck = ["pyright"]
+
 [tool.setuptools.packages.find]
 include = ["flashback_sampler*"]
 exclude = ["tests*"]

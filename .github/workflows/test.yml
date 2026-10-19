@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   pytest:
-    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    uses: Phlares/workflows/.github/workflows/check.yml@9eebfcd611eaf14c740b760b0e14e8bf404426f4 # v1.7.0
     with:
       name: pytest
       runs-on: windows-latest
@@ -47,7 +47,7 @@ jobs:
         pytest tests/unit -m "not audio_hw and not perf"
 
   zig:
-    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    uses: Phlares/workflows/.github/workflows/check.yml@9eebfcd611eaf14c740b760b0e14e8bf404426f4 # v1.7.0
     with:
       name: zig
       zig-version: 0.16.0
@@ -57,27 +57,26 @@ jobs:
       run: zig build test
 
   lint:
-    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    uses: Phlares/workflows/.github/workflows/check.yml@9eebfcd611eaf14c740b760b0e14e8bf404426f4 # v1.7.0
     with:
       name: lint
       python-version: "3.12"
       zig-version: 0.16.0
+      uv-version: 0.13.1
       timeout-minutes: 5
       # Hook versions live in .pre-commit-config.yaml. prek is pinned by hash
-      # in requirements-lint.txt (compiled from requirements-lint.in); Dependabot
-      # moves both files.
-      install: pip install --require-hashes -r requirements-lint.txt
-      run: prek run --all-files --show-diff-on-failure
+      # in uv.lock (group lint); Dependabot moves it.
+      install: uv sync --locked --only-group lint
+      run: uv run --no-sync prek run --all-files --show-diff-on-failure
 
   typecheck:
-    uses: Phlares/workflows/.github/workflows/check.yml@d12ac6953ed5888a2bc2fcfcb63652ca915079b1 # v1.4.0
+    uses: Phlares/workflows/.github/workflows/check.yml@9eebfcd611eaf14c740b760b0e14e8bf404426f4 # v1.7.0
     with:
       name: typecheck
       python-version: "3.12"
+      uv-version: 0.13.1
       timeout-minutes: 5
-      # pyright is pinned by hash in requirements-typecheck.txt (compiled from
-      # requirements-typecheck.in); Dependabot moves both files.
-      install: |
-        pip install --require-hashes -r requirements-typecheck.txt
-        pip install -e ".[dev]"
-      run: pyright
+      # pyright is pinned by hash in uv.lock (group typecheck); Dependabot
+      # moves it. The dev extra gives pyright the test imports.
+      install: uv sync --locked --group typecheck --extra dev
+      run: uv run --no-sync pyright
