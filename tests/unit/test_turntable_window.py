@@ -268,7 +268,7 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     the developer's desktop during VSCode's auto-test-on-save runs,
     which is exactly what we don't want.
     """
-    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent
 
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
@@ -278,9 +278,8 @@ def test_right_click_chip_emits_context_menu_request(qapp):
     chip.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
         QEvent.Type.MouseButtonPress,
-        chip.rect().center().toPointF()
-        if hasattr(chip.rect().center(), "toPointF")
-        else QPoint(5, 5),
+        QPointF(chip.rect().center()),
+        QPointF(chip.rect().center()),
         Qt.MouseButton.RightButton,
         Qt.MouseButton.RightButton,
         Qt.KeyboardModifier.NoModifier,

@@ -52,7 +52,7 @@ def test_set_source_names_empty_uses_defaults(qapp):
 
 
 def test_source_indicator_right_click_emits_context_menu(qapp):
-    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent
 
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
@@ -62,7 +62,8 @@ def test_source_indicator_right_click_emits_context_menu(qapp):
     ind.contextMenuRequested.connect(lambda p: captured.append(p))
     ev = QMouseEvent(
         QEvent.Type.MouseButtonPress,
-        QPoint(5, 5),
+        QPointF(5, 5),
+        QPointF(5, 5),
         Qt.MouseButton.RightButton,
         Qt.MouseButton.RightButton,
         Qt.KeyboardModifier.NoModifier,
@@ -72,7 +73,7 @@ def test_source_indicator_right_click_emits_context_menu(qapp):
 
 
 def test_source_indicator_left_click_only_emits_clicked(qapp):
-    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent
 
     from flashback_sampler.app.widgets.nav_bar import SourceIndicator
@@ -84,7 +85,8 @@ def test_source_indicator_left_click_only_emits_clicked(qapp):
     ind.contextMenuRequested.connect(lambda p: ctx.append(p))
     ev = QMouseEvent(
         QEvent.Type.MouseButtonPress,
-        QPoint(5, 5),
+        QPointF(5, 5),
+        QPointF(5, 5),
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
