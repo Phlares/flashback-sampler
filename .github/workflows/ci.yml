@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   lint:
-    uses: Phlares/workflows/.github/workflows/check.yml@b44ebcecb67110b645c0670e19611e77fbfc442b # v1.8.0
+    uses: Phlares/workflows/.github/workflows/check.yml@b980c7e820f2a22b596c63f4b00f412f42e5369a # v1.9.0
     with:
       name: lint
       python-version: "3.12"
@@ -32,7 +32,7 @@ jobs:
       run: uv run --no-sync prek run --all-files --hook-stage manual --show-diff-on-failure
 
   test-py:
-    uses: Phlares/workflows/.github/workflows/check.yml@b44ebcecb67110b645c0670e19611e77fbfc442b # v1.8.0
+    uses: Phlares/workflows/.github/workflows/check.yml@b980c7e820f2a22b596c63f4b00f412f42e5369a # v1.9.0
     with:
       name: pytest
       runs-on: windows-latest
@@ -53,7 +53,7 @@ jobs:
         uv run --no-sync pytest tests/unit -m "not audio_hw and not perf"
 
   typecheck:
-    uses: Phlares/workflows/.github/workflows/check.yml@b44ebcecb67110b645c0670e19611e77fbfc442b # v1.8.0
+    uses: Phlares/workflows/.github/workflows/check.yml@b980c7e820f2a22b596c63f4b00f412f42e5369a # v1.9.0
     with:
       name: typecheck
       python-version: "3.12"
@@ -64,7 +64,7 @@ jobs:
       run: uv run --no-sync pyright
 
   zig:
-    uses: Phlares/workflows/.github/workflows/check.yml@b44ebcecb67110b645c0670e19611e77fbfc442b # v1.8.0
+    uses: Phlares/workflows/.github/workflows/check.yml@b980c7e820f2a22b596c63f4b00f412f42e5369a # v1.9.0
     with:
       name: zig
       zig-version: 0.16.0
@@ -72,3 +72,14 @@ jobs:
       timeout-minutes: 3
       # zig fmt runs in the lint job.
       run: zig build test
+
+  # Runtime dependencies only: what the project ships.
+  licenses:
+    uses: Phlares/workflows/.github/workflows/check.yml@b980c7e820f2a22b596c63f4b00f412f42e5369a # v1.9.0
+    with:
+      name: licenses
+      python-version: "3.12"
+      uv-version: 0.13.1
+      timeout-minutes: 5
+      install: uv sync --locked --no-dev
+      run: uv run --no-sync python .wf/.github/scripts/licenses.py
