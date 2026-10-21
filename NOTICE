@@ -1,0 +1,39 @@
+flashback-sampler
+Copyright (c) 2026 Phlares
+
+This project is licensed under the MIT License (see LICENSE).
+
+The Windows release zip includes the third-party work below. Each part
+keeps its own license. The license texts are in the licenses/ folder.
+
+Qt 6 (the Qt6*.dll files in _internal/PySide6)
+  Copyright (C) The Qt Company Ltd. and other contributors.
+  GNU Lesser General Public License v3.0: licenses/LGPL-3.0.txt, which
+  adds to licenses/GPL-3.0.txt.
+  The DLLs are unmodified and loaded at run time. You can replace them
+  with your own build of the same Qt version.
+  Source: https://download.qt.io/official_releases/qt/
+
+PySide6 and Shiboken6 (_internal/PySide6, _internal/shiboken6)
+  Copyright (C) The Qt Company Ltd.
+  GNU Lesser General Public License v3.0 (same texts as Qt).
+  Source: https://download.qt.io/official_releases/QtForPython/
+  The Qt and PySide6 versions match; the version is in the file
+  properties of _internal/PySide6/Qt6Core.dll.
+
+numpy (_internal/numpy)
+  Copyright (c) 2005-2025, NumPy Developers.
+  BSD 3-Clause License. Full texts, including the bundled parts:
+  _internal/numpy-*.dist-info/licenses/.
+
+platformdirs (inside the program archive)
+  Copyright (c) 2010-202x The platformdirs developers.
+  MIT License: _internal/platformdirs-*.dist-info/licenses/.
+
+Python (python3*.dll and the standard library in _internal)
+  Copyright (c) 2001 Python Software Foundation.
+  PSF License Agreement (PSF-2.0): licenses/Python-PSF-2.0.txt.
+
+Monaspace fonts (_internal/flashback_sampler/app/fonts)
+  Copyright (c) 2023, GitHub.
+  SIL Open Font License 1.1: licenses/OFL-1.1.txt.

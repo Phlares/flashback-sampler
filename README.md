@@ -1,6 +1,6 @@
 # flashback-sampler
 
-[![test](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/test.yml)
+[![CI](https://github.com/Phlares/flashback-sampler/actions/workflows/ci.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/ci.yml)
 [![release](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml/badge.svg)](https://github.com/Phlares/flashback-sampler/actions/workflows/release.yml)
 
 A desktop applet that keeps the last several minutes of system audio in a ring buffer. Lift a piece of it off the ring like a record off a turntable, preview it, trim it, save it, or drag it straight into a DAW. The ring keeps rolling while you do.
@@ -110,11 +110,11 @@ python tools/measure_reload.py 192000 900
 
 Unit tests run headless. Tests marked `perf` are timing sensitive and skipped on CI; they fail on a loaded machine.
 
-Feature branches target `dev`. One PR promotes `dev` to `main` per batch. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Branches target `main`. Releases come from `v*` tags. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## CI
 
-`test.yml` runs pytest on Windows and the Zig tests on Ubuntu. `release.yml` is manual: it builds a Windows standalone with PyInstaller and publishes a GitHub Release from a `vX.Y.Z` tag.
+`ci.yml` comes from the Phlares/workflows copier template. It runs the hooks (`lint`), pyright (`typecheck`), pytest on Windows (`test-py`) and the Zig tests on Ubuntu (`zig`). `release.yml` runs on each `vX.Y.Z` tag: it builds a Windows standalone with PyInstaller and publishes a GitHub Release.
 
 ## License
 

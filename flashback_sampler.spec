@@ -21,7 +21,15 @@ Notes:
       not a pip package. Destination is flashback_sampler/core -- the
       first path native.py's _candidates() checks, so the bundled app
       finds it exactly like a dev checkout finds its zig-out build.
+    - LICENSE, NOTICE and licenses/ go to the bundle root, next to the
+      exe. The LGPL lets us ship the Qt DLLs only with its texts.
 """
+
+import os
+import shutil
+import sys
+
+from PyInstaller.utils.hooks import copy_metadata
 
 datas = []
 binaries = []
@@ -36,6 +44,9 @@ datas.append(("flashback_sampler/app/fonts", "flashback_sampler/app/fonts"))
 # The Ableton clip template alc.py reads at drag time. A data file, not
 # a module, so PyInstaller does not follow an import to it.
 datas.append(("flashback_sampler/core/alc_template.xml", "flashback_sampler/core"))
+
+# platformdirs is MIT: its license text must travel with the copy.
+datas += copy_metadata("platformdirs")
 
 
 a = Analysis(
@@ -80,4 +91,17 @@ coll = COLLECT(
     upx=False,
     upx_exclude=[],
     name="flashback-sampler",
+)
+
+bundle = os.path.join(DISTPATH, "flashback-sampler")
+shutil.copy("LICENSE", bundle)
+shutil.copy("NOTICE", bundle)
+shutil.copytree("licenses", os.path.join(bundle, "licenses"), dirs_exist_ok=True)
+shutil.copy(
+    "flashback_sampler/app/fonts/OFL.txt",
+    os.path.join(bundle, "licenses", "OFL-1.1.txt"),
+)
+shutil.copy(
+    os.path.join(sys.base_prefix, "LICENSE.txt"),
+    os.path.join(bundle, "licenses", "Python-PSF-2.0.txt"),
 )

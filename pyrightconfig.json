@@ -1,0 +1,8 @@
+{
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Windows",
+  "enableTypeIgnoreComments": false,
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "exclude": ["build", "dist", "_ToRemove", "**/node_modules", "**/__pycache__", "**/.*"]
+}

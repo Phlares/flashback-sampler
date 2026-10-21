@@ -1,0 +1,9 @@
+# Changes here will be overwritten by Copier; do not edit by hand.
+_commit: v1.8.0
+_src_path: gh:Phlares/workflows
+default_branch: main
+languages:
+- python
+python_version: '3.12'
+target_os: windows-latest
+tier: product

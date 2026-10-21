@@ -1,0 +1,6 @@
+# product tier. RUF100 flags unused noqa comments; PGH004 flags blanket
+# noqa. Keep ruff settings here: ruff reads ruff.toml before [tool.ruff].
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF100", "PGH004"]
+# Line length belongs to the formatter.
+ignore = ["E501"]
