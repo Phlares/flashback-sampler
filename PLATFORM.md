@@ -26,8 +26,8 @@ touching the audio core or the UI. This is the porting checklist.
 (`flashback_core.dll` / `.dylib` / `.so`) and loaded via ctypes
 (`flashback_sampler/core/native.py`). Unlike loopback capture or global
 hotkeys, this code needs no per-OS backend: `zig build -Doptimize=ReleaseSafe`
-cross-compiles the same source to all three targets (see `.github/workflows/
-test.yml`'s cross-compile health check). The app requires the native
+cross-compiles the same source to all three targets (CI runs the Zig tests
+on Ubuntu, the `zig` job in `.github/workflows/ci.yml`). The app requires the native
 library; there is no Python fallback (phase 2 PR f deleted it). Without
 it `NativeAudioCircularBuffer` raises `RuntimeError` at construction and
 the test session exits with the build instruction (`tests/conftest.py`).
