@@ -1,8 +1,12 @@
+# Per ecosystem per month: one PR for minor and patch updates, one for major
+# updates, and one for security updates. Strict required checks rerun CI on
+# every open PR after each merge, so fewer PRs means fewer runs. A major group
+# can bundle a breaking change: fix it in the group PR, or add an ignore entry
+# for that version.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
-    target-branch: dev
     schedule:
       interval: monthly
     groups:
@@ -15,12 +19,11 @@ updates:
       actions-security:
         applies-to: security-updates
         patterns: ["*"]
-  # requirements*.in compile to hash-locked requirements*.txt (uv pip
-  # compile). lockfile-only: Dependabot moves the locks, not the .in files
-  # or pyproject.toml.
+
+  # uv.lock holds every Python pin with hashes. lockfile-only: Dependabot
+  # moves uv.lock, not the ranges in pyproject.toml.
   - package-ecosystem: uv
     directory: /
-    target-branch: dev
     schedule:
       interval: monthly
     versioning-strategy: lockfile-only
@@ -34,9 +37,10 @@ updates:
       python-security:
         applies-to: security-updates
         patterns: ["*"]
+
+  # Hook revs are commit hashes with a `# frozen:` tag comment.
   - package-ecosystem: pre-commit
     directory: /
-    target-branch: dev
     schedule:
       interval: monthly
     groups:

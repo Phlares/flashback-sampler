@@ -25,6 +25,11 @@ release = [
     "pyinstaller>=6.0",
 ]
 
+# CI installs one group per job from uv.lock (uv sync --locked).
+[dependency-groups]
+lint = ["prek"]
+typecheck = ["pyright"]
+
 [tool.setuptools.packages.find]
 include = ["flashback_sampler*"]
 exclude = ["tests*"]
@@ -71,17 +76,3 @@ directory = "htmlcov"
 
 [tool.coverage.xml]
 output = "coverage.xml"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "RUF100", "PGH004"]
-# Line length belongs to the formatter.
-ignore = ["E501"]
-
-[tool.pyright]
-pythonVersion = "3.10"
-pythonPlatform = "Windows"
-# Setting exclude replaces pyright's default list, so the defaults are repeated.
-exclude = ["build", "dist", "_ToRemove", "**/node_modules", "**/__pycache__", "**/.*"]
-# Only rule-scoped `# pyright: ignore[rule]` comments work, and a stale one fails.
-enableTypeIgnoreComments = false
-reportUnnecessaryTypeIgnoreComment = "error"

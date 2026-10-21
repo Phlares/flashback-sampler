@@ -4,13 +4,19 @@ flashback-sampler is a personal project. I work on it in my free time and I revi
 
 ## The one rule
 
-Understand the code you submit. If you cannot explain what a line does and why it is there, do not send it. This applies with or without AI tools. Plausible code that nobody understands is worse than no code.
+Understand the code you submit. If you cannot explain what a line does and why it is there, do not send it. This applies with or without AI tools; see the [AI policy](AI_POLICY.md). Plausible code that nobody understands is worse than no code.
 
-## Where things go
+## How to contribute right now
 
-- **Issues** are for work that is ready to do: a bug with a repro, or a feature we have agreed on. Open one when you have those.
-- **Discussions** are for everything before that: ideas, questions, "would you take a PR for X".
-- **Pull requests** address an existing issue. A PR with no issue behind it may sit until we have talked about it, or get closed.
+Issues are the way in.
+
+- **Bug:** use the bug form. It asks for the steps, the expected and actual result, and your setup.
+- **Idea:** use the idea form. Say what you cannot do today, not only the fix you have in mind.
+- **Security problem:** do not open an issue. Use "Report a vulnerability" on the Security tab. See [SECURITY.md](SECURITY.md).
+
+Pull requests are invite-only for now. When I accept an issue (label `accepted`), I either fix it or invite you to. An `accepted` issue is ready to work on: the problem is understood and the approach is agreed.
+
+If an open issue already matches yours, add a 👍 reaction instead of a "+1" comment.
 
 ## Bug reports
 
@@ -23,21 +29,24 @@ State the problem in the first sentence. Then:
 
 Silence from a capture source is usually the source, not the app. Check that the app you are recording renders locally (Spotify Connect and casting deliver silence to loopback).
 
-## Pull requests
+## If I invite you to send a pull request
 
 - One issue per PR. Keep it small.
 - Add a failing test first, then make it pass. Every fix carries a test that fails without it.
+- Install the dev tools: `uv sync --extra dev --all-groups`, then `uv run prek install` for the commit hooks.
 - Run before you push:
 
 ```powershell
 zig build --build-file core/build.zig -Doptimize=ReleaseSafe
-zig fmt --check core/src/
 zig build --build-file core/build.zig test
-pytest tests/unit -q
+uv run pytest tests/unit -q
+uv run pyright
+uv run prek run --all-files --hook-stage manual
 ```
 
-- Feature branches target `dev`. `main` moves when a batch is ready.
+- Branches target `main`. Releases come from `v*` tags.
 - Commit messages: first line states the change. Body says why, not what.
+- Fill in the pull request template.
 
 ## The engine (`core/`)
 
@@ -49,6 +58,18 @@ pytest tests/unit -q
 
 Standing decisions live in [`docs/decisions/`](docs/decisions/). Read them before you propose a change to how things fit together.
 
+## Dependencies
+
+New dependencies need a license on this list: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Apache-2.0, PSF-2.0, Zlib, CC0-1.0, Unlicense. Anything else needs a decision record in `docs/decisions/` that pins the version and says why. PySide6 (LGPL-3.0) has one: [0012](docs/decisions/0012-pyside6-lgpl.md).
+
 ## Style
 
 Short sentences. One fact per sentence. Plain words. No sales tone. Code comments carry constraints, not narration.
+
+## License of contributions
+
+By contributing, you agree that your contribution is licensed under the MIT license of this project.
+
+## Conduct
+
+Everyone in this project follows the [code of conduct](CODE_OF_CONDUCT.md).

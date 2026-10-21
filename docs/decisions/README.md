@@ -17,3 +17,4 @@ Design specs and plans that produced these decisions lived in the tree during th
 | [0009](0009-scratch-file-is-the-checkout.md) | The scratch file is the checkout; RAM is a cache sized by measurement |
 | [0010](0010-max-footprint.md) | Max footprint: 25 % of RAM by default, tunable, 0 = no cap |
 | [0011](0011-zig-native-ui.md) | The UI rebuild is Zig-native: SDL3, our own GL surface, DVUI, Rive |
+| [0012](0012-pyside6-lgpl.md) | PySide6 (LGPL-3.0) is an allowed exception to the license list |
