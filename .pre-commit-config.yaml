@@ -36,6 +36,6 @@ repos:
         files: ^core/.*\.zig$
   # Suppression comments stay at the .suppressions baseline (0 when absent).
   - repo: https://github.com/Phlares/workflows
-    rev: b44ebcecb67110b645c0670e19611e77fbfc442b  # frozen: v1.8.0
+    rev: b980c7e820f2a22b596c63f4b00f412f42e5369a  # frozen: v1.9.0
     hooks:
       - id: suppressions

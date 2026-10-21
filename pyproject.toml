@@ -76,3 +76,13 @@ directory = "htmlcov"
 
 [tool.coverage.xml]
 output = "coverage.xml"
+
+# Read by the CI licenses job. Each entry pins one version; a bump must move
+# the pin. Decision 0012; ends when the Zig UI removes Qt (#118).
+[tool.licenses.exceptions]
+"PySide6==6.12.0" = "LGPL-3.0, decision 0012"
+"PySide6_Addons==6.12.0" = "LGPL-3.0, decision 0012"
+"PySide6_Essentials==6.12.0" = "LGPL-3.0, decision 0012"
+"PySide6_Pdf==6.12.0.140" = "LGPL-3.0, decision 0012"
+"PySide6_WebEngine==6.12.0.140" = "LGPL-3.0, decision 0012"
+"shiboken6==6.12.0" = "LGPL-3.0, decision 0012"

@@ -60,7 +60,7 @@ Standing decisions live in [`docs/decisions/`](docs/decisions/). Read them befor
 
 ## Dependencies
 
-New dependencies need a license on this list: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Apache-2.0, PSF-2.0, Zlib, CC0-1.0, Unlicense. Anything else needs a decision record in `docs/decisions/` that pins the version and says why. PySide6 (LGPL-3.0) has one: [0012](docs/decisions/0012-pyside6-lgpl.md).
+New dependencies need a license on this list: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Apache-2.0, PSF-2.0, Zlib, CC0-1.0, Unlicense. Anything else needs a pinned `name==version` entry in `[tool.licenses.exceptions]` in `pyproject.toml` and a decision record in `docs/decisions/` that says why. The CI `licenses` job enforces this. PySide6 (LGPL-3.0) has one: [0012](docs/decisions/0012-pyside6-lgpl.md).
 
 ## Style
 
