@@ -92,6 +92,13 @@ jobs:
             Write-Error "Expected dist/flashback-sampler/flashback-sampler.exe was not produced"
             exit 1
           }
+          # The LGPL lets us ship Qt only with these texts beside it.
+          $missing = @("LICENSE", "NOTICE", "licenses/LGPL-3.0.txt", "licenses/GPL-3.0.txt", "licenses/OFL-1.1.txt", "licenses/Python-PSF-2.0.txt") |
+            Where-Object { -not (Test-Path "dist/flashback-sampler/$_") }
+          if ($missing) {
+            Write-Error "License files missing from the bundle: $($missing -join ', ')"
+            exit 1
+          }
           Get-ChildItem dist/flashback-sampler -Recurse | Measure-Object -Property Length -Sum |
             ForEach-Object { "Bundle size: {0:N1} MB" -f ($_.Sum / 1MB) }
 
