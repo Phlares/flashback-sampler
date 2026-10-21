@@ -1,4 +1,4 @@
-# Deletion-candidate holding area (see global CLAUDE.md sequester policy)
+# Deletion-candidate holding area
 /_ToRemove/
 
 # Python
@@ -46,7 +46,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Claude / AI tooling (per dev/ policy)
+# AI tool config
 .claude/
 .serena/
 .mcp.json
