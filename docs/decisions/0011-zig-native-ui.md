@@ -1,6 +1,6 @@
 # 0011. The UI rebuild is Zig-native: SDL3, our own GL surface, DVUI, Rive
 
-Date: 2026-08-14. Status: accepted, not started. Tracked in issue #16.
+Date: 2026-08-14. Status: superseded by [0013](0013-ui-on-wio-dvui.md). Tracked in issue #16.
 
 ## Context
 

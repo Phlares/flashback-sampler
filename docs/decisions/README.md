@@ -16,5 +16,6 @@ Design specs and plans that produced these decisions lived in the tree during th
 | [0008](0008-drag-out.md) | Drag-out renders at drag start into an export pool; slices carry handles and markers |
 | [0009](0009-scratch-file-is-the-checkout.md) | The scratch file is the checkout; RAM is a cache sized by measurement |
 | [0010](0010-max-footprint.md) | Max footprint: 25 % of RAM by default, tunable, 0 = no cap |
-| [0011](0011-zig-native-ui.md) | The UI rebuild is Zig-native: SDL3, our own GL surface, DVUI, Rive |
+| [0011](0011-zig-native-ui.md) | Superseded by 0013. The UI rebuild is Zig-native: SDL3, our own GL surface, DVUI, Rive |
 | [0012](0012-pyside6-lgpl.md) | PySide6 (LGPL-3.0) is an allowed exception to the license list |
+| [0013](0013-ui-on-wio-dvui.md) | The UI is Zig on wio, DVUI and OpenGL; Python goes entirely (supersedes 0011) |
